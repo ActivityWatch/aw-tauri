@@ -1,3 +1,53 @@
+aw-tauri
+========
+
+Experimenting with implementing ActivityWatch using Tauri.
+
+Holds great promise as a way to build a cross-platform version of ActivityWatch, as an alternative to aw-qt.
+
+Benefits:
+
+ - Builds cross-platform nicely
+ - Contains a webview with an easy interface to Rust code
+ - Trayicon possible
+ - Mobile might be possible
+
+There is almost no work done, yet.
+
+# Usage
+
+To run:
+
+```sh
+npm install
+npm run tauri dev
+```
+
+# Repo stucture
+
+ - The frontend is in the root folder (NOTE: not yet the actual aw-webui code)
+ - All rust code is in `src-tauri/` (will likely be moved)
+
+# Roadmap
+
+ - [ ] Get basic module manager working
+     - Basic GUI-less aw-qt replacement
+ - [ ] Run ActivityWatch web app within WebView (wry)
+ - [ ] Tray icon? (https://github.com/tauri-apps/tray-icon)
+ - [ ] Mobile? (https://github.com/tauri-apps/tauri-mobile)
+
+---
+
+This project was initialized with:
+
+```sh
+sh <(curl https://create.tauri.app/sh)
+```
+
+Below is the original README it created:
+
+---
+
 # Tauri + Vue 3 + TypeScript
 
 This template should help get you started developing with Vue 3 and TypeScript in Vite. The template uses Vue 3 `<script setup>` SFCs, check out the [script setup docs](https://v3.vuejs.org/api/sfc-script-setup.html#sfc-script-setup) to learn more.
