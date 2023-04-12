@@ -3,9 +3,18 @@ aw-tauri
 
 Experimenting with implementing ActivityWatch using [Tauri](https://tauri.app/).
 
-Holds great promise as a way to build a cross-platform version of ActivityWatch, as an alternative to aw-qt.
+Holds great promise as a much simpler way to build a cross-platform version of ActivityWatch.
 
-Benefits:
+Features:
+
+ - Tray icon
+ - Module manager for watchers
+ - WebView serving the web UI
+ - Uses aw-server-rust by default
+ - Replaces aw-qt
+ - Builds like a dream, minimal custom build & release config
+
+Benefits of Tauri:
 
  - Builds cross-platform nicely (see [their docs](https://tauri.app/v1/guides/building/cross-platform))
    - Generates deb and AppImage with a simple `npx tauri build`
