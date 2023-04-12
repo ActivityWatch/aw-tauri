@@ -16,8 +16,8 @@ tauri-build = { version = "1.2", features = [] }
 tauri = { version = "1.2", features = ["shell-open", "system-tray"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-aw-server = { path = "../../aw-server" }
-aw-datastore = { path = "../../aw-datastore" }
+aw-server = { git = "https://github.com/ActivityWatch/aw-server-rust.git", branch = "dev/tauri" }
+aw-datastore = { git = "https://github.com/ActivityWatch/aw-server-rust.git", branch = "dev/tauri" }
 
 [features]
 # this feature is used for production builds or when `devPath` points to the filesystem
