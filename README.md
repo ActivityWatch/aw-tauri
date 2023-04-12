@@ -35,10 +35,13 @@ npm run tauri dev
 
 # Roadmap
 
+ - [x] Run aw-server-rust as part of main executable
+ - [x] Run ActivityWatch web app within WebView (wry)
  - [ ] Get basic module manager working
-     - Basic GUI-less aw-qt replacement
+     - [ ] Start watchers
  - [ ] Tray icon
- - [ ] Run ActivityWatch web app within WebView (wry)
+     - [x] Basic version (open, exit)
+     - [ ] Menu for module manager
 
 ---
 

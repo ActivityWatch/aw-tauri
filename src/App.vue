@@ -8,6 +8,8 @@ import Greet from "./components/Greet.vue";
   <div class="container">
     <h1>Welcome to Tauri!</h1>
 
+    <a href="http://localhost:5699">Open the ActivityWatch UI</a>
+
     <div class="row">
       <a href="https://vitejs.dev" target="_blank">
         <img src="/vite.svg" class="logo vite" alt="Vite logo" />
