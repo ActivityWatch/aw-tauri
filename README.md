@@ -1,16 +1,21 @@
 aw-tauri
 ========
 
-Experimenting with implementing ActivityWatch using Tauri.
+Experimenting with implementing ActivityWatch using [Tauri](https://tauri.app/).
 
 Holds great promise as a way to build a cross-platform version of ActivityWatch, as an alternative to aw-qt.
 
 Benefits:
 
- - Builds cross-platform nicely
+ - Builds cross-platform nicely (see [their docs](https://tauri.app/v1/guides/building/cross-platform))
+   - Generates deb and AppImage with a simple `npx tauri build`
+   - Uses Gtk on Linux, and [tao](https://github.com/tauri-apps/tao) on Windows and macOS
+   - No more messy PyInstaller for the main entrypoint (aw-qt)
+   - Good [docs for code-signing](https://tauri.app/v1/guides/distribution/sign-windows) on all platforms
+   - Includes an [updater](https://tauri.app/v1/guides/distribution/updater) for `MSI`, `.AppImage`, `.app` bundle.
  - Contains a webview with an easy interface to Rust code
- - Trayicon possible
- - Mobile might be possible
+ - [Trayicon support](https://tauri.app/v1/guides/features/system-tray/)
+ - Mobile support is [WIP](https://tauri.app/blog/2022/12/09/tauri-mobile-alpha/), and will support iOS.
 
 There is almost no work done, yet.
 
@@ -32,9 +37,8 @@ npm run tauri dev
 
  - [ ] Get basic module manager working
      - Basic GUI-less aw-qt replacement
+ - [ ] Tray icon
  - [ ] Run ActivityWatch web app within WebView (wry)
- - [ ] Tray icon? (https://github.com/tauri-apps/tray-icon)
- - [ ] Mobile? (https://github.com/tauri-apps/tauri-mobile)
 
 ---
 
