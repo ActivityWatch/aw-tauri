@@ -17,7 +17,6 @@ Benefits:
  - [Trayicon support](https://tauri.app/v1/guides/features/system-tray/)
  - Mobile support is [WIP](https://tauri.app/blog/2022/12/09/tauri-mobile-alpha/), and will support iOS.
 
-There is almost no work done, yet.
 
 # Usage
 
