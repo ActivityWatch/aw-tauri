@@ -9,7 +9,8 @@ use tauri::SystemTray;
 use tauri::{AppHandle, SystemTrayEvent};
 use tauri::{CustomMenuItem, SystemTrayMenu, SystemTrayMenuItem};
 
-use aw_datastore::Datastore;
+mod manager;
+
 use aw_server::endpoints::build_rocket;
 
 // Learn more about Tauri commands at https://tauri.app/v1/guides/features/command
@@ -30,9 +31,10 @@ fn main() {
         .to_string();
 
     let device_id = aw_server::device_id::get_device_id();
+    let _manager_tx = manager::start_manager();
     let tray = create_tray();
     tauri::Builder::default()
-        .setup(|app| {
+        .setup(|_app| {
             let mut asset_path: Option<PathBuf> = None;
             for path in &[
                 aw_server::dirs::get_asset_path(),

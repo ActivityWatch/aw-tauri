@@ -11,12 +11,9 @@ use std::collections::HashMap;
 use std::process::Command;
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::thread;
-use std::time::Duration;
-
-use aw_models::Event;
 
 #[derive(Debug)]
-enum WatcherMessage {
+pub enum WatcherMessage {
     Started {
         name: String,
     },
@@ -37,27 +34,35 @@ impl ManagerState {
         }
     }
     fn started_watcher(&mut self, name: &str) {
-        println!("{} started", name);
+        println!("started {name}");
         self.watchers_running.insert(name.to_string(), true);
     }
     fn stopped_watcher(&mut self, name: &str) {
-        println!("{} stopped", name);
+        println!("stopped {name}");
         self.watchers_running.insert(name.to_string(), false);
     }
     fn is_watcher_running(&self, name: &str) -> bool {
-        self.watchers_running.get(name).unwrap_or(&false)
+        *self.watchers_running.get(name).unwrap_or(&false)
     }
 }
 
-fn main() {
+pub fn start_manager() -> Sender<WatcherMessage> {
     let (tx, rx) = channel();
-    let state = ManagerState::new();
 
     // Start the watchers
-    start_watcher("aw-watcher-afk", tx.clone());
-    start_watcher("aw-watcher-window", tx.clone());
+    let autostart_watchers = ["aw-watcher-afk", "aw-watcher-window"];
+    for watcher in autostart_watchers.iter() {
+        start_watcher(watcher, tx.clone());
+    }
 
-    // Start the manager
+    thread::spawn(move || {
+        handle(rx);
+    });
+    tx
+}
+
+fn handle(rx: Receiver<WatcherMessage>) {
+    let mut state = ManagerState::new();
     loop {
         let msg = rx.recv().unwrap();
         match msg {
@@ -67,9 +72,9 @@ fn main() {
             WatcherMessage::Stopped { name, output } => {
                 state.stopped_watcher(&name);
                 if output.status.success() {
-                    println!("{} exited successfully", name);
+                    println!("{name} exited successfully");
                 } else {
-                    println!("{} exited with error", name);
+                    println!("{name} exited with error");
                     println!("stdout: {}", String::from_utf8_lossy(&output.stdout));
                     println!("stderr: {}", String::from_utf8_lossy(&output.stderr));
                 }
@@ -78,11 +83,10 @@ fn main() {
     }
 }
 
-fn start_watcher(name: &str, tx: Sender<WatcherMessage>) {
-    let tx = tx.clone();
+fn start_watcher(name: &'static str, tx: Sender<WatcherMessage>) {
     thread::spawn(move || {
         // Start the child process
-        let mut child = Command::new(name)
+        let child = Command::new([name, "--testing"].join(" "))
             .stdout(std::process::Stdio::piped())
             .spawn()
             .expect("failed to execute child");
@@ -99,7 +103,7 @@ fn start_watcher(name: &str, tx: Sender<WatcherMessage>) {
         // Send the process output to the manager
         tx.send(WatcherMessage::Stopped {
             name: name.to_string(),
-            output: output,
+            output,
         })
         .unwrap();
     });
