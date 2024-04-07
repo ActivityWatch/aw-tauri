@@ -35,12 +35,22 @@ fn main() {
     let tray = create_tray();
     tauri::Builder::default()
         .setup(|_app| {
+            // TODO: build the web assets as part of the build process, instead of assuming they are there
+            let asset_path = PathBuf::from("../../aw-webui/dist");
+            let asset_path_opt = if asset_path.exists() {
+                Some(asset_path)
+            } else {
+                println!("Asset path does not exist: {:?}", asset_path);
+                println!("Running without assets");
+                None
+            };
+
             let legacy_import = false;
             let server_state = aw_server::endpoints::ServerState {
                 // Even if legacy_import is set to true it is disabled on Android so
                 // it will not happen there
                 datastore: Mutex::new(aw_datastore::Datastore::new(db_path, legacy_import)),
-                asset_resolver: aw_server::endpoints::AssetResolver::new(None),
+                asset_resolver: aw_server::endpoints::AssetResolver::new(asset_path_opt),
                 device_id,
             };
 
