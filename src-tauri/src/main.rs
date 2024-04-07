@@ -9,9 +9,9 @@ use tauri::SystemTray;
 use tauri::{AppHandle, SystemTrayEvent};
 use tauri::{CustomMenuItem, SystemTrayMenu, SystemTrayMenuItem};
 
-mod manager;
-
 use aw_server::endpoints::build_rocket;
+
+mod manager;
 
 // Learn more about Tauri commands at https://tauri.app/v1/guides/features/command
 #[tauri::command]
@@ -35,27 +35,12 @@ fn main() {
     let tray = create_tray();
     tauri::Builder::default()
         .setup(|_app| {
-            let mut asset_path: Option<PathBuf> = None;
-            for path in &[
-                aw_server::dirs::get_asset_path(),
-                PathBuf::from("../../aw-webui/dist".to_string()),
-            ] {
-                if path.exists() {
-                    asset_path = Some(path.to_path_buf());
-                    break;
-                }
-            }
-
-            if asset_path.is_none() {
-                panic!("Asset path does not exist");
-            }
-
             let legacy_import = false;
             let server_state = aw_server::endpoints::ServerState {
                 // Even if legacy_import is set to true it is disabled on Android so
                 // it will not happen there
                 datastore: Mutex::new(aw_datastore::Datastore::new(db_path, legacy_import)),
-                asset_path: asset_path.unwrap(),
+                asset_resolver: aw_server::endpoints::AssetResolver::new(None),
                 device_id,
             };
 
