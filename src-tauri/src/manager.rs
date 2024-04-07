@@ -86,10 +86,17 @@ fn handle(rx: Receiver<WatcherMessage>) {
 fn start_watcher(name: &'static str, tx: Sender<WatcherMessage>) {
     thread::spawn(move || {
         // Start the child process
-        let child = Command::new([name, "--testing"].join(" "))
+        let path = name;
+        let args = ["--testing", "--port", "5699"];
+        let child = Command::new(path)
+            .args(args)
             .stdout(std::process::Stdio::piped())
-            .spawn()
-            .expect("failed to execute child");
+            .spawn();
+
+        if let Err(e) = child {
+            println!("Failed to start {name}: {e}");
+            return;
+        }
 
         // Send a message to the manager that the watcher has started
         tx.send(WatcherMessage::Started {
@@ -98,7 +105,10 @@ fn start_watcher(name: &'static str, tx: Sender<WatcherMessage>) {
         .unwrap();
 
         // Wait for the child to exit
-        let output = child.wait_with_output().expect("failed to wait on child");
+        let output = child
+            .unwrap()
+            .wait_with_output()
+            .expect("failed to wait on child");
 
         // Send the process output to the manager
         tx.send(WatcherMessage::Stopped {
