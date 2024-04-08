@@ -9,7 +9,10 @@
 /// If a watcher crashes, the manager will notify the user and ask if they want to restart it.
 use std::collections::HashMap;
 use std::process::Command;
-use std::sync::mpsc::{channel, Receiver, Sender};
+use std::sync::{
+    mpsc::{channel, Receiver, Sender},
+    Arc, Mutex,
+};
 use std::thread;
 
 #[derive(Debug)]
@@ -23,8 +26,9 @@ pub enum WatcherMessage {
     },
 }
 
-struct ManagerState {
-    watchers_running: HashMap<String, bool>,
+#[derive(Debug)]
+pub struct ManagerState {
+    pub watchers_running: HashMap<String, bool>,
 }
 
 impl ManagerState {
@@ -36,6 +40,7 @@ impl ManagerState {
     fn started_watcher(&mut self, name: &str) {
         println!("started {name}");
         self.watchers_running.insert(name.to_string(), true);
+        println!("{:?}", self.watchers_running);
     }
     fn stopped_watcher(&mut self, name: &str) {
         println!("stopped {name}");
@@ -46,8 +51,9 @@ impl ManagerState {
     }
 }
 
-pub fn start_manager() -> Sender<WatcherMessage> {
+pub fn start_manager() -> (Sender<WatcherMessage>, Arc<Mutex<ManagerState>>) {
     let (tx, rx) = channel();
+    let state = Arc::new(Mutex::new(ManagerState::new()));
 
     // Start the watchers
     let autostart_watchers = ["aw-watcher-afk", "aw-watcher-window"];
@@ -55,16 +61,17 @@ pub fn start_manager() -> Sender<WatcherMessage> {
         start_watcher(watcher, tx.clone());
     }
 
+    let state_clone = Arc::clone(&state);
     thread::spawn(move || {
-        handle(rx);
+        handle(rx, state_clone);
     });
-    tx
+    (tx, state)
 }
 
-fn handle(rx: Receiver<WatcherMessage>) {
-    let mut state = ManagerState::new();
+fn handle(rx: Receiver<WatcherMessage>, state: Arc<Mutex<ManagerState>>) {
     loop {
         let msg = rx.recv().unwrap();
+        let state = &mut state.lock().unwrap();
         match msg {
             WatcherMessage::Started { name } => {
                 state.started_watcher(&name);

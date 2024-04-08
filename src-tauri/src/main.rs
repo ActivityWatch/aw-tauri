@@ -2,12 +2,13 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::sync::Mutex;
 
 use tauri::Manager;
 use tauri::SystemTray;
 use tauri::{AppHandle, SystemTrayEvent};
-use tauri::{CustomMenuItem, SystemTrayMenu, SystemTrayMenuItem};
+use tauri::{CustomMenuItem, SystemTrayMenu, SystemTrayMenuItem, SystemTraySubmenu};
 
 use aw_server::endpoints::build_rocket;
 
@@ -31,8 +32,8 @@ fn main() {
         .to_string();
 
     let device_id = aw_server::device_id::get_device_id();
-    let _manager_tx = manager::start_manager();
-    let tray = create_tray();
+    let (manager_tx, manager_state) = manager::start_manager();
+    let tray = create_tray(&manager_state);
     tauri::Builder::default()
         .setup(|_app| {
             // TODO: build the web assets as part of the build process, instead of assuming they are there
@@ -58,7 +59,9 @@ fn main() {
             Ok(())
         })
         .system_tray(tray)
-        .on_system_tray_event(on_tray_event)
+        .on_system_tray_event(move |app, event| {
+            on_tray_event(app, event, || create_tray_menu(&manager_state))
+        })
         .on_window_event(|event| match event.event() {
             tauri::WindowEvent::CloseRequested { api, .. } => {
                 event.window().hide().unwrap();
@@ -77,19 +80,45 @@ fn main() {
         });
 }
 
-fn create_tray() -> SystemTray {
+fn create_tray_menu(manager_state: &Arc<Mutex<manager::ManagerState>>) -> SystemTrayMenu {
     // here `"quit".to_string()` defines the menu item id, and the second parameter is the menu item label.
-    let quit = CustomMenuItem::new("quit".to_string(), "Quit");
     let open = CustomMenuItem::new("open".to_string(), "Open");
-    let tray_menu = SystemTrayMenu::new()
-        .add_item(quit)
-        .add_native_item(SystemTrayMenuItem::Separator)
-        .add_item(open);
+    let quit = CustomMenuItem::new("quit".to_string(), "Quit");
 
+    // modules
+    let mut module_menu = SystemTrayMenu::new().add_item(CustomMenuItem::new("update", "Update"));
+
+    let state = manager_state.lock().unwrap();
+    println!("state: {:?}", state);
+    for (module, running) in state.watchers_running.iter() {
+        let label = format!(
+            "{} ({})",
+            module,
+            if *running { "Running" } else { "Stopped" }
+        );
+        module_menu = module_menu.add_item(CustomMenuItem::new(module.clone(), &label));
+    }
+
+    let module_submenu = SystemTraySubmenu::new("Modules", module_menu);
+
+    SystemTrayMenu::new()
+        .add_item(open)
+        .add_native_item(SystemTrayMenuItem::Separator)
+        .add_submenu(module_submenu)
+        .add_native_item(SystemTrayMenuItem::Separator)
+        .add_item(quit)
+}
+
+fn create_tray(manager_state: &Arc<Mutex<manager::ManagerState>>) -> SystemTray {
+    let tray_menu = create_tray_menu(manager_state);
     SystemTray::new().with_menu(tray_menu)
 }
 
-fn on_tray_event(app: &AppHandle, event: SystemTrayEvent) {
+fn on_tray_event(
+    app: &AppHandle,
+    event: SystemTrayEvent,
+    create_tray_menu: impl Fn() -> SystemTrayMenu,
+) {
     match event {
         SystemTrayEvent::DoubleClick {
             position: _,
@@ -109,6 +138,13 @@ fn on_tray_event(app: &AppHandle, event: SystemTrayEvent) {
                 println!("system tray received a open click");
                 let window = app.get_window("main").unwrap();
                 window.show().unwrap();
+            }
+            "update" => {
+                println!("system tray received a update click");
+                // TODO: get rid of this, update when tray opens or something
+                // should update the tray icon menu with the module statuses
+                let tray_handle = app.tray_handle();
+                tray_handle.set_menu(create_tray_menu()).unwrap();
             }
             _ => {}
         },
