@@ -43,6 +43,9 @@ npm run tauri dev
 
 # Roadmap
 
+Primary goal is feature-parity with aw-qt.
+Secondary goal is to add extras supported by Tauri (updater, autostart).
+
  - [x] Run aw-server-rust as part of main executable
  - [x] Run ActivityWatch web app within WebView (wry)
  - [x] Get basic module manager working
@@ -52,10 +55,14 @@ npm run tauri dev
      - [x] Menu for module manager
      - [ ] Responsive running/stopped state for watchers (no "update" button)
      - [ ] Start/stop via modules menu
+     - [ ] Detect bundled & system modules
  - [ ] Polish
      - [ ] Remove placeholder Vue app
      - [ ] Build aw-webui as part of build process
      - [ ] Error dialog when module crashes, restart logic
+         - https://beta.tauri.app/features/dialog/
+     - [ ] https://beta.tauri.app/features/autostart/
+     - [ ] https://beta.tauri.app/features/single-instance/
 
 ---
 
