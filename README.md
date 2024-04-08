@@ -45,11 +45,17 @@ npm run tauri dev
 
  - [x] Run aw-server-rust as part of main executable
  - [x] Run ActivityWatch web app within WebView (wry)
- - [ ] Get basic module manager working
-     - [ ] Start watchers
- - [ ] Tray icon
+ - [x] Get basic module manager working
+     - [x] Start watchers
+ - [x] Tray icon
      - [x] Basic version (open, exit)
-     - [ ] Menu for module manager
+     - [x] Menu for module manager
+     - [ ] Responsive running/stopped state for watchers (no "update" button)
+     - [ ] Start/stop via modules menu
+ - [ ] Polish
+     - [ ] Remove placeholder Vue app
+     - [ ] Build aw-webui as part of build process
+     - [ ] Error dialog when module crashes, restart logic
 
 ---
 
