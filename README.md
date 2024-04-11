@@ -58,6 +58,7 @@ Secondary goal is to add extras supported by Tauri (updater, autostart).
      - [ ] Detect bundled & system modules
  - [ ] Polish
      - [ ] Remove placeholder Vue app
+         - Or replace with new UI for module management? (a bit redundant)
      - [ ] Build aw-webui as part of build process
      - [ ] Error dialog when module crashes, restart logic
          - https://beta.tauri.app/features/dialog/
@@ -72,9 +73,8 @@ This project was initialized with:
 sh <(curl https://create.tauri.app/sh)
 ```
 
-Below is the original README it created:
-
----
+<details>
+<summary>Click to expand original README</summary>
 
 # Tauri + Vue 3 + TypeScript
 
@@ -92,3 +92,5 @@ Since TypeScript cannot handle type information for `.vue` imports, they are shi
 2. Reload the VS Code window by running `Developer: Reload Window` from the command palette.
 
 You can learn more about Take Over mode [here](https://github.com/johnsoncodehk/volar/discussions/471).
+
+</details>
