@@ -4,7 +4,7 @@ build:
 	else \
 		git submodule update --init --recursive; \
 	fi
-	
+	npm run tauri icon "./media/logo/logo.png"
 	npm run tauri build
 
 dev:
@@ -13,5 +13,5 @@ dev:
 	else \
 		git submodule update --init --recursive; \
 	fi
-
+	npm run tauri icon "./media/logo/logo.png"
 	npm run tauri dev
