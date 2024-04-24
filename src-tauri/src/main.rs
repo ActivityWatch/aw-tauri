@@ -36,8 +36,7 @@ fn main() {
     let tray = create_tray(&manager_state);
     tauri::Builder::default()
         .setup(|_app| {
-            // TODO: build the web assets as part of the build process, instead of assuming they are there
-            let asset_path = PathBuf::from("../../aw-webui/dist");
+            let asset_path = PathBuf::from("../aw-webui/dist");
             let asset_path_opt = if asset_path.exists() {
                 Some(asset_path)
             } else {
