@@ -38,11 +38,10 @@ fn main() {
         .setup(|_app| {
             let webui_var = std::env::var("AW_WEBUI_DIR");
             let webui_path = if let Ok(var_path) = &webui_var {
+                println!("Using webui path: {}", var_path);
                 std::path::Path::new(var_path)
             } else {
-                let path = std::path::Path::new("../aw-webui/dist");
-                println!("cargo:rustc-env=AW_WEBUI_DIR={}", path.display());
-                path
+                panic!("AW_WEBUI_DIR environment variable not set!\nTry running make");
             };
 
             let asset_path = PathBuf::from(&webui_path);
