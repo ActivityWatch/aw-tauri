@@ -36,7 +36,16 @@ fn main() {
     let tray = create_tray(&manager_state);
     tauri::Builder::default()
         .setup(|_app| {
-            let asset_path = PathBuf::from("../aw-webui/dist");
+            let webui_var = std::env::var("AW_WEBUI_DIR");
+            let webui_path = if let Ok(var_path) = &webui_var {
+                std::path::Path::new(var_path)
+            } else {
+                let path = std::path::Path::new("../aw-webui/dist");
+                println!("cargo:rustc-env=AW_WEBUI_DIR={}", path.display());
+                path
+            };
+
+            let asset_path = PathBuf::from(&webui_path);
             let asset_path_opt = if asset_path.exists() {
                 Some(asset_path)
             } else {
