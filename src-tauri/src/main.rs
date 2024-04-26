@@ -41,7 +41,7 @@ fn main() {
                 println!("Using webui path: {}", var_path);
                 std::path::Path::new(var_path)
             } else {
-                panic!("AW_WEBUI_DIR environment variable not set!\nTry running make");
+                panic!("AW_WEBUI_DIR environment variable not set, This should be unreachable!");
             };
 
             let asset_path = PathBuf::from(&webui_path);
