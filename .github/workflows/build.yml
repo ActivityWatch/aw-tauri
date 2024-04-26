@@ -50,4 +50,3 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           AW_WEBUI_DIR: ${{ github.workspace }}/aw-webui/dist
 
-
