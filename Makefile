@@ -4,7 +4,7 @@ build: prebuild
 dev: prebuild
 	npm run tauri dev
 
-*/.git:
+%/.git:
 	git submodule update --init --recursive
 
 src-tauri/icons/icon.png: aw-webui/.git
