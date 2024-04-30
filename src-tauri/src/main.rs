@@ -37,19 +37,16 @@ fn main() {
     tauri::Builder::default()
         .setup(|_app| {
             let webui_var = std::env::var("AW_WEBUI_DIR");
-            let webui_path = if let Ok(var_path) = &webui_var {
-                println!("Using webui path: {}", var_path);
-                std::path::Path::new(var_path)
+            let asset_path_opt = if let Ok(path_str) = &webui_var {
+                let asset_path = PathBuf::from(&path_str);
+                if asset_path.exists() {
+                    println!("Using webui path: {}", path_str);
+                    Some(asset_path)
+                } else {
+                    panic!("Path set via env var AW_WEBUI_DIR does not exist");
+                }
             } else {
                 println!("Using bundled assets");
-                std::path::Path::new("Non_existent_path")
-            };
-
-            let asset_path = PathBuf::from(&webui_path);
-            let asset_path_opt = if asset_path.exists() {
-                Some(asset_path)
-            } else {
-                println!("WebUI path does not exist, using bundled assets");
                 None
             };
 
