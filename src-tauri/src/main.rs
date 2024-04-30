@@ -41,14 +41,16 @@ fn main() {
                 println!("Using webui path: {}", var_path);
                 std::path::Path::new(var_path)
             } else {
-                panic!("AW_WEBUI_DIR environment variable not set, Try running make");
+                println!("Using bundled assets");
+                None
             };
 
             let asset_path = PathBuf::from(&webui_path);
             let asset_path_opt = if asset_path.exists() {
                 Some(asset_path)
             } else {
-                panic!("Asset path does not exist: {:?}", asset_path);
+                println!("WebUI path does not exist, using bundled assets");
+                None
             };
 
             let legacy_import = false;
