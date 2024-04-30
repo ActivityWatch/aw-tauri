@@ -1,0 +1,2 @@
+[env]
+AW_WEBUI_DIR = { value = "../aw-webui/dist", relative = true }
