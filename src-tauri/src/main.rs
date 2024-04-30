@@ -42,7 +42,7 @@ fn main() {
                 std::path::Path::new(var_path)
             } else {
                 println!("Using bundled assets");
-                None
+                std::path::Path::new("Non_existent_path")
             };
 
             let asset_path = PathBuf::from(&webui_path);
