@@ -40,6 +40,8 @@ fn main() {
             let webui_path = if let Ok(var_path) = &webui_var {
                 println!("Using webui path: {}", var_path);
                 std::path::Path::new(var_path)
+            } else {
+                panic!("AW_WEBUI_DIR environment variable not set, Try running make");
             };
 
             let asset_path = PathBuf::from(&webui_path);
