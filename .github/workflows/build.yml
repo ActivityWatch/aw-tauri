@@ -46,6 +46,8 @@ jobs:
 
       - name: Prebuild
         run: make prebuild
+        env:
+          AW_WEBUI_DIR: ${{ github.workspace }}/aw-webui/dist
 
       - name: Build the app
         uses: tauri-apps/tauri-action@v0
