@@ -1,5 +1,3 @@
-export AW_WEBUI_DIR=$(PWD)/aw-webui/dist
-
 prebuild:
 	if [ -e "aw-webui/.git" ]; then \
 		echo "Submodule seems to already be initialized, continuing..."; \
