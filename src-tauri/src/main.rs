@@ -40,17 +40,13 @@ fn main() {
             let webui_path = if let Ok(var_path) = &webui_var {
                 println!("Using webui path: {}", var_path);
                 std::path::Path::new(var_path)
-            } else {
-                panic!("AW_WEBUI_DIR environment variable not set, This should be unreachable!");
             };
 
             let asset_path = PathBuf::from(&webui_path);
             let asset_path_opt = if asset_path.exists() {
                 Some(asset_path)
             } else {
-                println!("Asset path does not exist: {:?}", asset_path);
-                println!("Running without assets");
-                None
+                panic!("Asset path does not exist: {:?}", asset_path);
             };
 
             let legacy_import = false;
