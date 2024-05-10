@@ -85,7 +85,7 @@ fn send_sigterm(pid: u32) -> Result<(), nix::Error> {
 }
 #[cfg(windows)]
 fn send_sigterm(pid: u32) -> Result<(), std::io::Error> {
-    let process_handle = unsafe { OpenProcess(PROCESS_TERMINATE, false, child_pid) };
+    let process_handle = unsafe { OpenProcess(PROCESS_TERMINATE, false, pid) };
 
     if process_handle == null_mut() {
         println!(
