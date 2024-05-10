@@ -32,7 +32,7 @@ fn main() {
         .to_string();
 
     let device_id = aw_server::device_id::get_device_id();
-    let (manager_tx, manager_state) = manager::start_manager();
+    let (_manager_tx, manager_state) = manager::start_manager();
     let tray = create_tray(&manager_state);
     tauri::Builder::default()
         .setup(|_app| {
@@ -64,7 +64,12 @@ fn main() {
         })
         .system_tray(tray)
         .on_system_tray_event(move |app, event| {
-            on_tray_event(app, event, || create_tray_menu(&manager_state))
+            on_tray_event(
+                app,
+                event,
+                || create_tray_menu(&manager_state),
+                &manager_state,
+            )
         })
         .on_window_event(|event| match event.event() {
             tauri::WindowEvent::CloseRequested { api, .. } => {
@@ -122,6 +127,7 @@ fn on_tray_event(
     app: &AppHandle,
     event: SystemTrayEvent,
     create_tray_menu: impl Fn() -> SystemTrayMenu,
+    manager_state: &Arc<Mutex<manager::ManagerState>>,
 ) {
     match event {
         SystemTrayEvent::DoubleClick {
@@ -136,6 +142,8 @@ fn on_tray_event(
         SystemTrayEvent::MenuItemClick { id, .. } => match id.as_str() {
             "quit" => {
                 println!("system tray received a quit click");
+                let mut state = manager_state.lock().unwrap();
+                state.stop_watchers();
                 app.exit(0);
             }
             "open" => {
