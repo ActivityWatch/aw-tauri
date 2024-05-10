@@ -1,7 +1,3 @@
-#[cfg(unix)]
-use nix::sys::signal::{self, Signal};
-#[cfg(unix)]
-use nix::unistd::Pid;
 /// A process manager for ActivityWatch
 ///
 /// Used to start, stop and manage the lifecycle watchers like aw-watcher-afk and aw-watcher-window.
@@ -18,11 +14,14 @@ use std::sync::{
     Arc, Mutex,
 };
 use std::thread;
-
-#[cfg(target_os = "windows")]
-use winapi::um::processthreadsapi::{OpenProcess, TerminateProcess};
-#[cfg(target_os = "windows")]
-use winapi::um::winnt::PROCESS_TERMINATE;
+#[cfg(unix)]
+use nix::sys::signal::{self, Signal};
+#[cfg(unix)]
+use nix::unistd::Pid;
+#[cfg(windows)]
+use winapi::um::wincon::{CTRL_BREAK_EVENT, GenerateConsoleCtrlEvent};
+#[cfg(windows)]
+use winapi::shared::minwindef::DWORD;
 
 #[derive(Debug)]
 pub enum WatcherMessage {
@@ -83,26 +82,21 @@ fn send_sigterm(pid: u32) -> Result<(), nix::Error> {
     signal::kill(pid, Signal::SIGTERM).unwrap();
     Ok(())
 }
+
 #[cfg(windows)]
 fn send_sigterm(pid: u32) -> Result<(), std::io::Error> {
-    let process_handle = unsafe { OpenProcess(PROCESS_TERMINATE, false, pid) };
+    // Get the process ID of the child process
+    let pid = pid as DWORD;
 
-    if process_handle == null_mut() {
-        println!(
-            "Failed to open process handle. Error: {}",
-            std::io::Error::last_os_error()
-        );
+    // Send SIGTERM signal to the process
+    if unsafe { GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, pid) } == 0 {
+        println!("Failed to send SIGTERM signal to the process");
         return Err(std::io::Error::last_os_error());
-    }
-
-    // Terminate the process
-    let result = unsafe { TerminateProcess(process_handle, 0) };
-
-    if result == 0 {
-        return Ok(());
     } else {
-        return Err(std::io::Error::last_os_error());
+        println!("SIGTERM signal sent successfully to the process");
+        return Ok(());
     }
+    Ok(())
 }
 pub fn start_manager() -> (Sender<WatcherMessage>, Arc<Mutex<ManagerState>>) {
     let (tx, rx) = channel();
