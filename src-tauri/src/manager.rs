@@ -14,11 +14,20 @@ use std::sync::{
     Arc, Mutex,
 };
 use std::thread;
+#[cfg(unix)]
+use nix::sys::signal::{self, Signal};
+#[cfg(unix)]
+use nix::unistd::Pid;
+#[cfg(windows)]
+use winapi::um::wincon::{CTRL_BREAK_EVENT, GenerateConsoleCtrlEvent};
+#[cfg(windows)]
+use winapi::shared::minwindef::DWORD;
 
 #[derive(Debug)]
 pub enum WatcherMessage {
     Started {
         name: String,
+        pid: u32,
     },
     Stopped {
         name: String,
@@ -29,28 +38,66 @@ pub enum WatcherMessage {
 #[derive(Debug)]
 pub struct ManagerState {
     pub watchers_running: HashMap<String, bool>,
+    pub watchers_pid: HashMap<String, u32>,
 }
 
 impl ManagerState {
     fn new() -> ManagerState {
         ManagerState {
             watchers_running: HashMap::new(),
+            watchers_pid: HashMap::new(),
         }
     }
-    fn started_watcher(&mut self, name: &str) {
+    fn started_watcher(&mut self, name: &str, pid: u32) {
         println!("started {name}");
         self.watchers_running.insert(name.to_string(), true);
+        self.watchers_pid.insert(name.to_string(), pid);
         println!("{:?}", self.watchers_running);
     }
     fn stopped_watcher(&mut self, name: &str) {
         println!("stopped {name}");
         self.watchers_running.insert(name.to_string(), false);
+        self.watchers_pid.remove(name);
+    }
+    pub fn stop_watchers(&mut self) {
+        for (name, pid) in self.watchers_pid.iter() {
+            match send_sigterm(*pid) {
+                Ok(_) => {
+                    println!("sent SIGTERM to {name}");
+                }
+                Err(e) => {
+                    println!("failed to send SIGTERM to {name}: {e}");
+                }
+            }
+        }
     }
     fn is_watcher_running(&self, name: &str) -> bool {
         *self.watchers_running.get(name).unwrap_or(&false)
     }
 }
 
+#[cfg(unix)]
+fn send_sigterm(pid: u32) -> Result<(), nix::Error> {
+    let pid = Pid::from_raw(pid as i32);
+    signal::kill(pid, Signal::SIGTERM).unwrap();
+    Ok(())
+}
+
+#[cfg(windows)]
+fn send_sigterm(pid: u32) -> Result<(), std::io::Error> {
+    // Get the process ID of the child process
+    let pid = pid as DWORD;
+
+    // Send SIGTERM signal to the process
+    if unsafe { GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, pid) } == 0 {
+        println!("Failed to send SIGTERM signal to the process");
+        return Err(std::io::Error::last_os_error());
+    } else {
+        println!("SIGTERM signal sent successfully to the process");
+        return Ok(());
+    }
+    Ok(())
+}
 pub fn start_manager() -> (Sender<WatcherMessage>, Arc<Mutex<ManagerState>>) {
     let (tx, rx) = channel();
     let state = Arc::new(Mutex::new(ManagerState::new()));
@@ -73,8 +120,8 @@ fn handle(rx: Receiver<WatcherMessage>, state: Arc<Mutex<ManagerState>>) {
         let msg = rx.recv().unwrap();
         let state = &mut state.lock().unwrap();
         match msg {
-            WatcherMessage::Started { name } => {
-                state.started_watcher(&name);
+            WatcherMessage::Started { name, pid } => {
+                state.started_watcher(&name, pid);
             }
             WatcherMessage::Stopped { name, output } => {
                 state.stopped_watcher(&name);
@@ -108,6 +155,7 @@ fn start_watcher(name: &'static str, tx: Sender<WatcherMessage>) {
         // Send a message to the manager that the watcher has started
         tx.send(WatcherMessage::Started {
             name: name.to_string(),
+            pid: child.as_ref().unwrap().id(),
         })
         .unwrap();
 
