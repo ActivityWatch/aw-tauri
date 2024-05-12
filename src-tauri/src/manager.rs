@@ -1,3 +1,7 @@
+#[cfg(unix)]
+use nix::sys::signal::{self, Signal};
+#[cfg(unix)]
+use nix::unistd::Pid;
 /// A process manager for ActivityWatch
 ///
 /// Used to start, stop and manage the lifecycle watchers like aw-watcher-afk and aw-watcher-window.
@@ -14,14 +18,10 @@ use std::sync::{
     Arc, Mutex,
 };
 use std::thread;
-#[cfg(unix)]
-use nix::sys::signal::{self, Signal};
-#[cfg(unix)]
-use nix::unistd::Pid;
-#[cfg(windows)]
-use winapi::um::wincon::{CTRL_BREAK_EVENT, GenerateConsoleCtrlEvent};
 #[cfg(windows)]
 use winapi::shared::minwindef::DWORD;
+#[cfg(windows)]
+use winapi::um::wincon::{GenerateConsoleCtrlEvent, CTRL_BREAK_EVENT};
 
 #[derive(Debug)]
 pub enum WatcherMessage {
