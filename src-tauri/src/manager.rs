@@ -24,7 +24,7 @@ use winapi::shared::minwindef::DWORD;
 #[cfg(windows)]
 use winapi::um::wincon::{GenerateConsoleCtrlEvent, CTRL_BREAK_EVENT};
 
-use crate::{get_app_handle, HANDLE_SET};
+use crate::{get_app_handle, SHARED_CONDVAR};
 
 #[derive(Debug)]
 pub enum WatcherMessage {
@@ -86,11 +86,12 @@ impl ManagerState {
             .add_native_item(SystemTrayMenuItem::Separator)
             .add_item(quit);
 
-        unsafe {
-            while !HANDLE_SET {
-                thread::sleep(std::time::Duration::from_millis(100));
+            let &(ref lock, ref cvar) = &*SHARED_CONDVAR;
+            let mut state = lock.lock().unwrap();
+
+            while ! *state {
+                state = cvar.wait(state).unwrap();
             }
-        }
 
         let app = get_app_handle().lock().expect("failed to get app handle");
         let tray_handle = app.tray_handle();

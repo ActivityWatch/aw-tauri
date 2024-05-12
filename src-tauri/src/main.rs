@@ -2,9 +2,8 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use std::path::PathBuf;
-use std::sync::Arc;
-use std::sync::Mutex;
-use std::sync::OnceLock;
+use std::sync::{Arc, Mutex, OnceLock, Condvar};
+use lazy_static::lazy_static;
 
 use tauri::Manager;
 use tauri::SystemTray;
@@ -16,13 +15,18 @@ use aw_server::endpoints::build_rocket;
 mod manager;
 
 static HANDLE: OnceLock<Mutex<AppHandle>> = OnceLock::new();
-static mut HANDLE_SET: bool = false;
+lazy_static! {
+    static ref SHARED_CONDVAR: (Mutex<bool>, Condvar) = {
+        (Mutex::new(false), Condvar::new())
+    };
+}
 
 fn init_app_handle(handle: AppHandle) {
     HANDLE.get_or_init(|| Mutex::new(handle));
-    unsafe {
-        HANDLE_SET = true;
-    }
+    let &(ref lock, ref cvar) = &*SHARED_CONDVAR;
+    let mut started = lock.lock().unwrap();
+    *started = true;
+    cvar.notify_all();
 }
 
 pub(crate) fn get_app_handle() -> &'static Mutex<AppHandle> {
@@ -83,7 +87,6 @@ fn main() {
             on_tray_event(
                 app,
                 event,
-                || create_tray_menu(&manager_state),
                 &manager_state,
             )
         })
@@ -142,7 +145,6 @@ fn create_tray(manager_state: &Arc<Mutex<manager::ManagerState>>) -> SystemTray 
 fn on_tray_event(
     app: &AppHandle,
     event: SystemTrayEvent,
-    create_tray_menu: impl Fn() -> SystemTrayMenu,
     manager_state: &Arc<Mutex<manager::ManagerState>>,
 ) {
     match event {
