@@ -111,7 +111,7 @@ fn create_tray_menu(manager_state: &Arc<Mutex<manager::ManagerState>>) -> System
     let quit = CustomMenuItem::new("quit".to_string(), "Quit");
 
     // modules
-    let mut module_menu = SystemTrayMenu::new().add_item(CustomMenuItem::new("update", "Update"));
+    let mut module_menu = SystemTrayMenu::new();
 
     let state = manager_state.lock().unwrap();
     println!("state: {:?}", state);
@@ -166,13 +166,6 @@ fn on_tray_event(
                 println!("system tray received a open click");
                 let window = app.get_window("main").unwrap();
                 window.show().unwrap();
-            }
-            "update" => {
-                println!("system tray received a update click");
-                // TODO: get rid of this, update when tray opens or something
-                // should update the tray icon menu with the module statuses
-                let tray_handle = app.tray_handle();
-                tray_handle.set_menu(create_tray_menu()).unwrap();
             }
             _ => {}
         },
