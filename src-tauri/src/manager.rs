@@ -18,10 +18,13 @@ use std::sync::{
     Arc, Mutex,
 };
 use std::thread;
+use tauri::{CustomMenuItem, SystemTrayMenu, SystemTrayMenuItem, SystemTraySubmenu};
 #[cfg(windows)]
 use winapi::shared::minwindef::DWORD;
 #[cfg(windows)]
 use winapi::um::wincon::{GenerateConsoleCtrlEvent, CTRL_BREAK_EVENT};
+
+use crate::{get_app_handle, HANDLE_SET};
 
 #[derive(Debug)]
 pub enum WatcherMessage {
@@ -53,11 +56,46 @@ impl ManagerState {
         self.watchers_running.insert(name.to_string(), true);
         self.watchers_pid.insert(name.to_string(), pid);
         println!("{:?}", self.watchers_running);
+        self.update_tray_menu();
     }
     fn stopped_watcher(&mut self, name: &str) {
         println!("stopped {name}");
         self.watchers_running.insert(name.to_string(), false);
         self.watchers_pid.remove(name);
+        self.update_tray_menu();
+    }
+    fn update_tray_menu(&mut self) {
+        let open = CustomMenuItem::new("open".to_string(), "Open");
+        let quit = CustomMenuItem::new("quit".to_string(), "Quit");
+        let mut module_menu = SystemTrayMenu::new();
+
+        for (module, running) in self.watchers_running.iter() {
+            let label = format!(
+                "{} ({})",
+                module,
+                if *running { "Running" } else { "Stopped" }
+            );
+            module_menu = module_menu.add_item(CustomMenuItem::new(module.clone(), &label));
+        }
+
+        let module_submenu = SystemTraySubmenu::new("Modules", module_menu);
+        let menu = SystemTrayMenu::new()
+            .add_item(open)
+            .add_native_item(SystemTrayMenuItem::Separator)
+            .add_submenu(module_submenu)
+            .add_native_item(SystemTrayMenuItem::Separator)
+            .add_item(quit);
+
+        unsafe {
+            while !HANDLE_SET {
+                thread::sleep(std::time::Duration::from_millis(100));
+            }
+        }
+
+        let app = get_app_handle().lock().expect("failed to get app handle");
+        let tray_handle = app.tray_handle();
+        tray_handle.set_menu(menu).expect("failed to set tray menu");
+
     }
     pub fn stop_watchers(&mut self) {
         for (name, pid) in self.watchers_pid.iter() {

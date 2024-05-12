@@ -4,6 +4,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::OnceLock;
 
 use tauri::Manager;
 use tauri::SystemTray;
@@ -13,6 +14,20 @@ use tauri::{CustomMenuItem, SystemTrayMenu, SystemTrayMenuItem, SystemTraySubmen
 use aw_server::endpoints::build_rocket;
 
 mod manager;
+
+static HANDLE: OnceLock<Mutex<AppHandle>> = OnceLock::new();
+static mut HANDLE_SET: bool = false;
+
+fn init_app_handle(handle: AppHandle) {
+    HANDLE.get_or_init(|| Mutex::new(handle));
+    unsafe {
+        HANDLE_SET = true;
+    }
+}
+
+pub(crate) fn get_app_handle() -> &'static Mutex<AppHandle> {
+    HANDLE.get().unwrap()
+}
 
 // Learn more about Tauri commands at https://tauri.app/v1/guides/features/command
 #[tauri::command]
@@ -35,7 +50,8 @@ fn main() {
     let (_manager_tx, manager_state) = manager::start_manager();
     let tray = create_tray(&manager_state);
     tauri::Builder::default()
-        .setup(|_app| {
+        .setup(|app| {
+            init_app_handle(app.handle().clone());
             let webui_var = std::env::var("AW_WEBUI_DIR");
             let asset_path_opt = if let Ok(path_str) = &webui_var {
                 let asset_path = PathBuf::from(&path_str);
