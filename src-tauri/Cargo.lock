@@ -317,6 +317,7 @@ version = "0.0.0"
 dependencies = [
  "aw-datastore",
  "aw-server",
+ "lazy_static",
  "nix",
  "serde",
  "serde_json",
