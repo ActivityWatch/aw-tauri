@@ -16,12 +16,12 @@ mod manager;
 
 static HANDLE: OnceLock<Mutex<AppHandle>> = OnceLock::new();
 lazy_static! {
-    static ref SHARED_CONDVAR: (Mutex<bool>, Condvar) = { (Mutex::new(false), Condvar::new()) };
+    static ref SHARED_CONDVAR: (Mutex<bool>, Condvar) = (Mutex::new(false), Condvar::new());
 }
 
 fn init_app_handle(handle: AppHandle) {
     HANDLE.get_or_init(|| Mutex::new(handle));
-    let &(ref lock, ref cvar) = &*SHARED_CONDVAR;
+    let (lock, cvar) = &*SHARED_CONDVAR;
     let mut started = lock.lock().unwrap();
     *started = true;
     cvar.notify_all();

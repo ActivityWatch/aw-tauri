@@ -86,7 +86,7 @@ impl ManagerState {
             .add_native_item(SystemTrayMenuItem::Separator)
             .add_item(quit);
 
-        let &(ref lock, ref cvar) = &*SHARED_CONDVAR;
+        let (lock, cvar) = &*SHARED_CONDVAR;
         let mut state = lock.lock().unwrap();
 
         while !*state {
