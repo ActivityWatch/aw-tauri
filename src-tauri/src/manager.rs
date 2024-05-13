@@ -86,17 +86,16 @@ impl ManagerState {
             .add_native_item(SystemTrayMenuItem::Separator)
             .add_item(quit);
 
-            let &(ref lock, ref cvar) = &*SHARED_CONDVAR;
-            let mut state = lock.lock().unwrap();
+        let &(ref lock, ref cvar) = &*SHARED_CONDVAR;
+        let mut state = lock.lock().unwrap();
 
-            while ! *state {
-                state = cvar.wait(state).unwrap();
-            }
+        while !*state {
+            state = cvar.wait(state).unwrap();
+        }
 
         let app = get_app_handle().lock().expect("failed to get app handle");
         let tray_handle = app.tray_handle();
         tray_handle.set_menu(menu).expect("failed to set tray menu");
-
     }
     pub fn stop_watchers(&mut self) {
         for (name, pid) in self.watchers_pid.iter() {

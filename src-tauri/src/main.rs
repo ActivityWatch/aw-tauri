@@ -1,9 +1,9 @@
 // Prevents additional console window on Windows in release, DO NOT REMOVE!!
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use std::path::PathBuf;
-use std::sync::{Arc, Mutex, OnceLock, Condvar};
 use lazy_static::lazy_static;
+use std::path::PathBuf;
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
 
 use tauri::Manager;
 use tauri::SystemTray;
@@ -16,9 +16,7 @@ mod manager;
 
 static HANDLE: OnceLock<Mutex<AppHandle>> = OnceLock::new();
 lazy_static! {
-    static ref SHARED_CONDVAR: (Mutex<bool>, Condvar) = {
-        (Mutex::new(false), Condvar::new())
-    };
+    static ref SHARED_CONDVAR: (Mutex<bool>, Condvar) = { (Mutex::new(false), Condvar::new()) };
 }
 
 fn init_app_handle(handle: AppHandle) {
@@ -83,13 +81,7 @@ fn main() {
             Ok(())
         })
         .system_tray(tray)
-        .on_system_tray_event(move |app, event| {
-            on_tray_event(
-                app,
-                event,
-                &manager_state,
-            )
-        })
+        .on_system_tray_event(move |app, event| on_tray_event(app, event, &manager_state))
         .on_window_event(|event| match event.event() {
             tauri::WindowEvent::CloseRequested { api, .. } => {
                 event.window().hide().unwrap();
