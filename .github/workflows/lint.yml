@@ -49,5 +49,9 @@ jobs:
         mkdir -p aw-webui/dist
         touch aw-webui/dist/index.html
 
+    - name: Build aw-webui
+      run: |
+        make build
+
     - name: Run clippy
       run: cd src-tauri; cargo clippy
