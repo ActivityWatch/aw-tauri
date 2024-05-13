@@ -43,5 +43,11 @@ jobs:
       run: |
         rustup toolchain install nightly
         rustup component add --toolchain nightly clippy
+
+    - name: Create shim aw-webui build
+      run: |
+        mkdir -p aw-webui/dist
+        touch aw-webui/dist/index.html
+
     - name: Run clippy
       run: cd src-tauri; cargo clippy
