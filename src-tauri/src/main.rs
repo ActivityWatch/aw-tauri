@@ -2,8 +2,8 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use std::path::PathBuf;
-use std::sync::Arc;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex, OnceLock, Condvar};
+use lazy_static::lazy_static;
 
 use tauri::Manager;
 use tauri::SystemTray;
@@ -13,6 +13,25 @@ use tauri::{CustomMenuItem, SystemTrayMenu, SystemTrayMenuItem, SystemTraySubmen
 use aw_server::endpoints::build_rocket;
 
 mod manager;
+
+static HANDLE: OnceLock<Mutex<AppHandle>> = OnceLock::new();
+lazy_static! {
+    static ref SHARED_CONDVAR: (Mutex<bool>, Condvar) = {
+        (Mutex::new(false), Condvar::new())
+    };
+}
+
+fn init_app_handle(handle: AppHandle) {
+    HANDLE.get_or_init(|| Mutex::new(handle));
+    let &(ref lock, ref cvar) = &*SHARED_CONDVAR;
+    let mut started = lock.lock().unwrap();
+    *started = true;
+    cvar.notify_all();
+}
+
+pub(crate) fn get_app_handle() -> &'static Mutex<AppHandle> {
+    HANDLE.get().unwrap()
+}
 
 // Learn more about Tauri commands at https://tauri.app/v1/guides/features/command
 #[tauri::command]
@@ -35,7 +54,8 @@ fn main() {
     let (_manager_tx, manager_state) = manager::start_manager();
     let tray = create_tray(&manager_state);
     tauri::Builder::default()
-        .setup(|_app| {
+        .setup(|app| {
+            init_app_handle(app.handle().clone());
             let webui_var = std::env::var("AW_WEBUI_DIR");
             let asset_path_opt = if let Ok(path_str) = &webui_var {
                 let asset_path = PathBuf::from(&path_str);
@@ -67,7 +87,6 @@ fn main() {
             on_tray_event(
                 app,
                 event,
-                || create_tray_menu(&manager_state),
                 &manager_state,
             )
         })
@@ -95,7 +114,7 @@ fn create_tray_menu(manager_state: &Arc<Mutex<manager::ManagerState>>) -> System
     let quit = CustomMenuItem::new("quit".to_string(), "Quit");
 
     // modules
-    let mut module_menu = SystemTrayMenu::new().add_item(CustomMenuItem::new("update", "Update"));
+    let mut module_menu = SystemTrayMenu::new();
 
     let state = manager_state.lock().unwrap();
     println!("state: {:?}", state);
@@ -126,7 +145,6 @@ fn create_tray(manager_state: &Arc<Mutex<manager::ManagerState>>) -> SystemTray 
 fn on_tray_event(
     app: &AppHandle,
     event: SystemTrayEvent,
-    create_tray_menu: impl Fn() -> SystemTrayMenu,
     manager_state: &Arc<Mutex<manager::ManagerState>>,
 ) {
     match event {
@@ -150,13 +168,6 @@ fn on_tray_event(
                 println!("system tray received a open click");
                 let window = app.get_window("main").unwrap();
                 window.show().unwrap();
-            }
-            "update" => {
-                println!("system tray received a update click");
-                // TODO: get rid of this, update when tray opens or something
-                // should update the tray icon menu with the module statuses
-                let tray_handle = app.tray_handle();
-                tray_handle.set_menu(create_tray_menu()).unwrap();
             }
             _ => {}
         },

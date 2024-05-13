@@ -53,7 +53,7 @@ Secondary goal is to add extras supported by Tauri (updater, autostart).
  - [x] Tray icon
      - [x] Basic version (open, exit)
      - [x] Menu for module manager
-     - [ ] Responsive running/stopped state for watchers (no "update" button)
+     - [x] Responsive running/stopped state for watchers (no "update" button)
      - [ ] Start/stop via modules menu
      - [ ] Detect bundled & system modules
  - [ ] Polish
