@@ -9,18 +9,16 @@ on:
 jobs:
   format:
     runs-on: ubuntu-latest
+    working-directory: ./src-tauri
 
     steps:
     - uses: actions/checkout@v3
     - name: Set up Rust nightly
-      uses: actions-rs/toolchain@v1
-      with:
-        profile: minimal
-        toolchain: nightly
-        components: rustfmt
-        override: true
+      run: |
+        rustup toolchain install nightly
+        rustup component add --toolchain nightly rustfmt
     - name: Check formatting
-      run: cargo fmt -- --check
+      run: cd src-tauri; cargo fmt -- --check
 
   clippy:
     runs-on: ubuntu-latest
@@ -28,11 +26,8 @@ jobs:
     steps:
     - uses: actions/checkout@v3
     - name: Set up Rust nightly
-      uses: actions-rs/toolchain@v1
-      with:
-        profile: minimal
-        toolchain: nightly
-        components: clippy
-        override: true
+      run: |
+        rustup toolchain install nightly
+        rustup component add --toolchain nightly clippy
     - name: Run clippy
-      run: cargo clippy
+      run: cd src-tauri; cargo clippy
