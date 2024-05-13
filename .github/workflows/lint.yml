@@ -9,7 +9,6 @@ on:
 jobs:
   format:
     runs-on: ubuntu-latest
-    working-directory: ./src-tauri
 
     steps:
     - uses: actions/checkout@v3
