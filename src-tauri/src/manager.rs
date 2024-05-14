@@ -24,7 +24,7 @@ use winapi::shared::minwindef::DWORD;
 #[cfg(windows)]
 use winapi::um::wincon::{GenerateConsoleCtrlEvent, CTRL_BREAK_EVENT};
 
-use crate::{get_app_handle, SHARED_CONDVAR};
+use crate::{get_app_handle, HANDLE_CONDVAR, WATCHER_CONDVAR, WATCHER_STATE};
 
 #[derive(Debug)]
 pub enum WatcherMessage {
@@ -75,7 +75,10 @@ impl ManagerState {
                 module,
                 if *running { "Running" } else { "Stopped" }
             );
-            module_menu = module_menu.add_item(CustomMenuItem::new(module.clone(), &label));
+            let status = format!("{}", if *running { "Stop"} else {"Start"});
+            let menu = SystemTrayMenu::new().add_item(CustomMenuItem::new(module, status ));
+            let submenu = SystemTraySubmenu::new(label, menu);
+            module_menu = module_menu.add_submenu(submenu)
         }
 
         let module_submenu = SystemTraySubmenu::new("Modules", module_menu);
@@ -86,7 +89,7 @@ impl ManagerState {
             .add_native_item(SystemTrayMenuItem::Separator)
             .add_item(quit);
 
-        let (lock, cvar) = &*SHARED_CONDVAR;
+        let (lock, cvar) = &*HANDLE_CONDVAR;
         let mut state = lock.lock().unwrap();
 
         while !*state {
@@ -96,6 +99,18 @@ impl ManagerState {
         let app = get_app_handle().lock().expect("failed to get app handle");
         let tray_handle = app.tray_handle();
         tray_handle.set_menu(menu).expect("failed to set tray menu");
+    }
+    pub fn stop_watcher(&mut self, name: &str) {
+        if let Some(pid) = self.watchers_pid.get(name) {
+            match send_sigterm(*pid) {
+                Ok(_) => {
+                    println!("sent SIGTERM to {name}");
+                }
+                Err(e) => {
+                    println!("failed to send SIGTERM to {name}: {e}");
+                }
+            }
+        }
     }
     pub fn stop_watchers(&mut self) {
         for (name, pid) in self.watchers_pid.iter() {
@@ -107,6 +122,18 @@ impl ManagerState {
                     println!("failed to send SIGTERM to {name}: {e}");
                 }
             }
+        }
+    }
+    pub fn handle_system_click(&mut self,name: &'static str) {
+        if self.is_watcher_running(name){
+            self.stop_watcher(name);
+        } else {
+            let mut state = WATCHER_STATE.lock().unwrap();
+            state.push(name);
+            let (lock, condvar) = &*WATCHER_CONDVAR;
+            let mut l = lock.lock().unwrap();
+            *l = true;
+            condvar.notify_all();
         }
     }
     fn is_watcher_running(&self, name: &str) -> bool {
@@ -145,6 +172,10 @@ pub fn start_manager() -> (Sender<WatcherMessage>, Arc<Mutex<ManagerState>>) {
     for watcher in autostart_watchers.iter() {
         start_watcher(watcher, tx.clone());
     }
+    let tx_clone = tx.clone();
+    thread::spawn(move || {
+        wrapper_start_watcher(tx_clone);
+    });
 
     let state_clone = Arc::clone(&state);
     thread::spawn(move || {
@@ -175,6 +206,23 @@ fn handle(rx: Receiver<WatcherMessage>, state: Arc<Mutex<ManagerState>>) {
     }
 }
 
+fn wrapper_start_watcher(tx: Sender<WatcherMessage>) {
+    loop {
+        let (lock, cvar) = &*WATCHER_CONDVAR;
+        let mut watchers = lock.lock().unwrap();
+        while !*watchers {
+            watchers = cvar.wait(watchers).unwrap();
+        }
+
+        let mut state = WATCHER_STATE.lock().unwrap();
+        for watcher in state.drain(..) {
+            start_watcher(watcher, tx.clone());
+        }
+        *watchers = false;
+        drop(watchers);
+        drop(state)
+    }
+}
 fn start_watcher(name: &'static str, tx: Sender<WatcherMessage>) {
     thread::spawn(move || {
         // Start the child process
