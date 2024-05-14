@@ -164,7 +164,7 @@ fn on_tray_event(
                 window.show().unwrap();
             }
             _ => {
-                println!("system tray received a module click at {}",id.as_str());
+                println!("system tray received a module click at {}", id.as_str());
                 let mut state = manager_state.lock().unwrap();
                 let static_string: &'static str = Box::leak(id.to_owned().into_boxed_str());
                 state.handle_system_click(static_string);

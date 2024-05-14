@@ -75,8 +75,8 @@ impl ManagerState {
                 module,
                 if *running { "Running" } else { "Stopped" }
             );
-            let status = format!("{}", if *running { "Stop"} else {"Start"});
-            let menu = SystemTrayMenu::new().add_item(CustomMenuItem::new(module, status ));
+            let status = format!("{}", if *running { "Stop" } else { "Start" });
+            let menu = SystemTrayMenu::new().add_item(CustomMenuItem::new(module, status));
             let submenu = SystemTraySubmenu::new(label, menu);
             module_menu = module_menu.add_submenu(submenu)
         }
@@ -124,8 +124,8 @@ impl ManagerState {
             }
         }
     }
-    pub fn handle_system_click(&mut self,name: &'static str) {
-        if self.is_watcher_running(name){
+    pub fn handle_system_click(&mut self, name: &'static str) {
+        if self.is_watcher_running(name) {
             self.stop_watcher(name);
         } else {
             let mut state = WATCHER_STATE.lock().unwrap();
