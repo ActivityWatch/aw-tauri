@@ -15,3 +15,11 @@ aw-webui/dist: aw-webui/.git
 	cd aw-webui && make
 
 prebuild: aw-webui/dist src-tauri/icons/icon.png
+
+precommit: format check
+
+format:
+	cd src-tauri && cargo fmt
+
+check:
+	cd src-tauri && cargo check && cargo clippy
