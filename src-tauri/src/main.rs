@@ -110,7 +110,7 @@ fn create_tray_menu(manager_state: &Arc<Mutex<manager::ManagerState>>) -> System
 
     let state = manager_state.lock().unwrap();
     println!("state: {:?}", state);
-    for (module, running) in state.watchers_running.iter() {
+    for (module, running) in state.modules_running.iter() {
         let label = format!(
             "{} ({})",
             module,
@@ -153,7 +153,7 @@ fn on_tray_event(
             "quit" => {
                 println!("system tray received a quit click");
                 let state = manager_state.lock().unwrap();
-                state.stop_watchers();
+                state.stop_modules();
                 app.exit(0);
             }
             "open" => {

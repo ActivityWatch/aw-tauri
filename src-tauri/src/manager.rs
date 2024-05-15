@@ -4,13 +4,13 @@ use nix::sys::signal::{self, Signal};
 use nix::unistd::Pid;
 /// A process manager for ActivityWatch
 ///
-/// Used to start, stop and manage the lifecycle watchers like aw-watcher-afk and aw-watcher-window.
-/// A watcher is a process that runs in the background and sends events to the ActivityWatch server.
+/// Used to start, stop and manage the lifecycle modules like aw-module-afk and aw-module-window.
+/// A module is a process that runs in the background and sends events to the ActivityWatch server.
 ///
-/// The manager is responsible for starting and stopping the watchers, and for keeping track of
+/// The manager is responsible for starting and stopping the modules, and for keeping track of
 /// their state.
 ///
-/// If a watcher crashes, the manager will notify the user and ask if they want to restart it.
+/// If a module crashes, the manager will notify the user and ask if they want to restart it.
 use std::collections::HashMap;
 use std::process::Command;
 use std::sync::{
@@ -27,7 +27,7 @@ use winapi::um::wincon::{GenerateConsoleCtrlEvent, CTRL_BREAK_EVENT};
 use crate::{get_app_handle, HANDLE_CONDVAR};
 
 #[derive(Debug)]
-pub enum WatcherMessage {
+pub enum ModuleMessage {
     Started {
         name: String,
         pid: u32,
@@ -40,30 +40,30 @@ pub enum WatcherMessage {
 
 #[derive(Debug)]
 pub struct ManagerState {
-    tx: Sender<WatcherMessage>,
-    pub watchers_running: HashMap<String, bool>,
-    pub watchers_pid: HashMap<String, u32>,
+    tx: Sender<ModuleMessage>,
+    pub modules_running: HashMap<String, bool>,
+    pub modules_pid: HashMap<String, u32>,
 }
 
 impl ManagerState {
-    fn new(tx: Sender<WatcherMessage>) -> ManagerState {
+    fn new(tx: Sender<ModuleMessage>) -> ManagerState {
         ManagerState {
             tx,
-            watchers_running: HashMap::new(),
-            watchers_pid: HashMap::new(),
+            modules_running: HashMap::new(),
+            modules_pid: HashMap::new(),
         }
     }
-    fn started_watcher(&mut self, name: &str, pid: u32) {
+    fn started_module(&mut self, name: &str, pid: u32) {
         println!("started {name}");
-        self.watchers_running.insert(name.to_string(), true);
-        self.watchers_pid.insert(name.to_string(), pid);
-        println!("{:?}", self.watchers_running);
+        self.modules_running.insert(name.to_string(), true);
+        self.modules_pid.insert(name.to_string(), pid);
+        println!("{:?}", self.modules_running);
         self.update_tray_menu();
     }
-    fn stopped_watcher(&mut self, name: &str) {
+    fn stopped_module(&mut self, name: &str) {
         println!("stopped {name}");
-        self.watchers_running.insert(name.to_string(), false);
-        self.watchers_pid.remove(name);
+        self.modules_running.insert(name.to_string(), false);
+        self.modules_pid.remove(name);
         self.update_tray_menu();
     }
     fn update_tray_menu(&mut self) {
@@ -71,7 +71,7 @@ impl ManagerState {
         let quit = CustomMenuItem::new("quit".to_string(), "Quit");
         let mut module_menu = SystemTrayMenu::new();
 
-        for (module, running) in self.watchers_running.iter() {
+        for (module, running) in self.modules_running.iter() {
             let label = format!(
                 "{} ({})",
                 module,
@@ -102,13 +102,13 @@ impl ManagerState {
         let tray_handle = app.tray_handle();
         tray_handle.set_menu(menu).expect("failed to set tray menu");
     }
-    pub fn start_watcher(&self, name: &str) {
-        if !self.is_watcher_running(name) {
-            start_watcher_thread(name.to_string(), self.tx.clone());
+    pub fn start_module(&self, name: &str) {
+        if !self.is_module_running(name) {
+            start_module_thread(name.to_string(), self.tx.clone());
         }
     }
-    pub fn stop_watcher(&self, name: &str) {
-        if let Some(pid) = self.watchers_pid.get(name) {
+    pub fn stop_module(&self, name: &str) {
+        if let Some(pid) = self.modules_pid.get(name) {
             match send_sigterm(*pid) {
                 Ok(_) => {
                     println!("sent SIGTERM to {name}");
@@ -119,20 +119,20 @@ impl ManagerState {
             }
         }
     }
-    pub fn stop_watchers(&self) {
-        for (name, _pid) in self.watchers_pid.iter() {
-            self.stop_watcher(name);
+    pub fn stop_modules(&self) {
+        for (name, _pid) in self.modules_pid.iter() {
+            self.stop_module(name);
         }
     }
     pub fn handle_system_click(&mut self, name: &str) {
-        if self.is_watcher_running(name) {
-            self.stop_watcher(name);
+        if self.is_module_running(name) {
+            self.stop_module(name);
         } else {
-            self.start_watcher(name);
+            self.start_module(name);
         }
     }
-    fn is_watcher_running(&self, name: &str) -> bool {
-        *self.watchers_running.get(name).unwrap_or(&false)
+    fn is_module_running(&self, name: &str) -> bool {
+        *self.modules_running.get(name).unwrap_or(&false)
     }
 }
 
@@ -162,10 +162,10 @@ pub fn start_manager() -> Arc<Mutex<ManagerState>> {
     let (tx, rx) = channel();
     let state = Arc::new(Mutex::new(ManagerState::new(tx)));
 
-    // Start the watchers
-    let autostart_watchers = ["aw-watcher-afk", "aw-watcher-window"];
-    for watcher in autostart_watchers.iter() {
-        state.lock().unwrap().start_watcher(watcher);
+    // Start the modules
+    let autostart_modules = ["aw-module-afk", "aw-module-window"];
+    for module in autostart_modules.iter() {
+        state.lock().unwrap().start_module(module);
     }
 
     let state_clone = Arc::clone(&state);
@@ -175,16 +175,16 @@ pub fn start_manager() -> Arc<Mutex<ManagerState>> {
     state
 }
 
-fn handle(rx: Receiver<WatcherMessage>, state: Arc<Mutex<ManagerState>>) {
+fn handle(rx: Receiver<ModuleMessage>, state: Arc<Mutex<ManagerState>>) {
     loop {
         let msg = rx.recv().unwrap();
         let state = &mut state.lock().unwrap();
         match msg {
-            WatcherMessage::Started { name, pid } => {
-                state.started_watcher(&name, pid);
+            ModuleMessage::Started { name, pid } => {
+                state.started_module(&name, pid);
             }
-            WatcherMessage::Stopped { name, output } => {
-                state.stopped_watcher(&name);
+            ModuleMessage::Stopped { name, output } => {
+                state.stopped_module(&name);
                 if output.status.success() {
                     println!("{name} exited successfully");
                 } else {
@@ -197,7 +197,7 @@ fn handle(rx: Receiver<WatcherMessage>, state: Arc<Mutex<ManagerState>>) {
     }
 }
 
-fn start_watcher_thread(name: String, tx: Sender<WatcherMessage>) {
+fn start_module_thread(name: String, tx: Sender<ModuleMessage>) {
     thread::spawn(move || {
         // Start the child process
         let args = ["--testing", "--port", "5699"];
@@ -211,8 +211,8 @@ fn start_watcher_thread(name: String, tx: Sender<WatcherMessage>) {
             return;
         }
 
-        // Send a message to the manager that the watcher has started
-        tx.send(WatcherMessage::Started {
+        // Send a message to the manager that the module has started
+        tx.send(ModuleMessage::Started {
             name: name.to_string(),
             pid: child.as_ref().unwrap().id(),
         })
@@ -225,7 +225,7 @@ fn start_watcher_thread(name: String, tx: Sender<WatcherMessage>) {
             .expect("failed to wait on child");
 
         // Send the process output to the manager
-        tx.send(WatcherMessage::Stopped {
+        tx.send(ModuleMessage::Stopped {
             name: name.to_string(),
             output,
         })
