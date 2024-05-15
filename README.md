@@ -54,7 +54,7 @@ Secondary goal is to add extras supported by Tauri (updater, autostart).
      - [x] Basic version (open, exit)
      - [x] Menu for module manager
      - [x] Responsive running/stopped state for watchers (no "update" button)
-     - [ ] Start/stop via modules menu
+     - [x] Start/stop via modules menu
      - [ ] Detect bundled & system modules
  - [ ] Polish
      - [ ] Remove placeholder Vue app

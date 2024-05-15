@@ -16,12 +16,12 @@ mod manager;
 
 static HANDLE: OnceLock<Mutex<AppHandle>> = OnceLock::new();
 lazy_static! {
-    static ref SHARED_CONDVAR: (Mutex<bool>, Condvar) = (Mutex::new(false), Condvar::new());
+    static ref HANDLE_CONDVAR: (Mutex<bool>, Condvar) = (Mutex::new(false), Condvar::new());
 }
 
 fn init_app_handle(handle: AppHandle) {
     HANDLE.get_or_init(|| Mutex::new(handle));
-    let (lock, cvar) = &*SHARED_CONDVAR;
+    let (lock, cvar) = &*HANDLE_CONDVAR;
     let mut started = lock.lock().unwrap();
     *started = true;
     cvar.notify_all();
@@ -49,7 +49,7 @@ fn main() {
         .to_string();
 
     let device_id = aw_server::device_id::get_device_id();
-    let (_manager_tx, manager_state) = manager::start_manager();
+    let manager_state = manager::start_manager();
     let tray = create_tray(&manager_state);
     tauri::Builder::default()
         .setup(|app| {
@@ -152,7 +152,7 @@ fn on_tray_event(
         SystemTrayEvent::MenuItemClick { id, .. } => match id.as_str() {
             "quit" => {
                 println!("system tray received a quit click");
-                let mut state = manager_state.lock().unwrap();
+                let state = manager_state.lock().unwrap();
                 state.stop_watchers();
                 app.exit(0);
             }
@@ -161,7 +161,11 @@ fn on_tray_event(
                 let window = app.get_window("main").unwrap();
                 window.show().unwrap();
             }
-            _ => {}
+            _ => {
+                println!("system tray received a module click at {}", id.as_str());
+                let mut state = manager_state.lock().unwrap();
+                state.handle_system_click(id.as_str());
+            }
         },
         _ => {}
     }

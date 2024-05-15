@@ -24,7 +24,7 @@ use winapi::shared::minwindef::DWORD;
 #[cfg(windows)]
 use winapi::um::wincon::{GenerateConsoleCtrlEvent, CTRL_BREAK_EVENT};
 
-use crate::{get_app_handle, SHARED_CONDVAR};
+use crate::{get_app_handle, HANDLE_CONDVAR};
 
 #[derive(Debug)]
 pub enum WatcherMessage {
@@ -40,13 +40,15 @@ pub enum WatcherMessage {
 
 #[derive(Debug)]
 pub struct ManagerState {
+    tx: Sender<WatcherMessage>,
     pub watchers_running: HashMap<String, bool>,
     pub watchers_pid: HashMap<String, u32>,
 }
 
 impl ManagerState {
-    fn new() -> ManagerState {
+    fn new(tx: Sender<WatcherMessage>) -> ManagerState {
         ManagerState {
+            tx,
             watchers_running: HashMap::new(),
             watchers_pid: HashMap::new(),
         }
@@ -75,7 +77,10 @@ impl ManagerState {
                 module,
                 if *running { "Running" } else { "Stopped" }
             );
-            module_menu = module_menu.add_item(CustomMenuItem::new(module.clone(), &label));
+            let status = if *running { "Stop" } else { "Start" };
+            let menu = SystemTrayMenu::new().add_item(CustomMenuItem::new(module, status));
+            let submenu = SystemTraySubmenu::new(label, menu);
+            module_menu = module_menu.add_submenu(submenu)
         }
 
         let module_submenu = SystemTraySubmenu::new("Modules", module_menu);
@@ -86,7 +91,7 @@ impl ManagerState {
             .add_native_item(SystemTrayMenuItem::Separator)
             .add_item(quit);
 
-        let (lock, cvar) = &*SHARED_CONDVAR;
+        let (lock, cvar) = &*HANDLE_CONDVAR;
         let mut state = lock.lock().unwrap();
 
         while !*state {
@@ -97,8 +102,13 @@ impl ManagerState {
         let tray_handle = app.tray_handle();
         tray_handle.set_menu(menu).expect("failed to set tray menu");
     }
-    pub fn stop_watchers(&mut self) {
-        for (name, pid) in self.watchers_pid.iter() {
+    pub fn start_watcher(&self, name: &str) {
+        if !self.is_watcher_running(name) {
+            start_watcher_thread(name.to_string(), self.tx.clone());
+        }
+    }
+    pub fn stop_watcher(&self, name: &str) {
+        if let Some(pid) = self.watchers_pid.get(name) {
             match send_sigterm(*pid) {
                 Ok(_) => {
                     println!("sent SIGTERM to {name}");
@@ -107,6 +117,18 @@ impl ManagerState {
                     println!("failed to send SIGTERM to {name}: {e}");
                 }
             }
+        }
+    }
+    pub fn stop_watchers(&self) {
+        for (name, _pid) in self.watchers_pid.iter() {
+            self.stop_watcher(name);
+        }
+    }
+    pub fn handle_system_click(&mut self, name: &str) {
+        if self.is_watcher_running(name) {
+            self.stop_watcher(name);
+        } else {
+            self.start_watcher(name);
         }
     }
     fn is_watcher_running(&self, name: &str) -> bool {
@@ -136,21 +158,21 @@ fn send_sigterm(pid: u32) -> Result<(), std::io::Error> {
     }
     Ok(())
 }
-pub fn start_manager() -> (Sender<WatcherMessage>, Arc<Mutex<ManagerState>>) {
+pub fn start_manager() -> Arc<Mutex<ManagerState>> {
     let (tx, rx) = channel();
-    let state = Arc::new(Mutex::new(ManagerState::new()));
+    let state = Arc::new(Mutex::new(ManagerState::new(tx)));
 
     // Start the watchers
     let autostart_watchers = ["aw-watcher-afk", "aw-watcher-window"];
     for watcher in autostart_watchers.iter() {
-        start_watcher(watcher, tx.clone());
+        state.lock().unwrap().start_watcher(watcher);
     }
 
     let state_clone = Arc::clone(&state);
     thread::spawn(move || {
         handle(rx, state_clone);
     });
-    (tx, state)
+    state
 }
 
 fn handle(rx: Receiver<WatcherMessage>, state: Arc<Mutex<ManagerState>>) {
@@ -175,12 +197,11 @@ fn handle(rx: Receiver<WatcherMessage>, state: Arc<Mutex<ManagerState>>) {
     }
 }
 
-fn start_watcher(name: &'static str, tx: Sender<WatcherMessage>) {
+fn start_watcher_thread(name: String, tx: Sender<WatcherMessage>) {
     thread::spawn(move || {
         // Start the child process
-        let path = name;
         let args = ["--testing", "--port", "5699"];
-        let child = Command::new(path)
+        let child = Command::new(&name)
             .args(args)
             .stdout(std::process::Stdio::piped())
             .spawn();
