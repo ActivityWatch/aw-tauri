@@ -154,7 +154,7 @@ fn on_tray_event(
         SystemTrayEvent::MenuItemClick { id, .. } => match id.as_str() {
             "quit" => {
                 println!("system tray received a quit click");
-                let mut state = manager_state.lock().unwrap();
+                let state = manager_state.lock().unwrap();
                 state.stop_watchers();
                 app.exit(0);
             }

@@ -100,7 +100,7 @@ impl ManagerState {
         let tray_handle = app.tray_handle();
         tray_handle.set_menu(menu).expect("failed to set tray menu");
     }
-    pub fn stop_watcher(&mut self, name: &str) {
+    pub fn stop_watcher(&self, name: &str) {
         if let Some(pid) = self.watchers_pid.get(name) {
             match send_sigterm(*pid) {
                 Ok(_) => {
@@ -112,16 +112,9 @@ impl ManagerState {
             }
         }
     }
-    pub fn stop_watchers(&mut self) {
-        for (name, pid) in self.watchers_pid.iter() {
-            match send_sigterm(*pid) {
-                Ok(_) => {
-                    println!("sent SIGTERM to {name}");
-                }
-                Err(e) => {
-                    println!("failed to send SIGTERM to {name}: {e}");
-                }
-            }
+    pub fn stop_watchers(&self) {
+        for (name, _pid) in self.watchers_pid.iter() {
+            self.stop_watcher(name);
         }
     }
     pub fn handle_system_click(&mut self, name: &str) {
