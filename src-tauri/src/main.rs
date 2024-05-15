@@ -17,8 +17,6 @@ mod manager;
 static HANDLE: OnceLock<Mutex<AppHandle>> = OnceLock::new();
 lazy_static! {
     static ref HANDLE_CONDVAR: (Mutex<bool>, Condvar) = (Mutex::new(false), Condvar::new());
-    static ref WATCHER_CONDVAR: (Mutex<bool>, Condvar) = (Mutex::new(false), Condvar::new());
-    static ref WATCHER_STATE: Mutex<Vec<String>> = Mutex::new(Vec::new());
 }
 
 fn init_app_handle(handle: AppHandle) {
@@ -51,7 +49,7 @@ fn main() {
         .to_string();
 
     let device_id = aw_server::device_id::get_device_id();
-    let (_manager_tx, manager_state) = manager::start_manager();
+    let manager_state = manager::start_manager();
     let tray = create_tray(&manager_state);
     tauri::Builder::default()
         .setup(|app| {
