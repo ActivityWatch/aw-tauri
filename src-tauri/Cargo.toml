@@ -29,4 +29,7 @@ aw-datastore = { git = "https://github.com/ActivityWatch/aw-server-rust.git", br
 # DO NOT REMOVE!!
 custom-protocol = ["tauri/custom-protocol"]
 
+[lints.clippy]
+single_match = "allow"
+
 [workspace]
