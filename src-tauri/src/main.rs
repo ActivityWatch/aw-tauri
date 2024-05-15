@@ -18,7 +18,7 @@ static HANDLE: OnceLock<Mutex<AppHandle>> = OnceLock::new();
 lazy_static! {
     static ref HANDLE_CONDVAR: (Mutex<bool>, Condvar) = (Mutex::new(false), Condvar::new());
     static ref WATCHER_CONDVAR: (Mutex<bool>, Condvar) = (Mutex::new(false), Condvar::new());
-    static ref WATCHER_STATE: Mutex<Vec<&'static str>> = Mutex::new(Vec::new());
+    static ref WATCHER_STATE: Mutex<Vec<String>> = Mutex::new(Vec::new());
 }
 
 fn init_app_handle(handle: AppHandle) {
@@ -166,8 +166,7 @@ fn on_tray_event(
             _ => {
                 println!("system tray received a module click at {}", id.as_str());
                 let mut state = manager_state.lock().unwrap();
-                let static_string: &'static str = Box::leak(id.to_owned().into_boxed_str());
-                state.handle_system_click(static_string);
+                state.handle_system_click(id.as_str());
             }
         },
         _ => {}

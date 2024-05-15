@@ -75,7 +75,7 @@ impl ManagerState {
                 module,
                 if *running { "Running" } else { "Stopped" }
             );
-            let status = format!("{}", if *running { "Stop" } else { "Start" });
+            let status = if *running { "Stop" } else { "Start" };
             let menu = SystemTrayMenu::new().add_item(CustomMenuItem::new(module, status));
             let submenu = SystemTraySubmenu::new(label, menu);
             module_menu = module_menu.add_submenu(submenu)
@@ -124,12 +124,12 @@ impl ManagerState {
             }
         }
     }
-    pub fn handle_system_click(&mut self, name: &'static str) {
+    pub fn handle_system_click(&mut self, name: &str) {
         if self.is_watcher_running(name) {
             self.stop_watcher(name);
         } else {
             let mut state = WATCHER_STATE.lock().unwrap();
-            state.push(name);
+            state.push(name.to_string());
             let (lock, condvar) = &*WATCHER_CONDVAR;
             let mut l = lock.lock().unwrap();
             *l = true;
@@ -170,7 +170,7 @@ pub fn start_manager() -> (Sender<WatcherMessage>, Arc<Mutex<ManagerState>>) {
     // Start the watchers
     let autostart_watchers = ["aw-watcher-afk", "aw-watcher-window"];
     for watcher in autostart_watchers.iter() {
-        start_watcher(watcher, tx.clone());
+        start_watcher(watcher.to_string(), tx.clone());
     }
     let tx_clone = tx.clone();
     thread::spawn(move || {
@@ -223,12 +223,11 @@ fn wrapper_start_watcher(tx: Sender<WatcherMessage>) {
         drop(state)
     }
 }
-fn start_watcher(name: &'static str, tx: Sender<WatcherMessage>) {
+fn start_watcher(name: String, tx: Sender<WatcherMessage>) {
     thread::spawn(move || {
         // Start the child process
-        let path = name;
         let args = ["--testing", "--port", "5699"];
-        let child = Command::new(path)
+        let child = Command::new(&name)
             .args(args)
             .stdout(std::process::Stdio::piped())
             .spawn();
