@@ -20,7 +20,6 @@ use std::sync::{
     Arc, Mutex,
 };
 use std::{env, fs, thread};
-// use itertools::Itertools;
 use tauri::{CustomMenuItem, SystemTrayMenu, SystemTrayMenuItem, SystemTraySubmenu};
 #[cfg(windows)]
 use winapi::shared::minwindef::DWORD;
