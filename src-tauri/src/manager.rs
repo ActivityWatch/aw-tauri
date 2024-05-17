@@ -88,6 +88,14 @@ impl ManagerState {
             module_menu = module_menu.add_submenu(submenu)
         }
 
+        for module in self.modules_in_path.iter() {
+            if !self.modules_running.contains_key(module) {
+                let menu = SystemTrayMenu::new().add_item(CustomMenuItem::new(module, "Start"));
+                let submenu = SystemTraySubmenu::new(module, menu);
+                module_menu = module_menu.add_submenu(submenu);
+            }
+        }
+
         let module_submenu = SystemTraySubmenu::new("Modules", module_menu);
         let menu = SystemTrayMenu::new()
             .add_item(open)
