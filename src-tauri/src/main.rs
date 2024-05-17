@@ -5,9 +5,7 @@ use lazy_static::lazy_static;
 use std::path::PathBuf;
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
 
-use tauri::Manager;
-use tauri::SystemTray;
-use tauri::{AppHandle, SystemTrayEvent};
+use tauri::{AppHandle, Manager, SystemTray, SystemTrayEvent};
 use tauri::{CustomMenuItem, SystemTrayMenu, SystemTrayMenuItem, SystemTraySubmenu};
 
 use aw_server::endpoints::build_rocket;
