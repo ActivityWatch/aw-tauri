@@ -55,7 +55,7 @@ Secondary goal is to add extras supported by Tauri (updater, autostart).
      - [x] Menu for module manager
      - [x] Responsive running/stopped state for watchers (no "update" button)
      - [x] Start/stop via modules menu
-     - [ ] Detect bundled & system modules
+     - [x] Detect bundled & system modules
  - [ ] Polish
      - [ ] Remove placeholder Vue app
          - Or replace with new UI for module management? (a bit redundant)
