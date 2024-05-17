@@ -4,7 +4,7 @@ use nix::sys::signal::{self, Signal};
 use nix::unistd::Pid;
 /// A process manager for ActivityWatch
 ///
-/// Used to start, stop and manage the lifecycle modules like aw-module-afk and aw-module-window.
+/// Used to start, stop and manage the lifecycle modules like aw-watcher-afk and aw-watcher-window.
 /// A module is a process that runs in the background and sends events to the ActivityWatch server.
 ///
 /// The manager is responsible for starting and stopping the modules, and for keeping track of
@@ -163,7 +163,7 @@ pub fn start_manager() -> Arc<Mutex<ManagerState>> {
     let state = Arc::new(Mutex::new(ManagerState::new(tx)));
 
     // Start the modules
-    let autostart_modules = ["aw-module-afk", "aw-module-window"];
+    let autostart_modules = ["aw-watcher-afk", "aw-watcher-window"];
     for module in autostart_modules.iter() {
         state.lock().unwrap().start_module(module);
     }
