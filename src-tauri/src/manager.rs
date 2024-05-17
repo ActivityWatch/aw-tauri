@@ -11,13 +11,16 @@ use nix::unistd::Pid;
 /// their state.
 ///
 /// If a module crashes, the manager will notify the user and ask if they want to restart it.
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::process::Command;
 use std::sync::{
     mpsc::{channel, Receiver, Sender},
     Arc, Mutex,
 };
-use std::thread;
+use std::{env, fs, thread};
+// use itertools::Itertools;
 use tauri::{CustomMenuItem, SystemTrayMenu, SystemTrayMenuItem, SystemTraySubmenu};
 #[cfg(windows)]
 use winapi::shared::minwindef::DWORD;
@@ -41,7 +44,8 @@ pub enum ModuleMessage {
 #[derive(Debug)]
 pub struct ManagerState {
     tx: Sender<ModuleMessage>,
-    pub modules_running: HashMap<String, bool>,
+    pub modules_running: BTreeMap<String, bool>,
+    pub modules_in_path: BTreeSet<String>,
     pub modules_pid: HashMap<String, u32>,
 }
 
@@ -49,7 +53,8 @@ impl ManagerState {
     fn new(tx: Sender<ModuleMessage>) -> ManagerState {
         ManagerState {
             tx,
-            modules_running: HashMap::new(),
+            modules_running: BTreeMap::new(),
+            modules_in_path: get_modules_in_path(),
             modules_pid: HashMap::new(),
         }
     }
@@ -139,8 +144,12 @@ impl ManagerState {
 #[cfg(unix)]
 fn send_sigterm(pid: u32) -> Result<(), nix::Error> {
     let pid = Pid::from_raw(pid as i32);
-    signal::kill(pid, Signal::SIGTERM).unwrap();
-    Ok(())
+    let res = signal::kill(pid, Signal::SIGTERM);
+    if let Err(e) = res {
+        return Err(e);
+    } else {
+        return Ok(());
+    }
 }
 
 #[cfg(windows)]
@@ -150,10 +159,8 @@ fn send_sigterm(pid: u32) -> Result<(), std::io::Error> {
 
     // Send SIGTERM signal to the process
     if unsafe { GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, pid) } == 0 {
-        println!("Failed to send SIGTERM signal to the process");
         return Err(std::io::Error::last_os_error());
     } else {
-        println!("SIGTERM signal sent successfully to the process");
         return Ok(());
     }
     Ok(())
@@ -231,4 +238,53 @@ fn start_module_thread(name: String, tx: Sender<ModuleMessage>) {
         })
         .unwrap();
     });
+}
+
+#[cfg(unix)]
+fn get_modules_in_path() -> BTreeSet<String> {
+    let mut set: BTreeSet<String> = BTreeSet::new();
+
+    if let Some(paths) = env::var_os("PATH") {
+        for path in env::split_paths(&paths) {
+            if let Ok(entries) = fs::read_dir(&path) {
+                for entry in entries.flatten() {
+                    if let Ok(metadata) = entry.metadata() {
+                        if (metadata.is_file() || metadata.is_symlink())
+                            && metadata.permissions().mode() & 0o111 != 0
+                        {
+                            if let Some(file_name) = entry.file_name().to_str() {
+                                if file_name.starts_with("aw") && !file_name.contains(".") {
+                                    // starts with aw and doesn't have an extension
+                                    set.insert(file_name.to_string());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    set.remove("awk"); // common in most unix systems
+
+    set
+}
+
+#[cfg(windows)]
+fn get_modules_in_path() -> BTreeSet<String> {
+    let mut set: BTreeSet<String> = BTreeSet::new();
+
+    if let Some(paths) = env::var_os("PATH") {
+        for path in env::split_paths(&paths) {
+            if let Ok(entries) = fs::read_dir(path) {
+                for entry in entries.filter_map(Result::ok) {
+                    let path = entry.path();
+                    if path.is_file() && path.extension().map_or(false, |ext| ext == "exe") {
+                        set.insert(path.file_stem().unwrap().to_str().unwrap().to_string());
+                    }
+                }
+            }
+        }
+    }
+
+    set
 }
