@@ -157,9 +157,9 @@ fn send_sigterm(pid: u32) -> Result<(), nix::Error> {
     let pid = Pid::from_raw(pid as i32);
     let res = signal::kill(pid, Signal::SIGTERM);
     if let Err(e) = res {
-        return Err(e);
+        Err(e)
     } else {
-        return Ok(());
+        Ok(())
     }
 }
 
@@ -271,7 +271,7 @@ fn get_modules_in_path() -> BTreeSet<String> {
                             && metadata.permissions().mode() & 0o111 != 0
                         {
                             if let Some(file_name) = entry.file_name().to_str() {
-                                if file_name.starts_with("aw") && !file_name.contains(".") {
+                                if file_name.starts_with("aw") && !file_name.contains('.') {
                                     // starts with aw and doesn't have an extension
                                     set.insert(file_name.to_string());
                                 }
