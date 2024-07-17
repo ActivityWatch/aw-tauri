@@ -38,6 +38,7 @@ pub enum ModuleMessage {
         name: String,
         output: std::process::Output,
     },
+    Init {},
 }
 
 #[derive(Debug)]
@@ -46,6 +47,7 @@ pub struct ManagerState {
     pub modules_running: BTreeMap<String, bool>,
     pub modules_in_path: BTreeSet<String>,
     pub modules_pid: HashMap<String, u32>,
+    pub modules_menu_set: bool,
 }
 
 impl ManagerState {
@@ -55,6 +57,7 @@ impl ManagerState {
             modules_running: BTreeMap::new(),
             modules_in_path: get_modules_in_path(),
             modules_pid: HashMap::new(),
+            modules_menu_set: false,
         }
     }
     fn started_module(&mut self, name: &str, pid: u32) {
@@ -113,6 +116,7 @@ impl ManagerState {
         let app = get_app_handle().lock().expect("failed to get app handle");
         let tray_handle = app.tray_handle();
         tray_handle.set_menu(menu).expect("failed to set tray menu");
+        self.modules_menu_set = true;
     }
     pub fn start_module(&self, name: &str) {
         if !self.is_module_running(name) {
@@ -153,9 +157,9 @@ fn send_sigterm(pid: u32) -> Result<(), nix::Error> {
     let pid = Pid::from_raw(pid as i32);
     let res = signal::kill(pid, Signal::SIGTERM);
     if let Err(e) = res {
-        return Err(e);
+        Err(e)
     } else {
-        return Ok(());
+        Ok(())
     }
 }
 
@@ -174,12 +178,18 @@ fn send_sigterm(pid: u32) -> Result<(), std::io::Error> {
 }
 pub fn start_manager() -> Arc<Mutex<ManagerState>> {
     let (tx, rx) = channel();
-    let state = Arc::new(Mutex::new(ManagerState::new(tx)));
+    let state = Arc::new(Mutex::new(ManagerState::new(tx.clone())));
 
     // Start the modules
     let autostart_modules = ["aw-watcher-afk", "aw-watcher-window"];
     for module in autostart_modules.iter() {
         state.lock().unwrap().start_module(module);
+    }
+
+    // populate the tray menu if not yet already done
+    let modules_menu_set = state.lock().unwrap().modules_menu_set;
+    if !modules_menu_set {
+        tx.send(ModuleMessage::Init {}).unwrap();
     }
 
     let state_clone = Arc::clone(&state);
@@ -207,6 +217,7 @@ fn handle(rx: Receiver<ModuleMessage>, state: Arc<Mutex<ManagerState>>) {
                     println!("stderr: {}", String::from_utf8_lossy(&output.stderr));
                 }
             }
+            ModuleMessage::Init {} => state.update_tray_menu(),
         }
     }
 }
@@ -260,7 +271,7 @@ fn get_modules_in_path() -> BTreeSet<String> {
                             && metadata.permissions().mode() & 0o111 != 0
                         {
                             if let Some(file_name) = entry.file_name().to_str() {
-                                if file_name.starts_with("aw") && !file_name.contains(".") {
+                                if file_name.starts_with("aw") && !file_name.contains('.') {
                                     // starts with aw and doesn't have an extension
                                     set.insert(file_name.to_string());
                                 }
