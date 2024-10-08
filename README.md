@@ -26,6 +26,12 @@ Benefits of Tauri:
  - [Trayicon support](https://tauri.app/v1/guides/features/system-tray/)
  - Mobile support is [WIP](https://tauri.app/blog/2022/12/09/tauri-mobile-alpha/), and will support iOS.
 
+# Prerequisites
+
+ - Node.js
+ - Rust
+ - Tauri CLI (`npm install -g @tauri-apps/cli`)
+ - Tauri dependencies (see [their docs](https://v2.tauri.app/start/prerequisites/))
 
 # Usage
 
