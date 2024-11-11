@@ -2,7 +2,7 @@
 name = "aw-tauri"
 version = "0.1.0"
 description = "ActivityWatch UI built with Tauri"
-authors = ["Erik Bjäreholt <erik@bjareho.lt> Brian Vuku <brayo@brayo.dev>"]
+authors = ["Erik Bjäreholt <erik@bjareho.lt>", "Brian Vuku <brayo@brayo.dev>"]
 license = "MPL-2.0"
 repository = "https://github.com/ActivityWatch/aw-tauri"
 edition = "2021"
