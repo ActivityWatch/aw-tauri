@@ -20,13 +20,15 @@ use std::sync::{
     Arc, Mutex,
 };
 use std::{env, fs, thread};
-use tauri::{CustomMenuItem, SystemTrayMenu, SystemTrayMenuItem, SystemTraySubmenu};
+use tauri::menu::{Menu, MenuItem, SubmenuBuilder};
+
+// use tauri::{CustomMenuItem, SystemTrayMenu, SystemTrayMenuItem, SystemTraySubmenu};
 #[cfg(windows)]
 use winapi::shared::minwindef::DWORD;
 #[cfg(windows)]
 use winapi::um::wincon::{GenerateConsoleCtrlEvent, CTRL_BREAK_EVENT};
 
-use crate::{get_app_handle, HANDLE_CONDVAR};
+use crate::{get_app_handle, get_tray_id, HANDLE_CONDVAR};
 
 #[derive(Debug)]
 pub enum ModuleMessage {
@@ -74,49 +76,54 @@ impl ManagerState {
         self.update_tray_menu();
     }
     fn update_tray_menu(&mut self) {
-        let open = CustomMenuItem::new("open".to_string(), "Open");
-        let quit = CustomMenuItem::new("quit".to_string(), "Quit");
-        let mut module_menu = SystemTrayMenu::new();
+        // let open = CustomMenuItem::new("open".to_string(), "Open");
+        // let quit = CustomMenuItem::new("quit".to_string(), "Quit");
+        let (lock, cvar) = &*HANDLE_CONDVAR;
+        let mut state = lock.lock().unwrap();
 
+        println!("trying to get app handle");
+        while !*state {
+            state = cvar.wait(state).unwrap();
+        }
+        println!("cvar set");
+        let app = &*get_app_handle().lock().expect("failed to get app handle");
+        println!("got app handle");
+
+        let open = MenuItem::with_id(app, "open", "Open", true, None::<&str>)
+            .expect("failed to create open menu item");
+        let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)
+            .expect("failed to create quit menu item");
+        // let mut module_menu = SystemTrayMenu::new();
+
+        let mut modules_submenu_builder = SubmenuBuilder::new(app, "Modules");
         for (module, running) in self.modules_running.iter() {
             let label = format!(
                 "{} ({})",
                 module,
                 if *running { "Running" } else { "Stopped" }
             );
-            let status = if *running { "Stop" } else { "Start" };
-            let menu = SystemTrayMenu::new().add_item(CustomMenuItem::new(module, status));
-            let submenu = SystemTraySubmenu::new(label, menu);
-            module_menu = module_menu.add_submenu(submenu)
+            let module_menu = MenuItem::with_id(app, module, &label, true, None::<&str>)
+                .expect("failed to create module menu item");
+            modules_submenu_builder = modules_submenu_builder.item(&module_menu);
         }
 
         for module in self.modules_in_path.iter() {
             if !self.modules_running.contains_key(module) {
-                let menu = SystemTrayMenu::new().add_item(CustomMenuItem::new(module, "Start"));
-                let submenu = SystemTraySubmenu::new(module, menu);
-                module_menu = module_menu.add_submenu(submenu);
+                let module_menu = MenuItem::with_id(app, module, module, true, None::<&str>)
+                    .expect("failed to create module menu item");
+                modules_submenu_builder = modules_submenu_builder.item(&module_menu);
             }
         }
 
-        let module_submenu = SystemTraySubmenu::new("Modules", module_menu);
-        let menu = SystemTrayMenu::new()
-            .add_item(open)
-            .add_native_item(SystemTrayMenuItem::Separator)
-            .add_submenu(module_submenu)
-            .add_native_item(SystemTrayMenuItem::Separator)
-            .add_item(quit);
+        let module_submenu = modules_submenu_builder
+            .build()
+            .expect("failed to create module submenu");
+        let menu = Menu::with_items(app, &[&open, &module_submenu, &quit])
+            .expect("failed to create tray menu");
 
-        let (lock, cvar) = &*HANDLE_CONDVAR;
-        let mut state = lock.lock().unwrap();
-
-        while !*state {
-            state = cvar.wait(state).unwrap();
-        }
-
-        let app = get_app_handle().lock().expect("failed to get app handle");
-        let tray_handle = app.tray_handle();
-        tray_handle.set_menu(menu).expect("failed to set tray menu");
-        self.modules_menu_set = true;
+        let tray_id = get_tray_id();
+        app.tray_by_id(tray_id).expect("failed to get tray by id").set_menu(Some(menu)).unwrap();
+        println!("set tray menu");
     }
     pub fn start_module(&self, name: &str) {
         if !self.is_module_running(name) {
@@ -157,9 +164,9 @@ fn send_sigterm(pid: u32) -> Result<(), nix::Error> {
     let pid = Pid::from_raw(pid as i32);
     let res = signal::kill(pid, Signal::SIGTERM);
     if let Err(e) = res {
-        Err(e)
+        return Err(e);
     } else {
-        Ok(())
+        return Ok(());
     }
 }
 
@@ -179,7 +186,8 @@ fn send_sigterm(pid: u32) -> Result<(), std::io::Error> {
 pub fn start_manager() -> Arc<Mutex<ManagerState>> {
     let (tx, rx) = channel();
     let state = Arc::new(Mutex::new(ManagerState::new(tx.clone())));
-
+    
+    // TODO: make this configurable
     // Start the modules
     let autostart_modules = ["aw-watcher-afk", "aw-watcher-window"];
     for module in autostart_modules.iter() {
@@ -271,7 +279,7 @@ fn get_modules_in_path() -> BTreeSet<String> {
                             && metadata.permissions().mode() & 0o111 != 0
                         {
                             if let Some(file_name) = entry.file_name().to_str() {
-                                if file_name.starts_with("aw") && !file_name.contains('.') {
+                                if file_name.starts_with("aw") && !file_name.contains(".") {
                                     // starts with aw and doesn't have an extension
                                     set.insert(file_name.to_string());
                                 }
