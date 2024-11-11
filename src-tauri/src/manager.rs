@@ -122,7 +122,10 @@ impl ManagerState {
             .expect("failed to create tray menu");
 
         let tray_id = get_tray_id();
-        app.tray_by_id(tray_id).expect("failed to get tray by id").set_menu(Some(menu)).unwrap();
+        app.tray_by_id(tray_id)
+            .expect("failed to get tray by id")
+            .set_menu(Some(menu))
+            .unwrap();
         println!("set tray menu");
     }
     pub fn start_module(&self, name: &str) {
@@ -186,7 +189,7 @@ fn send_sigterm(pid: u32) -> Result<(), std::io::Error> {
 pub fn start_manager() -> Arc<Mutex<ManagerState>> {
     let (tx, rx) = channel();
     let state = Arc::new(Mutex::new(ManagerState::new(tx.clone())));
-    
+
     // TODO: make this configurable
     // Start the modules
     let autostart_modules = ["aw-watcher-afk", "aw-watcher-window"];

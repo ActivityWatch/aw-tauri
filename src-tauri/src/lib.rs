@@ -1,16 +1,15 @@
 use aw_server::endpoints::build_rocket;
 use lazy_static::lazy_static;
-use tauri::tray::TrayIconId;
 use std::path::PathBuf;
 use std::sync::{Condvar, Mutex, OnceLock};
+use tauri::tray::TrayIconId;
 
 mod manager;
 
 use tauri::{
     menu::{Menu, MenuItem},
     tray::TrayIconBuilder,
-    AppHandle,
-    Manager,
+    AppHandle, Manager,
 };
 
 static HANDLE: OnceLock<Mutex<AppHandle>> = OnceLock::new();
@@ -86,24 +85,25 @@ pub fn run() {
                 let manager_state = manager::start_manager();
 
                 let open = MenuItem::with_id(app, "open", "Open", true, None::<&str>)
-                .expect("failed to create open menu item");
+                    .expect("failed to create open menu item");
                 let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)
                     .expect("failed to create quit menu item");
 
-                let menu = Menu::with_items(app, &[&open, &quit])
-                .expect("failed to create tray menu");
+                let menu =
+                    Menu::with_items(app, &[&open, &quit]).expect("failed to create tray menu");
 
                 let tray = TrayIconBuilder::new()
-                .icon(app.default_window_icon().unwrap().clone())
-                .menu(&menu)
-                .menu_on_left_click(true)
-                .build(app).expect("failed to create tray");
+                    .icon(app.default_window_icon().unwrap().clone())
+                    .menu(&menu)
+                    .menu_on_left_click(true)
+                    .build(app)
+                    .expect("failed to create tray");
 
                 //NOTE: init_app_handle must be called after TRAY_ID.set
                 TRAY_ID.set(tray.id().clone()).unwrap();
                 init_app_handle(app.handle().clone());
 
-                app.on_menu_event(move |app, event|{
+                app.on_menu_event(move |app, event| {
                     if event.id() == open.id() {
                         println!("system tray received a open click");
                         let windows = app.webview_windows();
@@ -114,8 +114,7 @@ pub fn run() {
                         let state = manager_state.lock().unwrap();
                         state.stop_modules();
                         app.exit(0);
-                    }
-                    else {
+                    } else {
                         // Modules menu clicks
                         let mut state = manager_state.lock().unwrap();
                         state.handle_system_click(&event.id().0);
