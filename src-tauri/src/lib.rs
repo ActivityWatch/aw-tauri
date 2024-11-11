@@ -125,12 +125,9 @@ pub fn run() {
             Ok(())
         })
         .on_window_event(|window, event| {
-            match &event {
-                tauri::WindowEvent::CloseRequested { api, .. } => {
-                    api.prevent_close();
-                    window.hide().unwrap();
-                }
-                _ => {}
+            if let tauri::WindowEvent::CloseRequested { api, .. } = &event {
+                api.prevent_close();
+                window.hide().unwrap();
             };
         })
         .plugin(tauri_plugin_shell::init())

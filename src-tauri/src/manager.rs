@@ -167,9 +167,9 @@ fn send_sigterm(pid: u32) -> Result<(), nix::Error> {
     let pid = Pid::from_raw(pid as i32);
     let res = signal::kill(pid, Signal::SIGTERM);
     if let Err(e) = res {
-        return Err(e);
+        Err(e)
     } else {
-        return Ok(());
+        Ok(())
     }
 }
 
