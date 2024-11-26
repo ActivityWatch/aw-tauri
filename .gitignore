@@ -25,3 +25,6 @@ dist-ssr
 
 # generated files
 src-tauri/icons/*
+Cargo.lock
+Cargo.toml
+/target/
