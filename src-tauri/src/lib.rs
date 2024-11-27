@@ -48,7 +48,7 @@ pub fn run() {
             MacosLauncher::LaunchAgent,
             Some(vec![]),
         ))
-        .plugin(tauri_plugin_single_instance::init(|app, args, cwd| {
+        .plugin(tauri_plugin_single_instance::init(|_app, _args, _cwd| {
             println!("Another instance is running, quitting!");
         }))
         .setup(|app| {
