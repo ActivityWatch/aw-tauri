@@ -48,6 +48,9 @@ pub fn run() {
             MacosLauncher::LaunchAgent,
             Some(vec![]),
         ))
+        .plugin(tauri_plugin_single_instance::init(|app, args, cwd| {
+            println!("Another instance is running, quitting!");
+        }))
         .setup(|app| {
             {
                 // Get the autostart manager

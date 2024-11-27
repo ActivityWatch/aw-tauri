@@ -33,5 +33,6 @@ aw-server = { git = "https://github.com/ActivityWatch/aw-server-rust.git", branc
 aw-datastore = { git = "https://github.com/ActivityWatch/aw-server-rust.git", branch = "master" }
 
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
+tauri-plugin-single-instance = "2"
 tauri-plugin-autostart = "2"
 
