@@ -83,13 +83,13 @@ impl ManagerState {
         let (lock, cvar) = &*HANDLE_CONDVAR;
         let mut state = lock.lock().unwrap();
 
-        println!("trying to get app handle");
+        dbg!("trying to get app handle");
         while !*state {
             state = cvar.wait(state).unwrap();
         }
-        println!("cvar set");
+        dbg!("cvar set");
         let app = &*get_app_handle().lock().expect("failed to get app handle");
-        println!("got app handle");
+        dbg!("got app handle");
 
         let open = MenuItem::with_id(app, "open", "Open", true, None::<&str>)
             .expect("failed to create open menu item");
