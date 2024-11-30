@@ -43,7 +43,6 @@ fn greet(name: &str) -> String {
 pub fn run() {
     tauri::Builder::default()
         .setup(|app| {
-            #[cfg(debug_assertions)]
             {
                 let testing = true;
                 let legacy_import = false;
