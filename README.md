@@ -66,10 +66,10 @@ Secondary goal is to add extras supported by Tauri (updater, autostart).
      - [ ] Remove placeholder Vue app
          - Or replace with new UI for module management? (a bit redundant)
      - [x] Build aw-webui as part of build process
-     - [ ] Error dialog when module crashes, restart logic
-         - https://beta.tauri.app/features/dialog/
-     - [ ] https://beta.tauri.app/features/autostart/
-     - [ ] https://beta.tauri.app/features/single-instance/
+     - [x] Error dialog when module crashes, restart logic
+         - https://tauri.app/plugin/dialog/
+     - [x] https://tauri.app/plugin/autostart/
+     - [x] https://tauri.app/plugin/single-instance/
 
 ---
 
