@@ -31,6 +31,7 @@ nix = { version = "0.28.0", features = ["process", "signal"] }
 winapi = { version = "0.3", features = ["winuser"] }
 aw-server = { git = "https://github.com/ActivityWatch/aw-server-rust.git", branch = "master" }
 aw-datastore = { git = "https://github.com/ActivityWatch/aw-server-rust.git", branch = "master" }
+tauri-plugin-dialog = "2"
 
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
 tauri-plugin-autostart = "2"
