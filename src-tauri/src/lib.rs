@@ -1,5 +1,7 @@
 use aw_server::endpoints::build_rocket;
+use directories::ProjectDirs;
 use lazy_static::lazy_static;
+use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::{Condvar, Mutex, OnceLock};
 use tauri::tray::TrayIconId;
@@ -19,6 +21,7 @@ lazy_static! {
     static ref HANDLE_CONDVAR: (Mutex<bool>, Condvar) = (Mutex::new(false), Condvar::new());
 }
 static TRAY_ID: OnceLock<TrayIconId> = OnceLock::new();
+static CONFIG: OnceLock<Config> = OnceLock::new();
 
 fn init_app_handle(handle: AppHandle) {
     HANDLE.get_or_init(|| Mutex::new(handle));
@@ -35,6 +38,56 @@ pub(crate) fn get_app_handle() -> &'static Mutex<AppHandle> {
 pub(crate) fn get_tray_id() -> &'static TrayIconId {
     TRAY_ID.get().expect("TRAY_ID not initialized")
 }
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct Config {
+    pub autostart_modules: Vec<String>,
+    pub autolaunch: bool,
+    pub autostart_minimized: bool,
+    pub port: u16,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Config {
+            autolaunch: true,
+            autostart_minimized: true, // TODO: implement this
+            autostart_modules: vec![
+                "aw-watcher-afk".to_string(),
+                "aw-watcher-window".to_string(),
+                "aw-awatcher".to_string(),
+            ],
+            port: 5699, // TODO: update before going stable
+        }
+    }
+}
+
+fn get_config_path() -> PathBuf {
+    let project_dirs =
+        ProjectDirs::from("net", "ActivityWatch", "Aw-Tauri").expect("Failed to get project dirs");
+    let config_dir = project_dirs.config_dir();
+    let config_path = config_dir.join("config.toml");
+    config_path
+}
+
+pub(crate) fn get_config() -> &'static Config {
+    CONFIG.get_or_init(|| {
+        let config_path = get_config_path();
+        if config_path.exists() {
+            let config_str =
+                std::fs::read_to_string(config_path).expect("Failed to read config file");
+            toml::from_str(&config_str).expect("Failed to parse config file")
+        } else {
+            let config = Config::default();
+            let config_str = toml::to_string(&config).expect("Failed to serialize config");
+            std::fs::create_dir_all(config_path.parent().unwrap())
+                .expect("Failed to create config dir");
+            std::fs::write(config_path, config_str).expect("Failed to write config file");
+            config
+        }
+    })
+}
+
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
 #[tauri::command]
 fn greet(name: &str) -> String {
@@ -51,10 +104,23 @@ pub fn run() {
         ))
         .setup(|app| {
             {
+                let user_config = get_config();
                 // Get the autostart manager
                 let autostart_manager = app.autolaunch();
-                // Enable autostart
-                let _ = autostart_manager.enable();
+
+                match user_config.autolaunch {
+                    true => {
+                        autostart_manager
+                            .enable()
+                            .expect("Unable to enable autostart");
+                    }
+                    false => {
+                        autostart_manager
+                            .disable()
+                            .expect("Unable to disable autosart");
+                    }
+                }
+
                 // Check enable state
                 println!(
                     "registered for autostart? {}",
@@ -66,8 +132,8 @@ pub fn run() {
                 let testing = true;
                 let legacy_import = false;
 
-                let mut config = aw_server::config::create_config(testing);
-                config.port = 5699;
+                let mut aw_config = aw_server::config::create_config(testing);
+                aw_config.port = user_config.port;
                 let db_path = aw_server::dirs::db_path(testing)
                     .expect("Failed to get db path")
                     .to_str()
@@ -98,7 +164,7 @@ pub fn run() {
                     device_id,
                 };
 
-                tauri::async_runtime::spawn(build_rocket(server_state, config).launch());
+                tauri::async_runtime::spawn(build_rocket(server_state, aw_config).launch());
 
                 let manager_state = manager::start_manager();
 
@@ -144,8 +210,12 @@ pub fn run() {
                         state.handle_system_click(&event.id().0);
                     }
                 });
+                if user_config.autolaunch && user_config.autostart_minimized {
+                    if let Some(window) = app.webview_windows().get("main") {
+                        window.hide().unwrap();
+                    }
+                }
             }
-
             Ok(())
         })
         .on_window_event(|window, event| {
