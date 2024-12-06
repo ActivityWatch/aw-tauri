@@ -32,7 +32,7 @@ use winapi::shared::minwindef::DWORD;
 #[cfg(windows)]
 use winapi::um::wincon::{GenerateConsoleCtrlEvent, CTRL_BREAK_EVENT};
 
-use crate::{get_app_handle, get_tray_id, HANDLE_CONDVAR};
+use crate::{get_app_handle, get_config, get_tray_id, HANDLE_CONDVAR};
 
 #[derive(Debug)]
 pub enum ModuleMessage {
@@ -194,9 +194,8 @@ pub fn start_manager() -> Arc<Mutex<ManagerState>> {
     let (tx, rx) = channel();
     let state = Arc::new(Mutex::new(ManagerState::new(tx.clone())));
 
-    // TODO: make this configurable
     // Start the modules
-    let autostart_modules = ["aw-watcher-afk", "aw-watcher-window"];
+    let autostart_modules = get_config().autostart_modules.clone();
     for module in autostart_modules.iter() {
         state.lock().unwrap().start_module(module);
     }
@@ -256,7 +255,8 @@ fn handle(rx: Receiver<ModuleMessage>, state: Arc<Mutex<ManagerState>>) {
 fn start_module_thread(name: String, tx: Sender<ModuleMessage>) {
     thread::spawn(move || {
         // Start the child process
-        let args = ["--port", "5699"];
+        let port_string = get_config().port.to_string();
+        let args = ["--port", port_string.as_str()];
         let child = Command::new(&name)
             .args(args)
             .stdout(std::process::Stdio::piped())
