@@ -80,6 +80,8 @@ pub(crate) fn get_config() -> &'static Config {
         } else {
             let config = Config::default();
             let config_str = toml::to_string(&config).expect("Failed to serialize config");
+            std::fs::create_dir_all(config_path.parent().unwrap())
+                .expect("Failed to create config dir");
             std::fs::write(config_path, config_str).expect("Failed to write config file");
             config
         }
