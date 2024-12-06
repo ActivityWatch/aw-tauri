@@ -4,9 +4,12 @@ use lazy_static::lazy_static;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::{Condvar, Mutex, OnceLock};
+use std::thread;
+use std::time::Duration;
 use tauri::tray::TrayIconId;
 use tauri_plugin_autostart::MacosLauncher;
 use tauri_plugin_autostart::ManagerExt;
+use tauri_plugin_notification::NotificationExt;
 
 mod manager;
 
@@ -22,6 +25,7 @@ lazy_static! {
 }
 static TRAY_ID: OnceLock<TrayIconId> = OnceLock::new();
 static CONFIG: OnceLock<Config> = OnceLock::new();
+static FIRST_RUN: OnceLock<bool> = OnceLock::new();
 
 fn init_app_handle(handle: AppHandle) {
     HANDLE.get_or_init(|| Mutex::new(handle));
@@ -39,6 +43,10 @@ pub(crate) fn get_tray_id() -> &'static TrayIconId {
     TRAY_ID.get().expect("TRAY_ID not initialized")
 }
 
+pub(crate) fn is_first_run() -> bool {
+    FIRST_RUN.get().expect("FIRST_RUN not initialized").clone()
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Config {
     pub autostart_modules: Vec<String>,
@@ -51,7 +59,7 @@ impl Default for Config {
     fn default() -> Self {
         Config {
             autolaunch: true,
-            autostart_minimized: true, // TODO: implement this
+            autostart_minimized: true,
             autostart_modules: vec![
                 "aw-watcher-afk".to_string(),
                 "aw-watcher-window".to_string(),
@@ -74,12 +82,17 @@ pub(crate) fn get_config() -> &'static Config {
     CONFIG.get_or_init(|| {
         let config_path = get_config_path();
         if config_path.exists() {
+            FIRST_RUN.set(false).expect("failed to set FIRST_RUN");
             let config_str =
                 std::fs::read_to_string(config_path).expect("Failed to read config file");
             toml::from_str(&config_str).expect("Failed to parse config file")
         } else {
+            FIRST_RUN.set(true).expect("failed to set FIRST_RUN");
+
             let config = Config::default();
             let config_str = toml::to_string(&config).expect("Failed to serialize config");
+            std::fs::create_dir_all(config_path.parent().unwrap())
+                .expect("Failed to create config dir");
             std::fs::create_dir_all(config_path.parent().unwrap())
                 .expect("Failed to create config dir");
             std::fs::write(config_path, config_str).expect("Failed to write config file");
@@ -97,6 +110,7 @@ fn greet(name: &str) -> String {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_autostart::init(
             MacosLauncher::LaunchAgent,
@@ -107,6 +121,7 @@ pub fn run() {
         }))
         .setup(|app| {
             {
+                init_app_handle(app.handle().clone());
                 let user_config = get_config();
                 // Get the autostart manager
                 let autostart_manager = app.autolaunch();
@@ -190,12 +205,9 @@ pub fn run() {
                     .build(app)
                     .expect("failed to create tray");
 
-                //NOTE: init_app_handle must be called after TRAY_ID.set
                 TRAY_ID
                     .set(tray.id().clone())
                     .expect("failed to set TRAY_ID");
-                init_app_handle(app.handle().clone());
-
                 app.on_menu_event(move |app, event| {
                     if event.id() == open.id() {
                         println!("system tray received a open click");
@@ -218,6 +230,21 @@ pub fn run() {
                         window.hide().unwrap();
                     }
                 }
+            }
+
+            let first_run = is_first_run();
+            if first_run {
+                thread::spawn(|| {
+                    // TODO: debug and remove the sleep
+                    thread::sleep(Duration::from_secs(1));
+                    let app = &*get_app_handle().lock().expect("failed to get app handle");
+                    app.notification()
+                        .builder()
+                        .title("Aw-Tauri")
+                        .body("Aw-Tauri is running in the background")
+                        .show()
+                        .unwrap();
+                });
             }
             Ok(())
         })
