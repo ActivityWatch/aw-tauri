@@ -213,8 +213,12 @@ pub fn run() {
                         state.handle_system_click(&event.id().0);
                     }
                 });
+                if user_config.autolaunch && user_config.autostart_minimized {
+                    if let Some(window) = app.webview_windows().get("main") {
+                        window.hide().unwrap();
+                    }
+                }
             }
-
             Ok(())
         })
         .on_window_event(|window, event| {
