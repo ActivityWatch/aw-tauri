@@ -23,17 +23,17 @@ static TRAY_ID: OnceLock<TrayIconId> = OnceLock::new();
 fn init_app_handle(handle: AppHandle) {
     HANDLE.get_or_init(|| Mutex::new(handle));
     let (lock, cvar) = &*HANDLE_CONDVAR;
-    let mut started = lock.lock().unwrap();
+    let mut started = lock.lock().expect("failed to lock HANDLE_CONDVAR");
     *started = true;
     cvar.notify_all();
 }
 
 pub(crate) fn get_app_handle() -> &'static Mutex<AppHandle> {
-    HANDLE.get().unwrap()
+    HANDLE.get().expect("HANDLE not initialized")
 }
 
 pub(crate) fn get_tray_id() -> &'static TrayIconId {
-    TRAY_ID.get().unwrap()
+    TRAY_ID.get().expect("TRAY_ID not initialized")
 }
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
 #[tauri::command]
@@ -58,7 +58,9 @@ pub fn run() {
                 // Check enable state
                 println!(
                     "registered for autostart? {}",
-                    autostart_manager.is_enabled().unwrap()
+                    autostart_manager
+                        .is_enabled()
+                        .expect("failed to get autostart state")
                 );
 
                 let testing = true;
@@ -109,21 +111,27 @@ pub fn run() {
                     Menu::with_items(app, &[&open, &quit]).expect("failed to create tray menu");
 
                 let tray = TrayIconBuilder::new()
-                    .icon(app.default_window_icon().unwrap().clone())
+                    .icon(
+                        app.default_window_icon()
+                            .expect("failed to get window icon")
+                            .clone(),
+                    )
                     .menu(&menu)
                     .menu_on_left_click(true)
                     .build(app)
                     .expect("failed to create tray");
 
                 //NOTE: init_app_handle must be called after TRAY_ID.set
-                TRAY_ID.set(tray.id().clone()).unwrap();
+                TRAY_ID
+                    .set(tray.id().clone())
+                    .expect("failed to set TRAY_ID");
                 init_app_handle(app.handle().clone());
 
                 app.on_menu_event(move |app, event| {
                     if event.id() == open.id() {
                         println!("system tray received a open click");
                         let windows = app.webview_windows();
-                        let window = windows.get("main").unwrap();
+                        let window = windows.get("main").expect("main window not found");
                         window.show().unwrap();
                     } else if event.id() == quit.id() {
                         println!("quit clicked!");
