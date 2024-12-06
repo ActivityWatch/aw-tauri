@@ -80,6 +80,8 @@ pub(crate) fn get_config() -> &'static Config {
         } else {
             let config = Config::default();
             let config_str = toml::to_string(&config).expect("Failed to serialize config");
+            std::fs::create_dir_all(config_path.parent().unwrap())
+                .expect("Failed to create config dir");
             std::fs::write(config_path, config_str).expect("Failed to write config file");
             config
         }
@@ -211,8 +213,12 @@ pub fn run() {
                         state.handle_system_click(&event.id().0);
                     }
                 });
+                if user_config.autolaunch && user_config.autostart_minimized {
+                    if let Some(window) = app.webview_windows().get("main") {
+                        window.hide().unwrap();
+                    }
+                }
             }
-
             Ok(())
         })
         .on_window_event(|window, event| {
