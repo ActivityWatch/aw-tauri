@@ -31,6 +31,7 @@ toml = "0.8.19"
 lazy_static = "1.4"
 #[cfg(unix)]
 nix = { version = "0.28.0", features = ["process", "signal"] }
+notify = "7.0"
 #[cfg(windows)]
 winapi = { version = "0.3", features = ["winuser"] }
 

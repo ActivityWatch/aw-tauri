@@ -2,8 +2,8 @@ use aw_server::endpoints::build_rocket;
 use directories::ProjectDirs;
 use lazy_static::lazy_static;
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
-use std::sync::{Condvar, Mutex, OnceLock};
+use std::path::{Path, PathBuf};
+use std::sync::{mpsc, Condvar, Mutex, OnceLock};
 use std::thread;
 use std::time::Duration;
 use tauri::tray::TrayIconId;
@@ -13,18 +13,71 @@ use tauri_plugin_notification::NotificationExt;
 
 mod manager;
 
+use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use tauri::{
     menu::{Menu, MenuItem},
     tray::TrayIconBuilder,
     AppHandle, Manager,
 };
 
+/// Watches for a specific file in a directory
+/// Note: The `watcher` field is needed to keep the watcher alive, even though it's not directly read
+pub struct SpecificFileWatcher {
+    #[allow(dead_code)]
+    watcher: RecommendedWatcher,
+    rx: mpsc::Receiver<Result<Event, notify::Error>>,
+    target_file: PathBuf,
+}
+
+impl SpecificFileWatcher {
+    pub fn new<P: AsRef<Path>>(dir_path: P, filename: &str) -> Result<Self, notify::Error> {
+        // Create a channel for receiving file system events
+        let (tx, rx) = mpsc::channel();
+        let target_file = dir_path.as_ref().join(filename);
+
+        // Configure the watcher with minimal overhead
+        let config = Config::default().with_poll_interval(Duration::from_secs(1));
+
+        // Create a watcher
+        let mut watcher = RecommendedWatcher::new(tx, config)?;
+
+        // Watch the directory
+        watcher.watch(dir_path.as_ref(), RecursiveMode::NonRecursive)?;
+
+        Ok(Self {
+            watcher,
+            rx,
+            target_file,
+        })
+    }
+    pub fn wait_for_file(&self) -> Result<(), Box<dyn std::error::Error>> {
+        loop {
+            if let Ok(result) = self.rx.try_recv() {
+                match result {
+                    Ok(event) => {
+                        // Check if the event is a file creation
+                        if let EventKind::Create(_create_kind) = event.kind {
+                            if event.paths.iter().any(|path| path == &self.target_file) {
+                                return Ok(());
+                            }
+                        }
+                    }
+                    Err(e) => eprintln!("Watch error: {}", e),
+                }
+            }
+
+            // Avoid busy waiting
+            std::thread::sleep(Duration::from_millis(300));
+        }
+    }
+}
+
 static HANDLE: OnceLock<Mutex<AppHandle>> = OnceLock::new();
 lazy_static! {
     static ref HANDLE_CONDVAR: (Mutex<bool>, Condvar) = (Mutex::new(false), Condvar::new());
 }
 static TRAY_ID: OnceLock<TrayIconId> = OnceLock::new();
-static CONFIG: OnceLock<Config> = OnceLock::new();
+static CONFIG: OnceLock<UserConfig> = OnceLock::new();
 static FIRST_RUN: OnceLock<bool> = OnceLock::new();
 
 fn init_app_handle(handle: AppHandle) {
@@ -44,20 +97,20 @@ pub(crate) fn get_tray_id() -> &'static TrayIconId {
 }
 
 pub(crate) fn is_first_run() -> bool {
-    FIRST_RUN.get().expect("FIRST_RUN not initialized").clone()
+    *FIRST_RUN.get().expect("FIRST_RUN not initialized")
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-pub struct Config {
+pub struct UserConfig {
     pub autostart_modules: Vec<String>,
     pub autolaunch: bool,
     pub autostart_minimized: bool,
     pub port: u16,
 }
 
-impl Default for Config {
+impl Default for UserConfig {
     fn default() -> Self {
-        Config {
+        UserConfig {
             autolaunch: true,
             autostart_minimized: true,
             autostart_modules: vec![
@@ -73,12 +126,10 @@ impl Default for Config {
 fn get_config_path() -> PathBuf {
     let project_dirs =
         ProjectDirs::from("net", "ActivityWatch", "Aw-Tauri").expect("Failed to get project dirs");
-    let config_dir = project_dirs.config_dir();
-    let config_path = config_dir.join("config.toml");
-    config_path
+    project_dirs.config_dir().join("config.toml")
 }
 
-pub(crate) fn get_config() -> &'static Config {
+pub(crate) fn get_config() -> &'static UserConfig {
     CONFIG.get_or_init(|| {
         let config_path = get_config_path();
         if config_path.exists() {
@@ -89,7 +140,7 @@ pub(crate) fn get_config() -> &'static Config {
         } else {
             FIRST_RUN.set(true).expect("failed to set FIRST_RUN");
 
-            let config = Config::default();
+            let config = UserConfig::default();
             let config_str = toml::to_string(&config).expect("Failed to serialize config");
             std::fs::create_dir_all(config_path.parent().unwrap())
                 .expect("Failed to create config dir");
@@ -115,6 +166,15 @@ pub fn run() {
             Some(vec![]),
         ))
         .plugin(tauri_plugin_single_instance::init(|_app, _args, _cwd| {
+            let config_path = get_config_path();
+            let lock_path = config_path.parent().unwrap().join("single_instance.lock");
+            let _lock_file = std::fs::OpenOptions::new()
+                .create(true)
+                .write(true)
+                .truncate(true)
+                .open(&lock_path)
+                .expect("Failed to create lock file");
+
             println!("Another instance is running, quitting!");
         }))
         .setup(|app| {
@@ -206,6 +266,7 @@ pub fn run() {
                 TRAY_ID
                     .set(tray.id().clone())
                     .expect("failed to set TRAY_ID");
+
                 app.on_menu_event(move |app, event| {
                     if event.id() == open.id() {
                         println!("system tray received a open click");
@@ -244,6 +305,24 @@ pub fn run() {
                         .unwrap();
                 });
             }
+            thread::spawn(move || {
+                let config_path = get_config_path();
+                let watcher =
+                    SpecificFileWatcher::new(config_path.parent().unwrap(), "single_instance.lock")
+                        .expect("Failed to create file watcher");
+                loop {
+                    if watcher.wait_for_file().is_ok() {
+                        let lock_path = config_path.parent().unwrap().join("single_instance.lock");
+                        std::fs::remove_file(lock_path).expect("Failed to remove lock file");
+
+                        let app = &*get_app_handle().lock().expect("failed to get app handle");
+                        if let Some(window) = app.webview_windows().get("main") {
+                            window.show().unwrap();
+                        }
+                    }
+                }
+            });
+
             Ok(())
         })
         .on_window_event(|window, event| {
