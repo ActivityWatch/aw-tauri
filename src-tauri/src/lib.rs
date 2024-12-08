@@ -323,6 +323,7 @@ pub fn run() {
                 }
             });
 
+            }
             Ok(())
         })
         .on_window_event(|window, event| {
