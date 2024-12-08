@@ -31,11 +31,13 @@ toml = "0.8.19"
 lazy_static = "1.4"
 #[cfg(unix)]
 nix = { version = "0.28.0", features = ["process", "signal"] }
+notify = "7.0"
 #[cfg(windows)]
 winapi = { version = "0.3", features = ["winuser"] }
 
 aw-server = { git = "https://github.com/ActivityWatch/aw-server-rust.git", branch = "master" }
 aw-datastore = { git = "https://github.com/ActivityWatch/aw-server-rust.git", branch = "master" }
+tauri-plugin-notification = "2"
 
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
 tauri-plugin-single-instance = "2"
