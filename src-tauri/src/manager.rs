@@ -195,7 +195,7 @@ pub fn start_manager() -> Arc<Mutex<ManagerState>> {
     let state = Arc::new(Mutex::new(ManagerState::new(tx.clone())));
 
     // Start the modules
-    let autostart_modules = get_config().autostart_modules.clone();
+    let autostart_modules = &*get_config().autostart_modules;
     for module in autostart_modules.iter() {
         state.lock().unwrap().start_module(module);
     }
