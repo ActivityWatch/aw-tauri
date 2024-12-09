@@ -43,8 +43,8 @@ pub(crate) fn get_tray_id() -> &'static TrayIconId {
     TRAY_ID.get().expect("TRAY_ID not initialized")
 }
 
-pub(crate) fn is_first_run() -> bool {
-    FIRST_RUN.get().expect("FIRST_RUN not initialized").clone()
+pub(crate) fn is_first_run() -> &'static bool {
+    FIRST_RUN.get().expect("FIRST_RUN not initialized")
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -73,8 +73,7 @@ impl Default for Config {
 fn get_config_path() -> PathBuf {
     let project_dirs =
         ProjectDirs::from("net", "ActivityWatch", "Aw-Tauri").expect("Failed to get project dirs");
-    let config_dir = project_dirs.config_dir();
-    let config_path = config_dir.join("config.toml");
+    let config_path = project_dirs.config_dir().join("config.toml");
     config_path
 }
 
@@ -233,7 +232,7 @@ pub fn run() {
             }
 
             let first_run = is_first_run();
-            if first_run {
+            if *first_run {
                 thread::spawn(|| {
                     // TODO: debug and remove the sleep
                     thread::sleep(Duration::from_secs(1));
