@@ -1,12 +1,17 @@
 use aw_server::endpoints::build_rocket;
 use directories::ProjectDirs;
 use lazy_static::lazy_static;
+use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
-use std::sync::{Condvar, Mutex, OnceLock};
+use std::fs::{create_dir_all, read_to_string, remove_file, write, OpenOptions};
+use std::path::{Path, PathBuf};
+use std::sync::{mpsc, Condvar, Mutex, OnceLock};
+use std::thread;
+use std::time::Duration;
 use tauri::tray::TrayIconId;
 use tauri_plugin_autostart::MacosLauncher;
 use tauri_plugin_autostart::ManagerExt;
+use tauri_plugin_notification::NotificationExt;
 
 mod manager;
 
@@ -21,7 +26,8 @@ lazy_static! {
     static ref HANDLE_CONDVAR: (Mutex<bool>, Condvar) = (Mutex::new(false), Condvar::new());
 }
 static TRAY_ID: OnceLock<TrayIconId> = OnceLock::new();
-static CONFIG: OnceLock<Config> = OnceLock::new();
+static CONFIG: OnceLock<UserConfig> = OnceLock::new();
+static FIRST_RUN: OnceLock<bool> = OnceLock::new();
 
 fn init_app_handle(handle: AppHandle) {
     HANDLE.get_or_init(|| Mutex::new(handle));
@@ -39,19 +45,74 @@ pub(crate) fn get_tray_id() -> &'static TrayIconId {
     TRAY_ID.get().expect("TRAY_ID not initialized")
 }
 
+pub(crate) fn is_first_run() -> &'static bool {
+    FIRST_RUN.get().expect("FIRST_RUN not initialized")
+}
+
+pub struct SpecificFileWatcher {
+    #[allow(dead_code)]
+    watcher: RecommendedWatcher,
+    rx: mpsc::Receiver<Result<Event, notify::Error>>,
+    target_file: PathBuf,
+}
+
+impl SpecificFileWatcher {
+    pub fn new<P: AsRef<Path>>(dir_path: P, filename: &str) -> Result<Self, notify::Error> {
+        let (tx, rx) = mpsc::channel();
+
+        let target_file = dir_path.as_ref().join(filename);
+
+        // Configure the watcher with minimal overhead
+        let config = Config::default().with_poll_interval(Duration::from_secs(1));
+
+        // Create a watcher
+        let mut watcher = RecommendedWatcher::new(tx, config)?;
+
+        watcher.watch(dir_path.as_ref(), RecursiveMode::NonRecursive)?;
+
+        Ok(Self {
+            watcher,
+            rx,
+            target_file,
+        })
+    }
+
+    pub fn wait_for_file(&self) -> Result<(), Box<dyn std::error::Error>> {
+        loop {
+            // Check for events
+            if let Ok(result) = self.rx.try_recv() {
+                match result {
+                    Ok(event) => match event.kind {
+                        EventKind::Create(_) | EventKind::Modify(_) => {
+                            if event.paths.iter().any(|p| p == &self.target_file) {
+                                return Ok(());
+                            }
+                        }
+                        _ => {}
+                    },
+                    Err(e) => eprintln!("Watch error: {}", e),
+                }
+            }
+
+            // Avoid busy waiting
+            std::thread::sleep(Duration::from_millis(300));
+        }
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize)]
-pub struct Config {
+pub struct UserConfig {
     pub autostart_modules: Vec<String>,
     pub autolaunch: bool,
     pub autostart_minimized: bool,
     pub port: u16,
 }
 
-impl Default for Config {
+impl Default for UserConfig {
     fn default() -> Self {
-        Config {
+        UserConfig {
             autolaunch: true,
-            autostart_minimized: true, // TODO: implement this
+            autostart_minimized: true,
             autostart_modules: vec![
                 "aw-watcher-afk".to_string(),
                 "aw-watcher-window".to_string(),
@@ -65,24 +126,24 @@ impl Default for Config {
 fn get_config_path() -> PathBuf {
     let project_dirs =
         ProjectDirs::from("net", "ActivityWatch", "Aw-Tauri").expect("Failed to get project dirs");
-    let config_dir = project_dirs.config_dir();
-    let config_path = config_dir.join("config.toml");
+    let config_path = project_dirs.config_dir().join("config.toml");
     config_path
 }
 
-pub(crate) fn get_config() -> &'static Config {
+pub(crate) fn get_config() -> &'static UserConfig {
     CONFIG.get_or_init(|| {
         let config_path = get_config_path();
         if config_path.exists() {
-            let config_str =
-                std::fs::read_to_string(config_path).expect("Failed to read config file");
+            FIRST_RUN.set(false).expect("failed to set FIRST_RUN");
+            let config_str = read_to_string(config_path).expect("Failed to read config file");
             toml::from_str(&config_str).expect("Failed to parse config file")
         } else {
-            let config = Config::default();
+            FIRST_RUN.set(true).expect("failed to set FIRST_RUN");
+
+            let config = UserConfig::default();
             let config_str = toml::to_string(&config).expect("Failed to serialize config");
-            std::fs::create_dir_all(config_path.parent().unwrap())
-                .expect("Failed to create config dir");
-            std::fs::write(config_path, config_str).expect("Failed to write config file");
+            create_dir_all(config_path.parent().unwrap()).expect("Failed to create config dir");
+            write(config_path, config_str).expect("Failed to write config file");
             config
         }
     })
@@ -97,13 +158,31 @@ fn greet(name: &str) -> String {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_autostart::init(
             MacosLauncher::LaunchAgent,
             Some(vec![]),
         ))
+        .plugin(tauri_plugin_single_instance::init(|_app, _args, _cwd| {
+            let lock_path = get_config_path()
+                .parent()
+                .unwrap()
+                .join("single_instance.lock");
+            if !lock_path.parent().unwrap().exists() {
+                create_dir_all(lock_path.parent().unwrap()).expect("Failed to create lock dir");
+            }
+            let _lock_file = OpenOptions::new()
+                .create(true)
+                .write(true)
+                .truncate(true)
+                .open(lock_path)
+                .expect("Failed to open lock file");
+            println!("Another instance is running, quitting!");
+        }))
         .setup(|app| {
             {
+                init_app_handle(app.handle().clone());
                 let user_config = get_config();
                 // Get the autostart manager
                 let autostart_manager = app.autolaunch();
@@ -187,12 +266,9 @@ pub fn run() {
                     .build(app)
                     .expect("failed to create tray");
 
-                //NOTE: init_app_handle must be called after TRAY_ID.set
                 TRAY_ID
                     .set(tray.id().clone())
                     .expect("failed to set TRAY_ID");
-                init_app_handle(app.handle().clone());
-
                 app.on_menu_event(move |app, event| {
                     if event.id() == open.id() {
                         println!("system tray received a open click");
@@ -216,6 +292,37 @@ pub fn run() {
                     }
                 }
             }
+
+            let first_run = is_first_run();
+            if *first_run {
+                thread::spawn(|| {
+                    // TODO: debug and remove the sleep
+                    thread::sleep(Duration::from_secs(1));
+                    let app = &*get_app_handle().lock().expect("failed to get app handle");
+                    app.notification()
+                        .builder()
+                        .title("Aw-Tauri")
+                        .body("Aw-Tauri is running in the background")
+                        .show()
+                        .unwrap();
+                });
+            }
+            thread::spawn(|| {
+                let config_path = get_config_path();
+                let watcher =
+                    SpecificFileWatcher::new(config_path.parent().unwrap(), "single_instance.lock")
+                        .expect("Failed to create file watcher");
+                loop {
+                    if watcher.wait_for_file().is_ok() {
+                        remove_file(config_path.parent().unwrap().join("single_instance.lock"))
+                            .expect("Failed to remove lock file");
+                        let app = &*get_app_handle().lock().expect("failed to get app handle");
+                        if let Some(window) = app.webview_windows().get("main") {
+                            window.show().unwrap();
+                        }
+                    }
+                }
+            });
             Ok(())
         })
         .on_window_event(|window, event| {
