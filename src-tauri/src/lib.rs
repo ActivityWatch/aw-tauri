@@ -359,8 +359,36 @@ pub fn run() {
                 }
             }
 
-            handle_first_run();
-            listen_for_lockfile();
+            let first_run = is_first_run();
+            if *first_run {
+                thread::spawn(|| {
+                    // TODO: debug and remove the sleep
+                    thread::sleep(Duration::from_secs(1));
+                    let app = &*get_app_handle().lock().expect("failed to get app handle");
+                    app.notification()
+                        .builder()
+                        .title("Aw-Tauri")
+                        .body("Aw-Tauri is running in the background")
+                        .show()
+                        .unwrap();
+                });
+            }
+            thread::spawn(|| {
+                let config_path = get_config_path();
+                let watcher =
+                    SpecificFileWatcher::new(config_path.parent().unwrap(), "single_instance.lock")
+                        .expect("Failed to create file watcher");
+                loop {
+                    if watcher.wait_for_file().is_ok() {
+                        remove_file(config_path.parent().unwrap().join("single_instance.lock"))
+                            .expect("Failed to remove lock file");
+                        let app = &*get_app_handle().lock().expect("failed to get app handle");
+                        if let Some(window) = app.webview_windows().get("main") {
+                            window.show().unwrap();
+                        }
+                    }
+                }
+            });
             Ok(())
         })
         .on_window_event(|window, event| {
