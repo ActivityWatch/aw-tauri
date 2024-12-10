@@ -82,15 +82,14 @@ impl SpecificFileWatcher {
             // Check for events
             if let Ok(result) = self.rx.try_recv() {
                 match result {
-                    Ok(event) => {
-                        // Check if the event is a file creation
-                        if let EventKind::Create(_create_kind) = event.kind {
-                            // Check if any of the paths match our target file
-                            if event.paths.iter().any(|path| path == &self.target_file) {
+                    Ok(event) => match event.kind {
+                        EventKind::Create(_) | EventKind::Modify(_) => {
+                            if event.paths.iter().any(|p| p == &self.target_file) {
                                 return Ok(());
                             }
                         }
-                    }
+                        _ => {}
+                    },
                     Err(e) => eprintln!("Watch error: {}", e),
                 }
             }
@@ -315,8 +314,8 @@ pub fn run() {
                         .expect("Failed to create file watcher");
                 loop {
                     if watcher.wait_for_file().is_ok() {
-                        // delete the file
-                        remove_file(&config_path).expect("Failed to remove lock file");
+                        remove_file(config_path.parent().unwrap().join("single_instance.lock"))
+                            .expect("Failed to remove lock file");
                         let app = &*get_app_handle().lock().expect("failed to get app handle");
                         if let Some(window) = app.webview_windows().get("main") {
                             window.show().unwrap();
