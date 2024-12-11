@@ -315,6 +315,8 @@ fn get_modules_in_path() -> BTreeSet<String> {
     }
     set.remove("awk"); // common in most unix systems
     set.remove("aw-tauri");
+    set.remove("aw-client");
+    set.remove("aw-cli");
 
     set
 }
@@ -335,6 +337,9 @@ fn get_modules_in_path() -> BTreeSet<String> {
             }
         }
     }
+    set.remove("aw-tauri");
+    set.remove("aw-client");
+    set.remove("aw-cli");
 
     set
 }
