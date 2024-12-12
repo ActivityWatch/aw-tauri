@@ -33,13 +33,15 @@ Benefits of Tauri:
  - Tauri CLI (`npm install -g @tauri-apps/cli`)
  - Tauri dependencies (see [their docs](https://v2.tauri.app/start/prerequisites/))
 
+Alternatively, you can quickly get a development environment up and running on MacOS or Linux by running `devbox shell` in the project directory (to install devbox: `curl -fsSL https://get.jetify.com/devbox | bash`)
+
 # Usage
 
 To run:
 
 ```sh
 npm install
-npm run tauri dev
+make dev
 ```
 
 # Repo stucture

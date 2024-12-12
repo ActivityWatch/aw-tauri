@@ -1,0 +1,53 @@
+{
+  "$schema": "https://raw.githubusercontent.com/jetify-com/devbox/0.13.6/.schema/devbox.schema.json",
+  "packages": {
+    "nodejs": "20.18.1",
+    "cargo":  "latest",
+    "rustc":  "latest",
+    "libiconv": {
+       "version": "latest",
+       "platforms": ["aarch64-darwin", "x86_64-darwin"],
+    },
+    "darwin.apple_sdk.frameworks.Cocoa": {
+      "version":   "",
+      "platforms": ["aarch64-darwin", "x86_64-darwin"],
+    },
+    "darwin.apple_sdk.frameworks.WebKit": {
+      "version":   "",
+      "platforms": ["aarch64-darwin", "x86_64-darwin"],
+    },
+    "pkg-config": {
+      "version":            "latest",
+      "excluded_platforms": ["aarch64-darwin", "x86_64-darwin"],
+    },
+    // Helpful map for pkg-config -> nix packages: https://github.com/input-output-hk/haskell.nix/blob/master/lib/pkgconf-nixpkgs-map.nix
+    "openssl.dev": {
+      "excluded_platforms": ["aarch64-darwin", "x86_64-darwin"],
+    },
+    "gtk4.dev": {
+      "excluded_platforms": ["aarch64-darwin", "x86_64-darwin"],
+    },
+    "libsoup_3.dev": {
+      "excluded_platforms": ["aarch64-darwin", "x86_64-darwin"],
+    },
+    "webkitgtk_4_1.dev": {
+      "excluded_platforms": ["aarch64-darwin", "x86_64-darwin"],
+    },
+  },
+  "shell": {
+    "init_hook": [
+      "[ ! -d node_modules ] && echo Running npm install && npm install",
+      "export COLOR_BLACK='\\e[0;30m' COLOR_GRAY='\\e[1;30m' COLOR_RED='\\e[0;31m' COLOR_LIGHT_RED='\\e[1;31m' COLOR_GREEN='\\e[0;32m' COLOR_LIGHT_GREEN='\\e[1;32m' COLOR_BROWN='\\e[0;33m' COLOR_YELLOW='\\e[1;33m' COLOR_BLUE='\\e[0;34m' COLOR_LIGHT_BLUE='\\e[1;34m' COLOR_PURPLE='\\e[0;35m' COLOR_LIGHT_PURPLE='\\e[1;35m' COLOR_CYAN='\\e[0;36m'; export COLOR_LIGHT_CYAN='\\e[1;36m'; export COLOR_LIGHT_GRAY='\\e[0;37m'; export COLOR_WHITE='\\e[1;37m'",
+      "echo -e ${COLOR_RED}-------------------------------------------------------------------------------${COLOR_LIGHT_GRAY}",
+      "echo -e \"${COLOR_PURPLE}ActivityWatch Tauri${COLOR_LIGHT_GRAY}\"",
+      "echo -e \"Build: ${COLOR_LIGHT_GREEN}make${COLOR_LIGHT_GRAY}\"",
+      "echo -e \"Development run: ${COLOR_LIGHT_GREEN}make dev${COLOR_LIGHT_GRAY}\"",
+      "echo -e ${COLOR_RED}-------------------------------------------------------------------------------${COLOR_LIGHT_GRAY}",
+    ],
+    "scripts": {
+      "test": [
+        "echo \"Error: no test specified\" && exit 1",
+      ],
+    },
+  },
+}
