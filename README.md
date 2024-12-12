@@ -39,7 +39,12 @@ To run:
 
 ```sh
 npm install
-npm run tauri dev
+make dev
+```
+To build:
+
+```sh
+make build
 ```
 
 # Repo stucture
