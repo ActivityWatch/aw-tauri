@@ -24,7 +24,7 @@ use std::time::Duration;
 use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
 
 use std::{env, fs, thread};
-use tauri::menu::{Menu, MenuItem, SubmenuBuilder};
+use tauri::menu::{CheckMenuItem, Menu, MenuItem, SubmenuBuilder};
 
 // use tauri::{CustomMenuItem, SystemTrayMenu, SystemTrayMenuItem, SystemTraySubmenu};
 #[cfg(windows)]
@@ -80,8 +80,6 @@ impl ManagerState {
         self.update_tray_menu();
     }
     fn update_tray_menu(&mut self) {
-        // let open = CustomMenuItem::new("open".to_string(), "Open");
-        // let quit = CustomMenuItem::new("quit".to_string(), "Quit");
         let (lock, cvar) = &*HANDLE_CONDVAR;
         let mut state = lock.lock().unwrap();
 
@@ -101,13 +99,10 @@ impl ManagerState {
 
         let mut modules_submenu_builder = SubmenuBuilder::new(app, "Modules");
         for (module, running) in self.modules_running.iter() {
-            let label = format!(
-                "{} ({})",
-                module,
-                if *running { "Running" } else { "Stopped" }
-            );
-            let module_menu = MenuItem::with_id(app, module, &label, true, None::<&str>)
-                .expect("failed to create module menu item");
+            let label = module;
+            let module_menu =
+                CheckMenuItem::with_id(app, module, &label, true, *running, None::<&str>)
+                    .expect("failed to create module menu item");
             modules_submenu_builder = modules_submenu_builder.item(&module_menu);
         }
 
