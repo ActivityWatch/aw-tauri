@@ -183,7 +183,6 @@ fn send_sigterm(pid: u32) -> Result<(), std::io::Error> {
     } else {
         return Ok(());
     }
-    Ok(())
 }
 pub fn start_manager() -> Arc<Mutex<ManagerState>> {
     let (tx, rx) = channel();
