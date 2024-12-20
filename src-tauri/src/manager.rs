@@ -53,6 +53,7 @@ pub struct ManagerState {
     pub modules_running: BTreeMap<String, bool>,
     pub modules_in_path: BTreeSet<String>,
     pub modules_pid: HashMap<String, u32>,
+    pub modules_restart_count: HashMap<String, u32>,
     pub modules_menu_set: bool,
 }
 
@@ -63,6 +64,7 @@ impl ManagerState {
             modules_running: BTreeMap::new(),
             modules_in_path: get_modules_in_path(),
             modules_pid: HashMap::new(),
+            modules_restart_count: HashMap::new(),
             modules_menu_set: false,
         }
     }
@@ -225,18 +227,35 @@ fn handle(rx: Receiver<ModuleMessage>, state: Arc<Mutex<ManagerState>>) {
                     thread::spawn(move || {
                         thread::sleep(Duration::from_secs(1));
                         let state = &mut state_clone.lock().unwrap();
-                        state.start_module(&name_clone);
+                        let restart_count = state
+                            .modules_restart_count
+                            .entry(name_clone.clone())
+                            .or_insert(0);
+                        if *restart_count < 3 {
+                            *restart_count += 1;
+                            state.start_module(&name_clone);
+                            let app = &*get_app_handle().lock().expect("failed to get app handle");
+
+                            app.dialog()
+                                .message(format!("{name_clone} crashed. Restarting..."))
+                                .kind(MessageDialogKind::Error)
+                                .title("Warning")
+                                .show(|_| {});
+                            println!("{name_clone} exited with error");
+                        } else {
+                            let app = &*get_app_handle().lock().expect("failed to get app handle");
+
+                            app.dialog()
+                                .message(format!(
+                                    "{name_clone} keeps on crashing. Restart limit reached."
+                                ))
+                                .kind(MessageDialogKind::Error)
+                                .title("Warning")
+                                .show(|_| {});
+                            println!("{name_clone} exited with error too many times");
+                        }
                     });
 
-                    let app = &*get_app_handle().lock().expect("failed to get app handle");
-
-                    app.dialog()
-                        .message(format!("{name} crashed. Restarting..."))
-                        .kind(MessageDialogKind::Error)
-                        .title("Warning")
-                        .show(|_| {});
-
-                    println!("{name} exited with error");
                     println!("stdout: {}", String::from_utf8_lossy(&output.stdout));
                     println!("stderr: {}", String::from_utf8_lossy(&output.stderr));
                 }
