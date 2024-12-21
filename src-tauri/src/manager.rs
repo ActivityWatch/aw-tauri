@@ -20,13 +20,11 @@ use std::sync::{
     Arc, Mutex,
 };
 use std::time::Duration;
-// use std::thread::sleep;
 use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
 
 use std::{env, fs, thread};
 use tauri::menu::{CheckMenuItem, Menu, MenuItem, SubmenuBuilder};
 
-// use tauri::{CustomMenuItem, SystemTrayMenu, SystemTrayMenuItem, SystemTraySubmenu};
 #[cfg(windows)]
 use winapi::shared::minwindef::DWORD;
 #[cfg(windows)]
@@ -97,7 +95,6 @@ impl ManagerState {
             .expect("failed to create open menu item");
         let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)
             .expect("failed to create quit menu item");
-        // let mut module_menu = SystemTrayMenu::new();
 
         let mut modules_submenu_builder = SubmenuBuilder::new(app, "Modules");
         for (module, running) in self.modules_running.iter() {
