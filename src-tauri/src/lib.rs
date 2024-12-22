@@ -13,8 +13,10 @@ use tauri_plugin_autostart::MacosLauncher;
 use tauri_plugin_autostart::ManagerExt;
 use tauri_plugin_notification::NotificationExt;
 
+mod logging;
 mod manager;
 
+use log::info;
 use tauri::{
     menu::{Menu, MenuItem},
     tray::TrayIconBuilder,
@@ -157,6 +159,11 @@ fn greet(name: &str) -> String {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Initialize logging
+    if let Err(e) = logging::setup_logging() {
+        eprintln!("Failed to initialize logging: {}", e);
+    }
+
     tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_dialog::init())
@@ -178,7 +185,7 @@ pub fn run() {
                 .truncate(true)
                 .open(lock_path)
                 .expect("Failed to open lock file");
-            println!("Another instance is running, quitting!");
+            info!("Another instance is running, quitting!");
         }))
         .setup(|app| {
             {
@@ -201,8 +208,8 @@ pub fn run() {
                 }
 
                 // Check enable state
-                println!(
-                    "registered for autostart? {}",
+                info!(
+                    "Registered for autostart: {}",
                     autostart_manager
                         .is_enabled()
                         .expect("failed to get autostart state")
@@ -225,7 +232,7 @@ pub fn run() {
                 let asset_path_opt = if let Ok(path_str) = &webui_var {
                     let asset_path = PathBuf::from(&path_str);
                     if asset_path.exists() {
-                        println!("Using webui path: {}", path_str);
+                        info!("Using webui path: {}", path_str);
                         Some(asset_path)
                     } else {
                         panic!("Path set via env var AW_WEBUI_DIR does not exist");

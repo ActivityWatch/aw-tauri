@@ -487,8 +487,11 @@ version = "0.1.0"
 dependencies = [
  "aw-datastore",
  "aw-server",
+ "chrono",
  "directories",
+ "fern",
  "lazy_static",
+ "log",
  "nix 0.28.0",
  "notify",
  "serde",

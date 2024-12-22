@@ -1,7 +1,3 @@
-#[cfg(unix)]
-use nix::sys::signal::{self, Signal};
-#[cfg(unix)]
-use nix::unistd::Pid;
 /// A process manager for ActivityWatch
 ///
 /// Used to start, stop and manage the lifecycle modules like aw-watcher-afk and aw-watcher-window.
@@ -11,6 +7,11 @@ use nix::unistd::Pid;
 /// their state.
 ///
 /// If a module crashes, the manager will notify the user and ask if they want to restart it.
+use log::{debug, error, info};
+#[cfg(unix)]
+use nix::sys::signal::{self, Signal};
+#[cfg(unix)]
+use nix::unistd::Pid;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
@@ -67,14 +68,14 @@ impl ManagerState {
         }
     }
     fn started_module(&mut self, name: &str, pid: u32) {
-        println!("started {name}");
+        info!("Started module: {name}");
         self.modules_running.insert(name.to_string(), true);
         self.modules_pid.insert(name.to_string(), pid);
-        println!("{:?}", self.modules_running);
+        debug!("Running modules: {:?}", self.modules_running);
         self.update_tray_menu();
     }
     fn stopped_module(&mut self, name: &str) {
-        println!("stopped {name}");
+        info!("Stopped module: {name}");
         self.modules_running.insert(name.to_string(), false);
         self.modules_pid.remove(name);
         self.update_tray_menu();
@@ -83,13 +84,13 @@ impl ManagerState {
         let (lock, cvar) = &*HANDLE_CONDVAR;
         let mut state = lock.lock().unwrap();
 
-        dbg!("trying to get app handle");
+        debug!("Attempting to get app handle");
         while !*state {
             state = cvar.wait(state).unwrap();
         }
-        dbg!("cvar set");
+        debug!("Condition variable set");
         let app = &*get_app_handle().lock().expect("failed to get app handle");
-        dbg!("got app handle");
+        debug!("App handle acquired");
 
         let open = MenuItem::with_id(app, "open", "Open", true, None::<&str>)
             .expect("failed to create open menu item");
@@ -100,7 +101,7 @@ impl ManagerState {
         for (module, running) in self.modules_running.iter() {
             let label = module;
             let module_menu =
-                CheckMenuItem::with_id(app, module, &label, true, *running, None::<&str>)
+                CheckMenuItem::with_id(app, module, label, true, *running, None::<&str>)
                     .expect("failed to create module menu item");
             modules_submenu_builder = modules_submenu_builder.item(&module_menu);
         }
@@ -135,10 +136,10 @@ impl ManagerState {
         if let Some(pid) = self.modules_pid.get(name) {
             match send_sigterm(*pid) {
                 Ok(_) => {
-                    println!("sent SIGTERM to {name}");
+                    debug!("Sent SIGTERM to module: {name}");
                 }
                 Err(e) => {
-                    println!("failed to send SIGTERM to {name}: {e}");
+                    error!("Failed to send SIGTERM to module {name}: {e}");
                 }
             }
         }
@@ -219,8 +220,9 @@ fn handle(rx: Receiver<ModuleMessage>, state: Arc<Mutex<ManagerState>>) {
                 state.stopped_module(&name);
                 let name_clone = name.clone();
                 if output.status.success() {
-                    println!("{name} exited successfully");
+                    info!("Module {name} exited successfully");
                 } else {
+                    error!("Module {name} exited with error status");
                     thread::spawn(move || {
                         thread::sleep(Duration::from_secs(1));
                         let state = &mut state_clone.lock().unwrap();
@@ -238,7 +240,7 @@ fn handle(rx: Receiver<ModuleMessage>, state: Arc<Mutex<ManagerState>>) {
                                 .kind(MessageDialogKind::Error)
                                 .title("Warning")
                                 .show(|_| {});
-                            println!("{name_clone} exited with error");
+                            error!("Module {name_clone} crashed and is being restarted");
                         } else {
                             let app = &*get_app_handle().lock().expect("failed to get app handle");
 
@@ -249,12 +251,18 @@ fn handle(rx: Receiver<ModuleMessage>, state: Arc<Mutex<ManagerState>>) {
                                 .kind(MessageDialogKind::Error)
                                 .title("Warning")
                                 .show(|_| {});
-                            println!("{name_clone} exited with error too many times");
+                            error!("Module {name_clone} exceeded crash restart limit");
                         }
                     });
 
-                    println!("stdout: {}", String::from_utf8_lossy(&output.stdout));
-                    println!("stderr: {}", String::from_utf8_lossy(&output.stderr));
+                    debug!(
+                        "Module {name} stdout: {}",
+                        String::from_utf8_lossy(&output.stdout)
+                    );
+                    error!(
+                        "Module {name} stderr: {}",
+                        String::from_utf8_lossy(&output.stderr)
+                    );
                 }
             }
             ModuleMessage::Init {} => state.update_tray_menu(),
@@ -273,7 +281,7 @@ fn start_module_thread(name: String, tx: Sender<ModuleMessage>) {
             .spawn();
 
         if let Err(e) = child {
-            println!("Failed to start {name}: {e}");
+            error!("Failed to start module {name}: {e}");
             return;
         }
 
