@@ -28,6 +28,9 @@ lazy_static! {
     static ref HANDLE_CONDVAR: (Mutex<bool>, Condvar) = (Mutex::new(false), Condvar::new());
 }
 static TRAY_ID: OnceLock<TrayIconId> = OnceLock::new();
+lazy_static! {
+    static ref TRAY_CONDVAR: (Mutex<bool>, Condvar) = (Mutex::new(false), Condvar::new());
+}
 static CONFIG: OnceLock<UserConfig> = OnceLock::new();
 static FIRST_RUN: OnceLock<bool> = OnceLock::new();
 
@@ -43,7 +46,20 @@ pub(crate) fn get_app_handle() -> &'static Mutex<AppHandle> {
     HANDLE.get().expect("HANDLE not initialized")
 }
 
+fn init_tray_id(id: TrayIconId) {
+    TRAY_ID.set(id).expect("failed to set TRAY_ID");
+    let (lock, cvar) = &*TRAY_CONDVAR;
+    let mut initialized = lock.lock().expect("failed to lock TRAY_CONDVAR");
+    *initialized = true;
+    cvar.notify_all();
+}
+
 pub(crate) fn get_tray_id() -> &'static TrayIconId {
+    let (lock, cvar) = &*TRAY_CONDVAR;
+    let mut initialized = lock.lock().expect("failed to lock TRAY_CONDVAR");
+    while !*initialized {
+        initialized = cvar.wait(initialized).expect("failed to wait for TRAY_ID");
+    }
     TRAY_ID.get().expect("TRAY_ID not initialized")
 }
 
@@ -273,9 +289,7 @@ pub fn run() {
                     .build(app)
                     .expect("failed to create tray");
 
-                TRAY_ID
-                    .set(tray.id().clone())
-                    .expect("failed to set TRAY_ID");
+                init_tray_id(tray.id().clone());
                 app.on_menu_event(move |app, event| {
                     if event.id() == open.id() {
                         println!("system tray received a open click");
