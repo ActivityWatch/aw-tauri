@@ -1,0 +1,22 @@
+name: gptme-bot
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions: write-all
+
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+
+      - name: run gptme-bot action
+        uses: ErikBjare/gptme/.github/actions/bot@master
+        with:
+          openai_api_key: ${{ secrets.OPENAI_API_KEY }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          allowlist: "erikbjare 0xbrayo"
+
