@@ -121,7 +121,7 @@ impl SpecificFileWatcher {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct UserConfig {
     pub autostart_modules: Vec<String>,
-    pub autolaunch: bool,
+    pub autostart: bool,
     pub autostart_minimized: bool,
     pub port: u16,
 }
@@ -129,7 +129,7 @@ pub struct UserConfig {
 impl Default for UserConfig {
     fn default() -> Self {
         UserConfig {
-            autolaunch: true,
+            autostart: true,
             autostart_minimized: true,
             autostart_modules: vec![
                 "aw-watcher-afk".to_string(),
@@ -210,7 +210,7 @@ pub fn run() {
                 // Get the autostart manager
                 let autostart_manager = app.autolaunch();
 
-                match user_config.autolaunch {
+                match user_config.autostart {
                     true => {
                         autostart_manager
                             .enable()
@@ -307,7 +307,7 @@ pub fn run() {
                         state.handle_system_click(&event.id().0);
                     }
                 });
-                if user_config.autolaunch && user_config.autostart_minimized {
+                if user_config.autostart && user_config.autostart_minimized {
                     if let Some(window) = app.webview_windows().get("main") {
                         window.hide().unwrap();
                     }
