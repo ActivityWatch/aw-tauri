@@ -8,6 +8,7 @@
 ///
 /// If a module crashes, the manager will notify the user and ask if they want to restart it.
 use log::{debug, error, info};
+
 #[cfg(unix)]
 use nix::sys::signal::{self, Signal};
 #[cfg(unix)]
