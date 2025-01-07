@@ -319,7 +319,7 @@ pub fn run() {
                             .clone(),
                     )
                     .menu(&menu)
-                    .menu_on_left_click(true)
+                    .show_menu_on_left_click(true)
                     .build(app)
                     .expect("failed to create tray");
 
