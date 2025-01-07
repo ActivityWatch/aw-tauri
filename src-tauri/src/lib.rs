@@ -1,5 +1,8 @@
 use aw_server::endpoints::build_rocket;
+#[cfg(not(target_os = "linux"))]
 use directories::ProjectDirs;
+#[cfg(target_os = "linux")]
+use directories::UserDirs;
 use lazy_static::lazy_static;
 use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use serde::{Deserialize, Serialize};
@@ -175,13 +178,21 @@ impl Default for UserConfig {
     }
 }
 
+#[cfg(not(target_os = "linux"))]
 fn get_config_path() -> PathBuf {
     let project_dirs =
         ProjectDirs::from("net", "ActivityWatch", "Aw-Tauri").expect("Failed to get project dirs");
     let config_path = project_dirs.config_dir().join("config.toml");
     config_path
 }
-
+#[cfg(target_os = "linux")]
+fn get_config_path() -> PathBuf {
+    let userdirs = UserDirs::new().expect("Failed to get user dirs");
+    let home = userdirs.home_dir();
+    let config_dir = home.join(".config/activitywatch/aw-tauri");
+    let config_path = config_dir.join("config.toml");
+    config_path
+}
 pub(crate) fn get_config() -> &'static UserConfig {
     CONFIG.get_or_init(|| {
         let config_path = get_config_path();
