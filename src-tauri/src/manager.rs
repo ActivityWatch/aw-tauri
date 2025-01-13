@@ -15,6 +15,7 @@ use nix::sys::signal::{self, Signal};
 use nix::unistd::Pid;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 #[cfg(unix)]
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::process::Command;
 use std::sync::{
@@ -135,13 +136,10 @@ impl ManagerState {
     }
     pub fn stop_module(&self, name: &str) {
         if let Some(pid) = self.modules_pid.get(name) {
-            match send_sigterm(*pid) {
-                Ok(_) => {
-                    debug!("Sent SIGTERM to module: {name}");
-                }
-                Err(e) => {
-                    error!("Failed to send SIGTERM to module {name}: {e}");
-                }
+            if let Err(e) = send_sigterm(*pid) {
+                error!("Failed to send SIGTERM to module {name}: {e}");
+            } else {
+                debug!("Sent SIGTERM to module: {name}");
             }
         }
     }
@@ -310,55 +308,56 @@ fn start_module_thread(name: String, tx: Sender<ModuleMessage>) {
 
 #[cfg(unix)]
 fn get_modules_in_path() -> BTreeSet<String> {
-    let mut set: BTreeSet<String> = BTreeSet::new();
-
-    if let Some(paths) = env::var_os("PATH") {
-        for path in env::split_paths(&paths) {
-            if let Ok(entries) = fs::read_dir(&path) {
-                for entry in entries.flatten() {
-                    if let Ok(metadata) = entry.metadata() {
-                        if (metadata.is_file() || metadata.is_symlink())
-                            && metadata.permissions().mode() & 0o111 != 0
-                        {
-                            if let Some(file_name) = entry.file_name().to_str() {
-                                if file_name.starts_with("aw") && !file_name.contains(".") {
-                                    // starts with aw and doesn't have an extension
-                                    set.insert(file_name.to_string());
-                                }
-                            }
-                        }
+    let excluded = ["awk", "aw-tauri", "aw-client", "aw-cli"];
+    env::var_os("PATH")
+        .map(|paths| {
+            env::split_paths(&paths)
+                .flat_map(|path| fs::read_dir(path).ok())
+                .flatten()
+                .filter_map(Result::ok)
+                .filter_map(|entry| {
+                    let metadata = entry.metadata().ok()?;
+                    let is_executable = (metadata.is_file() || metadata.is_symlink())
+                        && metadata.permissions().mode() & 0o111 != 0;
+                    if !is_executable {
+                        return None;
                     }
-                }
-            }
-        }
-    }
-    set.remove("awk"); // common in most unix systems
-    set.remove("aw-tauri");
-    set.remove("aw-client");
-    set.remove("aw-cli");
 
-    set
+                    entry
+                        .file_name()
+                        .to_str()
+                        .map(|s| s.to_string())
+                        .filter(|name: &String| name.starts_with("aw") && !name.contains("."))
+                })
+                .collect::<BTreeSet<_>>()
+        })
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|name: &String| !excluded.contains(&name.as_str()))
+        .collect()
 }
 
 #[cfg(windows)]
 fn get_modules_in_path() -> BTreeSet<String> {
-    let mut set: BTreeSet<String> = BTreeSet::new();
-
-    if let Some(paths) = env::var_os("PATH") {
-        for path in env::split_paths(&paths) {
-            if let Ok(entries) = fs::read_dir(path) {
-                for entry in entries.filter_map(Result::ok) {
+    let excluded = ["aw-tauri", "aw-client", "aw-cli"];
+    env::var_os("PATH")
+        .map(|paths| {
+            env::split_paths(&paths)
+                .flat_map(|path| fs::read_dir(path).ok())
+                .flatten()
+                .filter_map(Result::ok)
+                .filter_map(|entry| {
                     let path = entry.path();
                     if path.is_file() && path.extension().map_or(false, |ext| ext == "exe") {
-                        set.insert(path.file_stem().unwrap().to_str().unwrap().to_string());
+                        path.file_stem()?.to_str().map(String::from)
+                    } else {
+                        None
                     }
-                }
-            }
-        }
-    }
-    set.remove("aw-tauri");
-    set.remove("aw-client");
-    set.remove("aw-cli");
-
-    set
+                })
+                .collect::<BTreeSet<_>>()
+        })
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|name| !excluded.contains(&name.as_str()))
+        .collect()
 }
