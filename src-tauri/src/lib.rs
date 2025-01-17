@@ -67,7 +67,9 @@ pub(crate) fn get_app_handle() -> &'static Mutex<AppHandle> {
 }
 
 fn init_tray_id(id: TrayIconId) {
-    TRAY_ID.set(TrayIdWrapper(id)).expect("failed to set TRAY_ID");
+    TRAY_ID
+        .set(TrayIdWrapper(id))
+        .expect("failed to set TRAY_ID");
     let (lock, cvar) = &*TRAY_CONDVAR;
     let mut initialized = lock.lock().expect("failed to lock TRAY_CONDVAR");
     *initialized = true;
@@ -207,8 +209,7 @@ fn get_config_path() -> PathBuf {
     let userdirs = UserDirs::new().expect("Failed to get user dirs");
     let home = userdirs.home_dir();
     let config_dir = home.join(".config/activitywatch/aw-tauri");
-    let config_path = config_dir.join("config.toml");
-    config_path
+    config_dir.join("config.toml")
 }
 pub(crate) fn get_config() -> &'static UserConfig {
     CONFIG.get_or_init(|| {
