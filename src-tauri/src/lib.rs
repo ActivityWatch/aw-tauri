@@ -175,24 +175,55 @@ impl SpecificFileWatcher {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-pub struct UserConfig {
-    pub autostart_modules: Vec<String>,
+pub struct ModuleConfig {
+    pub name: String,
+    #[serde(default = "String::new")]
+    pub args: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct Defaults {
     pub autostart: bool,
     pub autostart_minimized: bool,
     pub port: u16,
 }
 
+impl Default for Defaults {
+    fn default() -> Self {
+        Defaults {
+            autostart: true,
+            autostart_minimized: true,
+            port: 5699, // TODO: update before going stable
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct UserConfig {
+    #[serde(default)]
+    pub defaults: Defaults,
+    #[serde(default)]
+    pub autostart_modules: Vec<ModuleConfig>,
+}
+
 impl Default for UserConfig {
     fn default() -> Self {
         UserConfig {
-            autostart: true,
-            autostart_minimized: true,
+            defaults: Defaults::default(),
             autostart_modules: vec![
-                "aw-watcher-afk".to_string(),
-                "aw-watcher-window".to_string(),
-                "aw-awatcher".to_string(),
+                ModuleConfig {
+                    name: "aw-watcher-afk".to_string(),
+                    args: String::new(),
+                },
+                ModuleConfig {
+                    name: "aw-watcher-window".to_string(),
+                    args: String::new(),
+                },
+                ModuleConfig {
+                    name: "aw-awatcher".to_string(),
+                    args: String::new(),
+                },
             ],
-            port: 5699, // TODO: update before going stable
         }
     }
 }
@@ -273,7 +304,7 @@ pub fn run() {
                 // Get the autostart manager
                 let autostart_manager = app.autolaunch();
 
-                match user_config.autostart {
+                match user_config.defaults.autostart {
                     true => {
                         autostart_manager
                             .enable()
@@ -298,7 +329,7 @@ pub fn run() {
                 let legacy_import = false;
 
                 let mut aw_config = aw_server::config::create_config(testing);
-                aw_config.port = user_config.port;
+                aw_config.port = user_config.defaults.port;
                 let db_path = aw_server::dirs::db_path(testing)
                     .expect("Failed to get db path")
                     .to_str()
@@ -370,7 +401,7 @@ pub fn run() {
                         state.handle_system_click(&event.id().0);
                     }
                 });
-                if user_config.autostart && user_config.autostart_minimized {
+                if user_config.defaults.autostart && user_config.defaults.autostart_minimized {
                     if let Some(window) = app.webview_windows().get("main") {
                         window.hide().unwrap();
                     }
