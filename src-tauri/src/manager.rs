@@ -15,7 +15,6 @@ use nix::sys::signal::{self, Signal};
 use nix::unistd::Pid;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 #[cfg(unix)]
-#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::process::Command;
 use std::sync::{
@@ -40,6 +39,7 @@ pub enum ModuleMessage {
     Started {
         name: String,
         pid: u32,
+        args: Option<Vec<String>>,
     },
     Stopped {
         name: String,
@@ -55,6 +55,7 @@ pub struct ManagerState {
     pub modules_in_path: BTreeSet<String>,
     pub modules_pid: HashMap<String, u32>,
     pub modules_restart_count: HashMap<String, u32>,
+    pub modules_args: HashMap<String, Option<Vec<String>>>,
     pub modules_menu_set: bool,
 }
 
@@ -66,13 +67,15 @@ impl ManagerState {
             modules_in_path: get_modules_in_path(),
             modules_pid: HashMap::new(),
             modules_restart_count: HashMap::new(),
+            modules_args: HashMap::new(),
             modules_menu_set: false,
         }
     }
-    fn started_module(&mut self, name: &str, pid: u32) {
+    fn started_module(&mut self, name: &str, pid: u32, args: Option<Vec<String>>) {
         info!("Started module: {name}");
         self.modules_running.insert(name.to_string(), true);
         self.modules_pid.insert(name.to_string(), pid);
+        self.modules_args.insert(name.to_string(), args);
         debug!("Running modules: {:?}", self.modules_running);
         self.update_tray_menu();
     }
@@ -129,9 +132,9 @@ impl ManagerState {
             .unwrap();
         println!("set tray menu");
     }
-    pub fn start_module(&self, name: &str) {
+    pub fn start_module(&self, name: &str, args: Option<&Vec<String>>) {
         if !self.is_module_running(name) {
-            start_module_thread(name.to_string(), self.tx.clone());
+            start_module_thread(name.to_string(), args.cloned(), self.tx.clone());
         }
     }
     pub fn stop_module(&self, name: &str) {
@@ -152,7 +155,7 @@ impl ManagerState {
         if self.is_module_running(name) {
             self.stop_module(name);
         } else {
-            self.start_module(name);
+            self.start_module(name, None);
         }
     }
     fn is_module_running(&self, name: &str) -> bool {
@@ -188,9 +191,18 @@ pub fn start_manager() -> Arc<Mutex<ManagerState>> {
     let state = Arc::new(Mutex::new(ManagerState::new(tx.clone())));
 
     // Start the modules
-    let autostart_modules = &*get_config().autostart_modules;
-    for module in autostart_modules.iter() {
-        state.lock().unwrap().start_module(module);
+    let config = get_config();
+    for module_config in config.autostart_modules.iter() {
+        let args = if module_config.args.is_empty() {
+            None
+        } else {
+            // Split args string on whitespace, preserving quoted arguments
+            Some(shell_words::split(&module_config.args).unwrap_or_default())
+        };
+        state
+            .lock()
+            .unwrap()
+            .start_module(&module_config.name, args.as_ref());
     }
 
     // populate the tray menu if not yet already done
@@ -212,8 +224,8 @@ fn handle(rx: Receiver<ModuleMessage>, state: Arc<Mutex<ManagerState>>) {
         let state_clone = Arc::clone(&state);
         let state = &mut state.lock().unwrap();
         match msg {
-            ModuleMessage::Started { name, pid } => {
-                state.started_module(&name, pid);
+            ModuleMessage::Started { name, pid, args } => {
+                state.started_module(&name, pid, args);
             }
             ModuleMessage::Stopped { name, output } => {
                 state.stopped_module(&name);
@@ -231,7 +243,10 @@ fn handle(rx: Receiver<ModuleMessage>, state: Arc<Mutex<ManagerState>>) {
                             .or_insert(0);
                         if *restart_count < 3 {
                             *restart_count += 1;
-                            state.start_module(&name_clone);
+                            // Get the stored arguments for this module
+                            let stored_args =
+                                state.modules_args.get(&name_clone).cloned().flatten();
+                            state.start_module(&name_clone, stored_args.as_ref());
                             let app = &*get_app_handle().lock().expect("failed to get app handle");
 
                             app.dialog()
@@ -269,15 +284,20 @@ fn handle(rx: Receiver<ModuleMessage>, state: Arc<Mutex<ManagerState>>) {
     }
 }
 
-fn start_module_thread(name: String, tx: Sender<ModuleMessage>) {
+fn start_module_thread(name: String, custom_args: Option<Vec<String>>, tx: Sender<ModuleMessage>) {
     thread::spawn(move || {
         // Start the child process
-        let port_string = get_config().port.to_string();
-        let args = ["--port", port_string.as_str()];
-        let child = Command::new(&name)
-            .args(args)
-            .stdout(std::process::Stdio::piped())
-            .spawn();
+        let port_string = get_config().defaults.port.to_string();
+        let mut command = Command::new(&name);
+
+        // Use custom args if provided, otherwise use default port arg
+        if let Some(ref args) = custom_args {
+            command.args(args);
+        } else {
+            command.args(["--port", port_string.as_str()]);
+        }
+
+        let child = command.stdout(std::process::Stdio::piped()).spawn();
 
         if let Err(e) = child {
             error!("Failed to start module {name}: {e}");
@@ -288,6 +308,7 @@ fn start_module_thread(name: String, tx: Sender<ModuleMessage>) {
         tx.send(ModuleMessage::Started {
             name: name.to_string(),
             pid: child.as_ref().unwrap().id(),
+            args: custom_args,
         })
         .unwrap();
 
