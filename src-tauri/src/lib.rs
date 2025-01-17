@@ -24,11 +24,30 @@ use tauri::{
     AppHandle, Manager,
 };
 
-static HANDLE: OnceLock<Mutex<AppHandle>> = OnceLock::new();
+pub struct AppHandleWrapper(Mutex<AppHandle>);
+
+impl Drop for AppHandleWrapper {
+    fn drop(&mut self) {
+        let (_lock, cvar) = &*HANDLE_CONDVAR;
+        cvar.notify_all();
+    }
+}
+
+static HANDLE: OnceLock<AppHandleWrapper> = OnceLock::new();
 lazy_static! {
     static ref HANDLE_CONDVAR: (Mutex<bool>, Condvar) = (Mutex::new(false), Condvar::new());
 }
-static TRAY_ID: OnceLock<TrayIconId> = OnceLock::new();
+#[derive(Debug)]
+pub struct TrayIdWrapper(TrayIconId);
+
+impl Drop for TrayIdWrapper {
+    fn drop(&mut self) {
+        let (_lock, cvar) = &*TRAY_CONDVAR;
+        cvar.notify_all();
+    }
+}
+
+static TRAY_ID: OnceLock<TrayIdWrapper> = OnceLock::new();
 lazy_static! {
     static ref TRAY_CONDVAR: (Mutex<bool>, Condvar) = (Mutex::new(false), Condvar::new());
 }
@@ -36,7 +55,7 @@ static CONFIG: OnceLock<UserConfig> = OnceLock::new();
 static FIRST_RUN: OnceLock<bool> = OnceLock::new();
 
 fn init_app_handle(handle: AppHandle) {
-    HANDLE.get_or_init(|| Mutex::new(handle));
+    HANDLE.get_or_init(|| AppHandleWrapper(Mutex::new(handle)));
     let (lock, cvar) = &*HANDLE_CONDVAR;
     let mut started = lock.lock().expect("failed to lock HANDLE_CONDVAR");
     *started = true;
@@ -44,11 +63,11 @@ fn init_app_handle(handle: AppHandle) {
 }
 
 pub(crate) fn get_app_handle() -> &'static Mutex<AppHandle> {
-    HANDLE.get().expect("HANDLE not initialized")
+    &HANDLE.get().expect("HANDLE not initialized").0
 }
 
 fn init_tray_id(id: TrayIconId) {
-    TRAY_ID.set(id).expect("failed to set TRAY_ID");
+    TRAY_ID.set(TrayIdWrapper(id)).expect("failed to set TRAY_ID");
     let (lock, cvar) = &*TRAY_CONDVAR;
     let mut initialized = lock.lock().expect("failed to lock TRAY_CONDVAR");
     *initialized = true;
@@ -61,7 +80,7 @@ pub(crate) fn get_tray_id() -> &'static TrayIconId {
     while !*initialized {
         initialized = cvar.wait(initialized).expect("failed to wait for TRAY_ID");
     }
-    TRAY_ID.get().expect("TRAY_ID not initialized")
+    &TRAY_ID.get().expect("TRAY_ID not initialized").0
 }
 
 pub(crate) fn is_first_run() -> &'static bool {
@@ -72,8 +91,6 @@ pub fn handle_first_run() {
     let first_run = is_first_run();
     if *first_run {
         thread::spawn(|| {
-            // TODO: debug and remove the sleep
-            thread::sleep(Duration::from_secs(1));
             let app = &*get_app_handle().lock().expect("failed to get app handle");
             app.notification()
                 .builder()
@@ -359,36 +376,8 @@ pub fn run() {
                 }
             }
 
-            let first_run = is_first_run();
-            if *first_run {
-                thread::spawn(|| {
-                    // TODO: debug and remove the sleep
-                    thread::sleep(Duration::from_secs(1));
-                    let app = &*get_app_handle().lock().expect("failed to get app handle");
-                    app.notification()
-                        .builder()
-                        .title("Aw-Tauri")
-                        .body("Aw-Tauri is running in the background")
-                        .show()
-                        .unwrap();
-                });
-            }
-            thread::spawn(|| {
-                let config_path = get_config_path();
-                let watcher =
-                    SpecificFileWatcher::new(config_path.parent().unwrap(), "single_instance.lock")
-                        .expect("Failed to create file watcher");
-                loop {
-                    if watcher.wait_for_file().is_ok() {
-                        remove_file(config_path.parent().unwrap().join("single_instance.lock"))
-                            .expect("Failed to remove lock file");
-                        let app = &*get_app_handle().lock().expect("failed to get app handle");
-                        if let Some(window) = app.webview_windows().get("main") {
-                            window.show().unwrap();
-                        }
-                    }
-                }
-            });
+            handle_first_run();
+            listen_for_lockfile();
             Ok(())
         })
         .on_window_event(|window, event| {
