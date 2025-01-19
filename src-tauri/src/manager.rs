@@ -329,30 +329,39 @@ fn start_module_thread(name: String, custom_args: Option<Vec<String>>, tx: Sende
 
 #[cfg(unix)]
 fn get_modules_in_path() -> BTreeSet<String> {
-    let excluded = ["awk", "aw-tauri", "aw-client", "aw-cli"];
-    env::var_os("PATH")
-        .map(|paths| {
-            env::split_paths(&paths)
-                .flat_map(|path| fs::read_dir(path).ok())
-                .flatten()
-                .filter_map(Result::ok)
-                .filter_map(|entry| {
-                    let metadata = entry.metadata().ok()?;
-                    let is_executable = (metadata.is_file() || metadata.is_symlink())
-                        && metadata.permissions().mode() & 0o111 != 0;
-                    if !is_executable {
-                        return None;
-                    }
+    let excluded = ["awk", "aw-tauri", "aw-client", "aw-cli", "aw-qt"];
+    let config = crate::get_config();
 
-                    entry
-                        .file_name()
-                        .to_str()
-                        .map(|s| s.to_string())
-                        .filter(|name: &String| name.starts_with("aw") && !name.contains("."))
-                })
-                .collect::<BTreeSet<_>>()
+    let path = env::var_os("PATH").unwrap_or_default();
+    let mut paths = env::split_paths(&path).collect::<Vec<_>>();
+
+    if !paths.contains(&config.defaults.discovery_path) {
+        // add to the front of the path list
+        paths.insert(0, config.defaults.discovery_path.to_owned());
+    }
+
+    // Create new PATH-like string
+    let new_paths = env::join_paths(paths).unwrap_or_default();
+
+    env::split_paths(&new_paths)
+        .flat_map(|path| fs::read_dir(path).ok())
+        .flatten()
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            let metadata = entry.metadata().ok()?;
+            let is_executable = (metadata.is_file() || metadata.is_symlink())
+                && metadata.permissions().mode() & 0o111 != 0;
+            if !is_executable {
+                return None;
+            }
+
+            entry
+                .file_name()
+                .to_str()
+                .map(|s| s.to_string())
+                .filter(|name: &String| name.starts_with("aw") && !name.contains("."))
         })
-        .unwrap_or_default()
+        .collect::<BTreeSet<_>>()
         .into_iter()
         .filter(|name: &String| !excluded.contains(&name.as_str()))
         .collect()
@@ -360,24 +369,37 @@ fn get_modules_in_path() -> BTreeSet<String> {
 
 #[cfg(windows)]
 fn get_modules_in_path() -> BTreeSet<String> {
-    let excluded = ["aw-tauri", "aw-client", "aw-cli"];
-    env::var_os("PATH")
-        .map(|paths| {
-            env::split_paths(&paths)
-                .flat_map(|path| fs::read_dir(path).ok())
-                .flatten()
-                .filter_map(Result::ok)
-                .filter_map(|entry| {
-                    let path = entry.path();
-                    if path.is_file() && path.extension().map_or(false, |ext| ext == "exe") {
-                        path.file_stem()?.to_str().map(String::from)
-                    } else {
-                        None
-                    }
-                })
-                .collect::<BTreeSet<_>>()
+    let excluded = ["aw-tauri", "aw-client", "aw-cli", "aw-qt"];
+
+    // Get the discovery path from config
+    let config = crate::get_config();
+
+    // Get the current PATH
+    let path = env::var_os("PATH").unwrap_or_default();
+    let mut paths = env::split_paths(&path).collect::<Vec<_>>();
+
+    // Add discovery path if not already in PATH
+    if !paths.contains(&config.defaults.discovery_path) {
+        paths.push(config.defaults.discovery_path.clone());
+    }
+
+    // Create new PATH-like string
+    let new_paths = env::join_paths(paths).unwrap_or_default();
+
+    // Use the combined paths to find modules
+    env::split_paths(&new_paths)
+        .flat_map(|path| fs::read_dir(path).ok())
+        .flatten()
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            let path = entry.path();
+            if path.is_file() && path.extension().map_or(false, |ext| ext == "exe") {
+                path.file_stem()?.to_str().map(String::from)
+            } else {
+                None
+            }
         })
-        .unwrap_or_default()
+        .collect::<BTreeSet<_>>()
         .into_iter()
         .filter(|name| !excluded.contains(&name.as_str()))
         .collect()
