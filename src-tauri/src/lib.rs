@@ -1,7 +1,6 @@
 use aw_server::endpoints::build_rocket;
 #[cfg(not(target_os = "linux"))]
 use directories::ProjectDirs;
-#[cfg(target_os = "linux")]
 use directories::UserDirs;
 use lazy_static::lazy_static;
 use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
@@ -186,14 +185,27 @@ pub struct Defaults {
     pub autostart: bool,
     pub autostart_minimized: bool,
     pub port: u16,
+    pub discovery_path: PathBuf,
 }
 
 impl Default for Defaults {
     fn default() -> Self {
+        let discovery_path = if cfg!(unix) {
+            UserDirs::new()
+                .map(|dirs| dirs.home_dir().join("aw-modules"))
+                .unwrap_or_default()
+        } else if cfg!(windows) {
+            let username = std::env::var("USERNAME").unwrap_or_default();
+            PathBuf::from(format!(r"C:\Users\{}\aw-modules", username))
+        } else {
+            PathBuf::new()
+        };
+
         Defaults {
             autostart: true,
             autostart_minimized: true,
             port: 5699, // TODO: update before going stable
+            discovery_path,
         }
     }
 }
