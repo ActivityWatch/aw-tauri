@@ -252,7 +252,7 @@ fn handle(rx: Receiver<ModuleMessage>, state: Arc<Mutex<ManagerState>>) {
                             app.dialog()
                                 .message(format!("{name_clone} crashed. Restarting..."))
                                 .kind(MessageDialogKind::Error)
-                                .title("Warning")
+                                .title("Aw-Tauri")
                                 .show(|_| {});
                             error!("Module {name_clone} crashed and is being restarted");
                         } else {
