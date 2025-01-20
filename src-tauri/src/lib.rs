@@ -6,11 +6,13 @@ use lazy_static::lazy_static;
 use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use serde::{Deserialize, Serialize};
 use std::fs::{create_dir_all, read_to_string, remove_file, write, OpenOptions};
+use std::net::{SocketAddr, TcpListener};
 use std::path::{Path, PathBuf};
 use std::sync::{mpsc, Condvar, Mutex, OnceLock};
 use std::thread;
 use std::time::Duration;
 use tauri_plugin_autostart::{MacosLauncher, ManagerExt};
+use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
 use tauri_plugin_notification::NotificationExt;
 
 mod logging;
@@ -82,6 +84,23 @@ pub(crate) fn get_tray_id() -> &'static TrayIconId {
         initialized = cvar.wait(initialized).expect("failed to wait for TRAY_ID");
     }
     &TRAY_ID.get().expect("TRAY_ID not initialized").0
+}
+
+pub fn is_port_available(port: u16) -> std::io::Result<bool> {
+    let addr = format!("127.0.0.1:{}", port)
+        .parse::<SocketAddr>()
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
+
+    match TcpListener::bind(addr) {
+        Ok(_) => Ok(true), // Port is available
+        Err(e) => {
+            if e.kind() == std::io::ErrorKind::AddrInUse {
+                Ok(false) // Port is in use
+            } else {
+                Err(e) // Other error occurred
+            }
+        }
+    }
 }
 
 pub(crate) fn is_first_run() -> &'static bool {
@@ -371,7 +390,19 @@ pub fn run() {
                     asset_resolver: aw_server::endpoints::AssetResolver::new(asset_path_opt),
                     device_id,
                 };
-
+                if !is_port_available(user_config.defaults.port)
+                    .expect("Failed to check port availability")
+                {
+                    app.dialog()
+                        .message(format!(
+                            "Port {} is already in use",
+                            user_config.defaults.port
+                        ))
+                        .kind(MessageDialogKind::Error)
+                        .title("Aw-Tauri")
+                        .show(|_| {});
+                    panic!("Port {} is already in use", user_config.defaults.port);
+                }
                 tauri::async_runtime::spawn(build_rocket(server_state, aw_config).launch());
 
                 let manager_state = manager::start_manager();
