@@ -263,8 +263,7 @@ impl Default for UserConfig {
 fn get_config_path() -> PathBuf {
     let project_dirs =
         ProjectDirs::from("net", "ActivityWatch", "Aw-Tauri").expect("Failed to get project dirs");
-    let config_path = project_dirs.config_dir().join("config.toml");
-    config_path
+    project_dirs.config_dir().join("config.toml")
 }
 #[cfg(target_os = "linux")]
 fn get_config_path() -> PathBuf {
