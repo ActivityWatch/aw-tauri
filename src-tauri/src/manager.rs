@@ -13,19 +13,19 @@ use log::{debug, error, info};
 use nix::sys::signal::{self, Signal};
 #[cfg(unix)]
 use nix::unistd::Pid;
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, HashMap};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
+use std::path::PathBuf;
 use std::process::Command;
 use std::sync::{
     mpsc::{channel, Receiver, Sender},
     Arc, Mutex,
 };
 use std::time::Duration;
-use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
-
 use std::{env, fs, thread};
 use tauri::menu::{CheckMenuItem, Menu, MenuItem, SubmenuBuilder};
+use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
 
 #[cfg(windows)]
 use winapi::shared::minwindef::DWORD;
@@ -52,7 +52,7 @@ pub enum ModuleMessage {
 pub struct ManagerState {
     tx: Sender<ModuleMessage>,
     pub modules_running: BTreeMap<String, bool>,
-    pub modules_in_path: BTreeSet<String>,
+    pub modules_in_path: BTreeMap<String, PathBuf>,
     pub modules_pid: HashMap<String, u32>,
     pub modules_restart_count: HashMap<String, u32>,
     pub modules_args: HashMap<String, Option<Vec<String>>>,
@@ -111,10 +111,11 @@ impl ManagerState {
             modules_submenu_builder = modules_submenu_builder.item(&module_menu);
         }
 
-        for module in self.modules_in_path.iter() {
-            if !self.modules_running.contains_key(module) {
-                let module_menu = MenuItem::with_id(app, module, module, true, None::<&str>)
-                    .expect("failed to create module menu item");
+        for module_name in self.modules_in_path.keys() {
+            if !self.modules_running.contains_key(module_name) {
+                let module_menu =
+                    MenuItem::with_id(app, module_name, module_name, true, None::<&str>)
+                        .expect("failed to create module menu item");
                 modules_submenu_builder = modules_submenu_builder.item(&module_menu);
             }
         }
@@ -134,7 +135,16 @@ impl ManagerState {
     }
     pub fn start_module(&self, name: &str, args: Option<&Vec<String>>) {
         if !self.is_module_running(name) {
-            start_module_thread(name.to_string(), args.cloned(), self.tx.clone());
+            if let Some(path) = self.modules_in_path.get(name) {
+                start_module_thread(
+                    name.to_string(),
+                    path.clone(),
+                    args.cloned(),
+                    self.tx.clone(),
+                );
+            } else {
+                error!("Module {name} not found in PATH");
+            }
         }
     }
     pub fn stop_module(&self, name: &str) {
@@ -284,11 +294,16 @@ fn handle(rx: Receiver<ModuleMessage>, state: Arc<Mutex<ManagerState>>) {
     }
 }
 
-fn start_module_thread(name: String, custom_args: Option<Vec<String>>, tx: Sender<ModuleMessage>) {
+fn start_module_thread(
+    name: String,
+    path: PathBuf,
+    custom_args: Option<Vec<String>>,
+    tx: Sender<ModuleMessage>,
+) {
     thread::spawn(move || {
         // Start the child process
         let port_string = get_config().defaults.port.to_string();
-        let mut command = Command::new(&name);
+        let mut command = Command::new(&path);
 
         // Use custom args if provided, otherwise use default port arg
         if let Some(ref args) = custom_args {
@@ -328,7 +343,7 @@ fn start_module_thread(name: String, custom_args: Option<Vec<String>>, tx: Sende
 }
 
 #[cfg(unix)]
-fn get_modules_in_path() -> BTreeSet<String> {
+fn get_modules_in_path() -> BTreeMap<String, PathBuf> {
     let excluded = ["awk", "aw-tauri", "aw-client", "aw-cli", "aw-qt"];
     let config = crate::get_config();
 
@@ -355,20 +370,19 @@ fn get_modules_in_path() -> BTreeSet<String> {
                 return None;
             }
 
-            entry
-                .file_name()
-                .to_str()
-                .map(|s| s.to_string())
-                .filter(|name: &String| name.starts_with("aw") && !name.contains("."))
+            let path = entry.path();
+            let name = entry.file_name().to_str()?.to_string();
+            if name.starts_with("aw") && !name.contains(".") && !excluded.contains(&name.as_str()) {
+                Some((name, path))
+            } else {
+                None
+            }
         })
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .filter(|name: &String| !excluded.contains(&name.as_str()))
         .collect()
 }
 
 #[cfg(windows)]
-fn get_modules_in_path() -> BTreeSet<String> {
+fn get_modules_in_path() -> BTreeMap<String, PathBuf> {
     let excluded = ["aw-tauri", "aw-client", "aw-cli", "aw-qt"];
 
     // Get the discovery path from config
@@ -380,7 +394,7 @@ fn get_modules_in_path() -> BTreeSet<String> {
 
     // Add discovery path if not already in PATH
     if !paths.contains(&config.defaults.discovery_path) {
-        paths.push(config.defaults.discovery_path.clone());
+        paths.insert(0, config.defaults.discovery_path.to_owned());
     }
 
     // Create new PATH-like string
@@ -394,13 +408,15 @@ fn get_modules_in_path() -> BTreeSet<String> {
         .filter_map(|entry| {
             let path = entry.path();
             if path.is_file() && path.extension().map_or(false, |ext| ext == "exe") {
-                path.file_stem()?.to_str().map(String::from)
+                let name = path.file_stem()?.to_str()?.to_string();
+                if !excluded.contains(&name.as_str()) {
+                    Some((name, path))
+                } else {
+                    None
+                }
             } else {
                 None
             }
         })
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .filter(|name| !excluded.contains(&name.as_str()))
         .collect()
 }
