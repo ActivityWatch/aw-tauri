@@ -328,6 +328,8 @@ pub fn run() {
             info!("Another instance is running, quitting!");
         }))
         .setup(|app| {
+            #[cfg(target_os = "macos")]
+            app.set_activation_policy(tauri::ActivationPolicy::Accessory);
             {
                 init_app_handle(app.handle().clone());
                 let user_config = get_config();
