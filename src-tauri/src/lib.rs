@@ -445,7 +445,10 @@ pub fn run() {
                         state.handle_system_click(&event.id().0);
                     }
                 });
-                if user_config.defaults.autostart && user_config.defaults.autostart_minimized {
+                if user_config.defaults.autostart
+                    && user_config.defaults.autostart_minimized
+                    && !*is_first_run()
+                {
                     if let Some(window) = app.webview_windows().get("main") {
                         window.hide().unwrap();
                     }
