@@ -405,7 +405,14 @@ pub fn run() {
                     panic!("Port {} is already in use", user_config.defaults.port);
                 }
                 tauri::async_runtime::spawn(build_rocket(server_state, aw_config).launch());
+                let url = format!("http://localhost:{}/", user_config.defaults.port)
+                    .parse()
+                    .unwrap();
+                let mut main_window = app.get_webview_window("main").unwrap();
 
+                main_window
+                    .navigate(url)
+                    .expect("error navigating main window");
                 let manager_state = manager::start_manager();
 
                 let open = MenuItem::with_id(app, "open", "Open", true, None::<&str>)
