@@ -209,13 +209,15 @@ pub struct Defaults {
 
 impl Default for Defaults {
     fn default() -> Self {
-        let discovery_path = if cfg!(unix) {
+        let discovery_path = if cfg!(target_os = "linux") {
             UserDirs::new()
                 .map(|dirs| dirs.home_dir().join("aw-modules"))
                 .unwrap_or_default()
         } else if cfg!(windows) {
             let username = std::env::var("USERNAME").unwrap_or_default();
             PathBuf::from(format!(r"C:\Users\{}\aw-modules", username))
+        } else if cfg!(target_os = "macos") {
+            PathBuf::from("/Applications/ActivityWatch.app/Contents/MacOS")
         } else {
             PathBuf::new()
         };
