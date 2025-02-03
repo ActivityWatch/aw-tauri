@@ -7,15 +7,21 @@
 /// their state.
 ///
 /// If a module crashes, the manager will notify the user and ask if they want to restart it.
-use log::{debug, error, info};
 
 #[cfg(unix)]
-use nix::sys::signal::{self, Signal};
-#[cfg(unix)]
-use nix::unistd::Pid;
+use {
+    nix::sys::signal::{self, Signal},
+    nix::unistd::Pid,
+    std::os::unix::fs::PermissionsExt,
+};
+#[cfg(windows)]
+use {
+    winapi::shared::minwindef::DWORD,
+    winapi::um::wincon::{GenerateConsoleCtrlEvent, CTRL_BREAK_EVENT},
+};
+
+use log::{debug, error, info};
 use std::collections::{BTreeMap, HashMap};
-#[cfg(unix)]
-use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::{
@@ -26,11 +32,6 @@ use std::time::Duration;
 use std::{env, fs, thread};
 use tauri::menu::{CheckMenuItem, Menu, MenuItem, SubmenuBuilder};
 use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
-
-#[cfg(windows)]
-use winapi::shared::minwindef::DWORD;
-#[cfg(windows)]
-use winapi::um::wincon::{GenerateConsoleCtrlEvent, CTRL_BREAK_EVENT};
 
 use crate::{get_app_handle, get_config, get_tray_id, HANDLE_CONDVAR};
 
