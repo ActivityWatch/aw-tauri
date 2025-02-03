@@ -331,6 +331,7 @@ pub fn run() {
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
             {
+                //TODO: Some of this setup could run concurrently. Could slash a few 100ms in startup?
                 init_app_handle(app.handle().clone());
                 let user_config = get_config();
                 // Get the autostart manager
@@ -338,24 +339,24 @@ pub fn run() {
 
                 match user_config.defaults.autostart {
                     true => {
-                        autostart_manager
-                            .enable()
-                            .expect("Unable to enable autostart");
+                        if !autostart_manager
+                            .is_enabled()
+                            .expect("failed to get autostart state")
+                        {
+                            autostart_manager
+                                .enable()
+                                .expect("Unable to enable autostart");
+                            info!("Registered for autostart: true");
+                        }
                     }
                     false => {
+                        //checks for state before disabling no need to check twice
                         autostart_manager
                             .disable()
                             .expect("Unable to disable autosart");
+                        info!("Registered for autostart: false");
                     }
                 }
-
-                // Check enable state
-                info!(
-                    "Registered for autostart: {}",
-                    autostart_manager
-                        .is_enabled()
-                        .expect("failed to get autostart state")
-                );
 
                 let testing = true;
                 let legacy_import = false;
