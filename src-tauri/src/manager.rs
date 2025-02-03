@@ -52,7 +52,7 @@ pub enum ModuleMessage {
 pub struct ManagerState {
     tx: Sender<ModuleMessage>,
     pub modules_running: BTreeMap<String, bool>,
-    pub modules_in_path: BTreeMap<String, PathBuf>,
+    pub modules_discovered: BTreeMap<String, PathBuf>,
     pub modules_pid: HashMap<String, u32>,
     pub modules_restart_count: HashMap<String, u32>,
     pub modules_args: HashMap<String, Option<Vec<String>>>,
@@ -64,7 +64,7 @@ impl ManagerState {
         ManagerState {
             tx,
             modules_running: BTreeMap::new(),
-            modules_in_path: get_modules_in_path(),
+            modules_discovered: discover_modules(),
             modules_pid: HashMap::new(),
             modules_restart_count: HashMap::new(),
             modules_args: HashMap::new(),
@@ -111,7 +111,7 @@ impl ManagerState {
             modules_submenu_builder = modules_submenu_builder.item(&module_menu);
         }
 
-        for module_name in self.modules_in_path.keys() {
+        for module_name in self.modules_discovered.keys() {
             if !self.modules_running.contains_key(module_name) {
                 let module_menu =
                     MenuItem::with_id(app, module_name, module_name, true, None::<&str>)
@@ -135,7 +135,7 @@ impl ManagerState {
     }
     pub fn start_module(&self, name: &str, args: Option<&Vec<String>>) {
         if !self.is_module_running(name) {
-            if let Some(path) = self.modules_in_path.get(name) {
+            if let Some(path) = self.modules_discovered.get(name) {
                 start_module_thread(
                     name.to_string(),
                     path.clone(),
@@ -343,7 +343,7 @@ fn start_module_thread(
 }
 
 #[cfg(unix)]
-fn get_modules_in_path() -> BTreeMap<String, PathBuf> {
+fn discover_modules() -> BTreeMap<String, PathBuf> {
     let excluded = ["awk", "aw-tauri", "aw-client", "aw-cli", "aw-qt"];
     let config = crate::get_config();
 
@@ -382,7 +382,7 @@ fn get_modules_in_path() -> BTreeMap<String, PathBuf> {
 }
 
 #[cfg(windows)]
-fn get_modules_in_path() -> BTreeMap<String, PathBuf> {
+fn discover_modules() -> BTreeMap<String, PathBuf> {
     let excluded = ["aw-tauri", "aw-client", "aw-cli", "aw-qt"];
 
     // Get the discovery path from config
