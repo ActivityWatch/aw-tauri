@@ -1,6 +1,7 @@
 use directories::ProjectDirs;
 use fern::colors::{Color, ColoredLevelConfig};
 use log::LevelFilter;
+use std::path::PathBuf;
 
 pub fn setup_logging() -> Result<(), fern::InitError> {
     let project_dirs =
@@ -50,9 +51,8 @@ pub fn setup_logging() -> Result<(), fern::InitError> {
     Ok(())
 }
 
-// #[allow(dead_code)]
-// pub fn get_log_file() -> PathBuf {
-//     let project_dirs =
-//         ProjectDirs::from("net", "ActivityWatch", "Aw-Tauri").expect("Failed to get project dirs");
-//     project_dirs.data_dir().join("logs").join("aw-tauri.log")
-// }
+pub fn get_log_file() -> PathBuf {
+    let project_dirs =
+        ProjectDirs::from("net", "ActivityWatch", "Aw-Tauri").expect("Failed to get project dirs");
+    project_dirs.data_dir().join("logs").join("aw-tauri.log")
+}

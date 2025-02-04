@@ -14,6 +14,7 @@ use std::time::Duration;
 use tauri_plugin_autostart::{MacosLauncher, ManagerExt};
 use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
 use tauri_plugin_notification::NotificationExt;
+use tauri_plugin_opener::OpenerExt;
 
 mod logging;
 mod manager;
@@ -307,6 +308,7 @@ pub fn run() {
     }
 
     tauri::Builder::default()
+        .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_autostart::init(
@@ -418,9 +420,9 @@ pub fn run() {
                     .expect("error navigating main window");
                 let manager_state = manager::start_manager();
 
-                let open = MenuItem::with_id(app, "open", "Open", true, None::<&str>)
+                let open = MenuItem::with_id(app, "open", "Open Dashboard", true, None::<&str>)
                     .expect("failed to create open menu item");
-                let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)
+                let quit = MenuItem::with_id(app, "quit", "Quit ActivityWatch", true, None::<&str>)
                     .expect("failed to create quit menu item");
 
                 let menu =
@@ -439,16 +441,28 @@ pub fn run() {
 
                 init_tray_id(tray.id().clone());
                 app.on_menu_event(move |app, event| {
-                    if event.id() == open.id() {
+                    if event.id().0 == "open" {
                         println!("system tray received a open click");
                         let windows = app.webview_windows();
                         let window = windows.get("main").expect("main window not found");
                         window.show().unwrap();
-                    } else if event.id() == quit.id() {
+                    } else if event.id().0 == "quit" {
                         println!("quit clicked!");
                         let state = manager_state.lock().unwrap();
                         state.stop_modules();
                         app.exit(0);
+                    } else if event.id().0 == "config_folder" {
+                        let config_path = get_config_path();
+                        let config_dir = config_path.parent().unwrap_or(&config_path);
+                        app.opener()
+                            .reveal_item_in_dir(config_dir)
+                            .expect("Failed to open config folder");
+                    } else if event.id().0 == "log_folder" {
+                        let log_path = logging::get_log_file();
+                        let log_dir = log_path.parent().unwrap_or(&log_path);
+                        app.opener()
+                            .reveal_item_in_dir(log_dir)
+                            .expect("Failed to open log folder");
                     } else {
                         // Modules menu clicks
                         let mut state = manager_state.lock().unwrap();
