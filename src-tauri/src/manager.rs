@@ -124,8 +124,24 @@ impl ManagerState {
         let module_submenu = modules_submenu_builder
             .build()
             .expect("failed to create module submenu");
-        let menu = Menu::with_items(app, &[&open, &module_submenu, &quit])
-            .expect("failed to create tray menu");
+        let config_folder = MenuItem::with_id(
+            app,
+            "config_folder",
+            "Open config folder",
+            true,
+            None::<&str>,
+        )
+        .expect("failed to create config folder menu item");
+
+        let log_folder =
+            MenuItem::with_id(app, "log_folder", "Open log folder", true, None::<&str>)
+                .expect("failed to create log folder menu item");
+
+        let menu = Menu::with_items(
+            app,
+            &[&open, &module_submenu, &config_folder, &log_folder, &quit],
+        )
+        .expect("failed to create tray menu");
 
         let tray_id = get_tray_id();
         app.tray_by_id(tray_id)
