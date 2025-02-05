@@ -18,6 +18,7 @@ use tauri_plugin_opener::OpenerExt;
 
 mod logging;
 mod manager;
+mod modules_dl;
 
 use log::info;
 use tauri::{
