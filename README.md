@@ -67,8 +67,8 @@ Secondary goal is to add extras supported by Tauri (updater, autostart).
      - [x] Responsive running/stopped state for watchers (no "update" button)
      - [x] Start/stop via modules menu
      - [x] Detect bundled & system modules
- - [ ] Polish
-     - [ ] Remove placeholder Vue app
+ - [x] Polish
+     - [x] Remove placeholder Vue app
          - Or replace with new UI for module management? (a bit redundant)
      - [x] Build aw-webui as part of build process
      - [x] Error dialog when module crashes, restart logic
