@@ -4,9 +4,7 @@ use log::LevelFilter;
 use std::path::PathBuf;
 
 pub fn setup_logging() -> Result<(), fern::InitError> {
-    let project_dirs =
-        ProjectDirs::from("net", "ActivityWatch", "Aw-Tauri").expect("Failed to get project dirs");
-    let log_path = project_dirs.data_dir().join("logs");
+    let log_path = get_log_filepath();
     std::fs::create_dir_all(&log_path)?;
     let log_file = log_path.join("aw-tauri.log");
 
@@ -16,7 +14,7 @@ pub fn setup_logging() -> Result<(), fern::InitError> {
         .warn(Color::Yellow)
         .info(Color::Green)
         .debug(Color::Blue)
-        .trace(Color::White);
+        .trace(Color::BrightBlue);
 
     // Base configuration
     let base_config = fern::Dispatch::new()
@@ -51,7 +49,8 @@ pub fn setup_logging() -> Result<(), fern::InitError> {
     Ok(())
 }
 
-pub fn get_log_file() -> PathBuf {
+pub fn get_log_filepath() -> PathBuf {
+    // TODO: creates an aw-tauri folder in linux, move inside the legacy activitywatch folder
     let project_dirs =
         ProjectDirs::from("net", "ActivityWatch", "Aw-Tauri").expect("Failed to get project dirs");
     project_dirs.data_dir().join("logs").join("aw-tauri.log")

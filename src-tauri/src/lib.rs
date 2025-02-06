@@ -458,7 +458,7 @@ pub fn run() {
                             .reveal_item_in_dir(config_dir)
                             .expect("Failed to open config folder");
                     } else if event.id().0 == "log_folder" {
-                        let log_path = logging::get_log_file();
+                        let log_path = logging::get_log_filepath();
                         let log_dir = log_path.parent().unwrap_or(&log_path);
                         app.opener()
                             .reveal_item_in_dir(log_dir)
