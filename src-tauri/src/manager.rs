@@ -7,7 +7,6 @@
 /// their state.
 ///
 /// If a module crashes, the manager will notify the user and ask if they want to restart it.
-
 #[cfg(unix)]
 use {
     nix::sys::signal::{self, Signal},
@@ -33,6 +32,7 @@ use std::{env, fs, thread};
 use tauri::menu::{CheckMenuItem, Menu, MenuItem, SubmenuBuilder};
 use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
 
+use crate::modules_dl::has_essential_modules;
 use crate::{get_app_handle, get_config, get_tray_id, HANDLE_CONDVAR};
 
 #[derive(Debug)]
@@ -53,6 +53,8 @@ pub enum ModuleMessage {
 pub struct ManagerState {
     tx: Sender<ModuleMessage>,
     pub modules_running: BTreeMap<String, bool>,
+    // TODO: the next four could be merged into one
+    // modules_metadata hashmap? worse for readability
     pub modules_discovered: BTreeMap<String, PathBuf>,
     pub modules_pid: HashMap<String, u32>,
     pub modules_restart_count: HashMap<String, u32>,
@@ -102,6 +104,15 @@ impl ManagerState {
             .expect("failed to create open menu item");
         let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)
             .expect("failed to create quit menu item");
+
+        if !has_essential_modules(self.modules_discovered.keys().cloned().collect()) {
+            // todo!()
+            thread::spawn(|| {
+                tauri::async_runtime::block_on(async {
+                    crate::modules_dl::download_modules().await.unwrap();
+                });
+            });
+        }
 
         let mut modules_submenu_builder = SubmenuBuilder::new(app, "Modules");
         for (module, running) in self.modules_running.iter() {
