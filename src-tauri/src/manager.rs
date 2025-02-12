@@ -1,12 +1,12 @@
-/// A process manager for ActivityWatch
-///
-/// Used to start, stop and manage the lifecycle modules like aw-watcher-afk and aw-watcher-window.
-/// A module is a process that runs in the background and sends events to the ActivityWatch server.
-///
-/// The manager is responsible for starting and stopping the modules, and for keeping track of
-/// their state.
-///
-/// If a module crashes, the manager will notify the user and ask if they want to restart it.
+//! A process manager for ActivityWatch
+//!
+//! Used to start, stop and manage the lifecycle modules like aw-watcher-afk and aw-watcher-window.
+//! A module is a process that runs in the background and sends events to the ActivityWatch server.
+//!
+//! The manager is responsible for starting and stopping the modules, and for keeping track of
+//! their state.
+//!
+//! If a module crashes, the manager will notify the user and ask if they want to restart it.
 
 #[cfg(unix)]
 use {
