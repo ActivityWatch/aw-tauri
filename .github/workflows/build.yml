@@ -13,7 +13,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        platform: [macos-latest, ubuntu-22.04, windows-latest]
+        include:
+          - platform: 'macos-latest'
+          - platform: 'ubuntu-22.04'
+          - platform: 'ubuntu-22.04-arm' # for Arm based linux.
+          - platform: 'windows-latest'
     runs-on: ${{ matrix.platform }}
 
     steps:
@@ -27,6 +31,13 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev \
             libjavascriptcoregtk-4.1-dev libsoup-3.0-dev
+      
+      - name: Install dependencies (ubuntu-arm only)
+        if: matrix.platform == 'ubuntu-22.04-arm'
+        # You can remove libayatana-appindicator3-dev if you don't use the system tray feature.
+        run: |
+          sudo apt-get update
+           sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libgtk-3-dev xdg-utils
 
       - name: Rust setup
         uses: dtolnay/rust-toolchain@stable
@@ -52,3 +63,5 @@ jobs:
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          args: ${{ matrix.args }}
