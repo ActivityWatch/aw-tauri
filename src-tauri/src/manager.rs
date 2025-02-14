@@ -400,37 +400,36 @@ fn discover_modules() -> BTreeMap<String, PathBuf> {
 
 #[cfg(windows)]
 fn discover_modules() -> BTreeMap<String, PathBuf> {
-    let excluded = ["aw-tauri", "aw-client", "aw-cli", "aw-qt"];
-
-    // Get the discovery path from config
+    let excluded = ["awk", "aw-tauri", "aw-client", "aw-cli", "aw-qt"];
     let config = crate::get_config();
 
-    // Get the current PATH
     let path = env::var_os("PATH").unwrap_or_default();
     let mut paths = env::split_paths(&path).collect::<Vec<_>>();
 
-    // Add discovery path if not already in PATH
     if !paths.contains(&config.defaults.discovery_path) {
         paths.insert(0, config.defaults.discovery_path.to_owned());
     }
 
-    // Create new PATH-like string
     let new_paths = env::join_paths(paths).unwrap_or_default();
 
-    // Use the combined paths to find modules
     env::split_paths(&new_paths)
         .flat_map(|path| fs::read_dir(path).ok())
         .flatten()
         .filter_map(Result::ok)
         .filter_map(|entry| {
             let path = entry.path();
-            if path.is_file() && path.extension().map_or(false, |ext| ext == "exe") {
-                let name = path.file_stem()?.to_str()?.to_string();
-                if !excluded.contains(&name.as_str()) {
-                    Some((name, path))
-                } else {
-                    None
-                }
+            // Check if it's an executable
+            if !path.is_file() || !path.extension().map_or(false, |ext| ext == "exe") {
+                return None;
+            }
+
+            let name = entry.file_name().to_str()?.to_string();
+            // Remove .exe extension and convert to lowercase for consistent matching
+            let name = name.strip_suffix(".exe")?.to_lowercase();
+
+            // Check if it starts with "aw" and isn't in excluded list
+            if name.starts_with("aw") && !excluded.contains(&name.as_str()) {
+                Some((name, path))
             } else {
                 None
             }
