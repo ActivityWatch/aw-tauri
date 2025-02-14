@@ -98,9 +98,9 @@ impl ManagerState {
         let app = &*get_app_handle().lock().expect("failed to get app handle");
         debug!("App handle acquired");
 
-        let open = MenuItem::with_id(app, "open", "Open", true, None::<&str>)
+        let open = MenuItem::with_id(app, "open", "Open Dashboard", true, None::<&str>)
             .expect("failed to create open menu item");
-        let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)
+        let quit = MenuItem::with_id(app, "quit", "Quit ActivityWatch", true, None::<&str>)
             .expect("failed to create quit menu item");
 
         let mut modules_submenu_builder = SubmenuBuilder::new(app, "Modules");
