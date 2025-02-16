@@ -16,7 +16,9 @@ use {
 };
 #[cfg(windows)]
 use {
+    std::os::windows::process::CommandExt,
     winapi::shared::minwindef::DWORD,
+    winapi::um::winbase::CREATE_NO_WINDOW,
     winapi::um::wincon::{GenerateConsoleCtrlEvent, CTRL_BREAK_EVENT},
 };
 
@@ -328,6 +330,10 @@ fn start_module_thread(
         } else {
             command.args(["--port", port_string.as_str()]);
         }
+
+        // Set creation flags on Windows to hide console window
+        #[cfg(windows)]
+        command.creation_flags(CREATE_NO_WINDOW);
 
         let child = command.stdout(std::process::Stdio::piped()).spawn();
 
