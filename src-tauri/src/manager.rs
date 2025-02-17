@@ -390,9 +390,11 @@ fn discover_modules() -> BTreeMap<String, PathBuf> {
     let path = env::var_os("PATH").unwrap_or_default();
     let mut paths = env::split_paths(&path).collect::<Vec<_>>();
 
-    if !paths.contains(&config.defaults.discovery_path) {
-        // add to the front of the path list
-        paths.insert(0, config.defaults.discovery_path.to_owned());
+    // check each path in discovery_paths and add it to the start of the paths list if it's not already there
+    for path in config.defaults.discovery_paths.iter() {
+        if !paths.contains(path) {
+            paths.insert(0, path.to_owned());
+        }
     }
 
     // Create new PATH-like string
@@ -437,8 +439,11 @@ fn discover_modules() -> BTreeMap<String, PathBuf> {
     let path = env::var_os("PATH").unwrap_or_default();
     let mut paths = env::split_paths(&path).collect::<Vec<_>>();
 
-    if !paths.contains(&config.defaults.discovery_path) {
-        paths.insert(0, config.defaults.discovery_path.to_owned());
+    // check each path in discovery_paths and add it to the start of the paths list if it's not already there
+    for path in config.defaults.discovery_paths.iter() {
+        if !paths.contains(path) {
+            paths.insert(0, path.to_owned());
+        }
     }
 
     let new_paths = env::join_paths(paths).unwrap_or_default();
