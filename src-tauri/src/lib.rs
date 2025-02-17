@@ -205,29 +205,39 @@ pub struct Defaults {
     pub autostart: bool,
     pub autostart_minimized: bool,
     pub port: u16,
-    pub discovery_path: PathBuf,
+    pub discovery_paths: Vec<PathBuf>,
 }
 
 impl Default for Defaults {
     fn default() -> Self {
-        let discovery_path = if cfg!(target_os = "linux") {
-            UserDirs::new()
-                .map(|dirs| dirs.home_dir().join("aw-modules"))
-                .unwrap_or_default()
+        let mut discovery_paths = Vec::new();
+
+        if cfg!(target_os = "linux") {
+            if let Some(dirs) = UserDirs::new() {
+                discovery_paths.push(dirs.home_dir().join("aw-modules"));
+            }
         } else if cfg!(windows) {
-            let username = std::env::var("USERNAME").unwrap_or_default();
-            PathBuf::from(format!(r"C:\Users\{}\aw-modules", username))
+            if let Ok(username) = std::env::var("USERNAME") {
+                discovery_paths.push(PathBuf::from(format!(r"C:\Users\{}\aw-modules", username)));
+                discovery_paths.push(PathBuf::from(format!(
+                    r"C:\Users\{}\AppData\Local\Programs\ActivityWatch\",
+                    username
+                )));
+            }
         } else if cfg!(target_os = "macos") {
-            PathBuf::from("/Applications/ActivityWatch.app/Contents/MacOS")
-        } else {
-            PathBuf::new()
-        };
+            if let Some(dirs) = UserDirs::new() {
+                discovery_paths.push(dirs.home_dir().join("aw-modules"));
+            }
+            discovery_paths.push(PathBuf::from(
+                "/Applications/ActivityWatch.app/Contents/MacOS",
+            ));
+        }
 
         Defaults {
             autostart: true,
             autostart_minimized: true,
-            port: 5699, // TODO: update before going stable
-            discovery_path,
+            port: 5699,
+            discovery_paths,
         }
     }
 }
