@@ -32,7 +32,7 @@ use std::sync::{
 };
 use std::time::Duration;
 use std::{env, fs, thread};
-use tauri::menu::{CheckMenuItem, Menu, MenuItem, SubmenuBuilder};
+use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem, SubmenuBuilder};
 use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
 
 use crate::{get_app_handle, get_config, get_tray_id, HANDLE_CONDVAR};
@@ -138,10 +138,19 @@ impl ManagerState {
         let log_folder =
             MenuItem::with_id(app, "log_folder", "Open log folder", true, None::<&str>)
                 .expect("failed to create log folder menu item");
-
+        let separator = PredefinedMenuItem::separator(app).expect("failed to create separator");
         let menu = Menu::with_items(
             app,
-            &[&open, &module_submenu, &config_folder, &log_folder, &quit],
+            &[
+                &open,
+                &separator,
+                &module_submenu,
+                &separator,
+                &config_folder,
+                &log_folder,
+                &separator,
+                &quit,
+            ],
         )
         .expect("failed to create tray menu");
 
