@@ -376,7 +376,15 @@ fn start_module_thread(
 
 #[cfg(unix)]
 fn discover_modules() -> BTreeMap<String, PathBuf> {
-    let excluded = ["awk", "aw-tauri", "aw-client", "aw-cli", "aw-qt"];
+    let excluded = [
+        "awk",
+        "aw-tauri",
+        "aw-client",
+        "aw-cli",
+        "aw-qt",
+        "aw-server",
+        "aw-server-rust",
+    ];
     let config = crate::get_config();
 
     let path = env::var_os("PATH").unwrap_or_default();
@@ -415,7 +423,15 @@ fn discover_modules() -> BTreeMap<String, PathBuf> {
 
 #[cfg(windows)]
 fn discover_modules() -> BTreeMap<String, PathBuf> {
-    let excluded = ["awk", "aw-tauri", "aw-client", "aw-cli", "aw-qt"];
+    let excluded = [
+        "awk",
+        "aw-tauri",
+        "aw-client",
+        "aw-cli",
+        "aw-qt",
+        "aw-server",
+        "aw-server-rust",
+    ];
     let config = crate::get_config();
 
     let path = env::var_os("PATH").unwrap_or_default();
