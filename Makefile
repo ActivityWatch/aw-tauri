@@ -12,7 +12,7 @@ src-tauri/icons/icon.png: aw-webui/.git
 	npm run tauri icon "./aw-webui/media/logo/logo.png"
 
 aw-webui/dist: aw-webui/.git
-	cd aw-webui && make
+	cd aw-webui && make build
 
 prebuild: aw-webui/dist src-tauri/icons/icon.png
 
