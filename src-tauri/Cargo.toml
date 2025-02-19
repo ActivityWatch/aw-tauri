@@ -21,7 +21,7 @@ tauri-build = { version = "2.0.5", features = [] }
 
 [dependencies]
 shell-words = "1.1.0"
-tauri = { version = "2.2.2", features = ["tray-icon"] }
+tauri = { version = "2.2.5", features = ["tray-icon"] }
 tauri-plugin-shell = "2.2.0"
 tauri-plugin-dialog = "2.2.0"
 tauri-plugin-notification = "2.2.1"
