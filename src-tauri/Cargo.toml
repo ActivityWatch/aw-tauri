@@ -30,7 +30,7 @@ tauri-plugin-single-instance = "2.2.1"
 notify = "8.0.0"
 directories = "6.0.0"
 serde = { version = "1.0.217", features = ["derive"] }
-serde_json = "1.0.135"
+serde_json = "1.0.138"
 toml = "0.8.19"
 lazy_static = "1.5.0"
 log = "0.4.25"
