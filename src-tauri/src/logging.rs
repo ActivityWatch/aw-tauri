@@ -5,8 +5,10 @@ use std::path::PathBuf;
 
 pub fn setup_logging() -> Result<(), fern::InitError> {
     let log_path = get_log_path();
-    std::fs::create_dir_all(&log_path)?;
-    let log_file = log_path.join("aw-tauri.log");
+    let log_dir = log_path.parent().expect("Failed to get log dir");
+    if !log_dir.exists() {
+        std::fs::create_dir_all(log_dir)?;
+    }
 
     // Configure colors for log levels
     let colors = ColoredLevelConfig::new()
@@ -33,7 +35,7 @@ pub fn setup_logging() -> Result<(), fern::InitError> {
         .level_for("aw_server", LevelFilter::Info);
 
     // Configure output to file
-    let file = fern::log_file(log_file)?;
+    let file = fern::log_file(log_path)?;
 
     // Build the final dispatcher
     base_config
