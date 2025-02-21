@@ -480,11 +480,11 @@ pub fn run() {
                     }
                 });
                 if user_config.defaults.autostart
-                    && user_config.defaults.autostart_minimized
+                    && !user_config.defaults.autostart_minimized
                     && !*is_first_run()
                 {
                     if let Some(window) = app.webview_windows().get("main") {
-                        window.hide().unwrap();
+                        window.show().unwrap();
                     }
                 }
             }
