@@ -474,7 +474,7 @@ pub fn run() {
                         window.show().unwrap();
                     } else if event.id().0 == "quit" {
                         println!("quit clicked!");
-                        let state = manager_state.lock().unwrap();
+                        let mut state = manager_state.lock().unwrap();
                         state.stop_modules();
                         app.exit(0);
                     } else if event.id().0 == "config_folder" {

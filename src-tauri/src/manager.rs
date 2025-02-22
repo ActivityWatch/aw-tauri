@@ -58,6 +58,7 @@ pub struct ManagerState {
     pub modules_discovered: BTreeMap<String, PathBuf>,
     pub modules_pid: HashMap<String, u32>,
     pub modules_restart_count: HashMap<String, u32>,
+    pub modules_pending_shutdown: HashMap<String, bool>,
     pub modules_args: HashMap<String, Option<Vec<String>>>,
     pub modules_menu_set: bool,
 }
@@ -66,10 +67,12 @@ impl ManagerState {
     fn new(tx: Sender<ModuleMessage>) -> ManagerState {
         ManagerState {
             tx,
+            //TODO: merge some of these maps into a single struct
             modules_running: BTreeMap::new(),
             modules_discovered: discover_modules(),
             modules_pid: HashMap::new(),
             modules_restart_count: HashMap::new(),
+            modules_pending_shutdown: HashMap::new(),
             modules_args: HashMap::new(),
             modules_menu_set: false,
         }
@@ -86,6 +89,7 @@ impl ManagerState {
         info!("Stopped module: {name}");
         self.modules_running.insert(name.to_string(), false);
         self.modules_pid.remove(name);
+        self.modules_pending_shutdown.remove(name);
         self.update_tray_menu();
     }
     fn update_tray_menu(&mut self) {
@@ -175,8 +179,10 @@ impl ManagerState {
             }
         }
     }
-    pub fn stop_module(&self, name: &str) {
+    pub fn stop_module(&mut self, name: &str) {
         if let Some(pid) = self.modules_pid.get(name) {
+            // add to pending shutdown to prevent restart
+            self.modules_pending_shutdown.insert(name.to_string(), true);
             if let Err(e) = send_sigterm(*pid) {
                 error!("Failed to send SIGTERM to module {name}: {e}");
             } else {
@@ -184,9 +190,10 @@ impl ManagerState {
             }
         }
     }
-    pub fn stop_modules(&self) {
-        for (name, _pid) in self.modules_pid.iter() {
-            self.stop_module(name);
+    pub fn stop_modules(&mut self) {
+        let module_names: Vec<String> = self.modules_pid.keys().cloned().collect();
+        for name in module_names {
+            self.stop_module(&name);
         }
     }
     pub fn handle_system_click(&mut self, name: &str) {
@@ -274,13 +281,20 @@ fn handle(rx: Receiver<ModuleMessage>, state: Arc<Mutex<ManagerState>>) {
                     error!("Module {name} exited with error status");
                     thread::spawn(move || {
                         thread::sleep(Duration::from_secs(1));
-                        let state = &mut state_clone.lock().unwrap();
-                        let restart_count = state
-                            .modules_restart_count
-                            .entry(name_clone.clone())
-                            .or_insert(0);
-                        if *restart_count < 3 {
-                            *restart_count += 1;
+                        let state = &state_clone.lock().unwrap();
+                        let restart_count =
+                            state.modules_restart_count.get(&name_clone).unwrap_or(&0);
+
+                        let pending_shutdown = state
+                            .modules_pending_shutdown
+                            .get(&name_clone)
+                            .unwrap_or(&false);
+                        let _ = state;
+                        if *restart_count < 3 && !*pending_shutdown {
+                            let mut state = state_clone.lock().unwrap();
+                            state
+                                .modules_restart_count
+                                .insert(name_clone.clone(), *restart_count + 1);
                             // Get the stored arguments for this module
                             let stored_args =
                                 state.modules_args.get(&name_clone).cloned().flatten();
