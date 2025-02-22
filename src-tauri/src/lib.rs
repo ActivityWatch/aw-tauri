@@ -19,7 +19,7 @@ use tauri_plugin_opener::OpenerExt;
 mod logging;
 mod manager;
 
-use log::info;
+use log::{info, warn};
 use tauri::{
     menu::{Menu, MenuItem},
     tray::{TrayIconBuilder, TrayIconId},
@@ -290,8 +290,24 @@ pub(crate) fn get_config() -> &'static UserConfig {
         let config_path = get_config_path();
         if config_path.exists() {
             FIRST_RUN.set(false).expect("failed to set FIRST_RUN");
-            let config_str = read_to_string(config_path).expect("Failed to read config file");
-            toml::from_str(&config_str).expect("Failed to parse config file")
+            let config_str = read_to_string(&config_path).expect("Failed to read config file");
+
+            // Try to parse the config file
+            match toml::from_str::<UserConfig>(&config_str) {
+                Ok(config) => config,
+                Err(e) => {
+                    warn!("Failed to parse config file: {}. Using default config.", e);
+
+                    let app = &*get_app_handle().lock().expect("failed to get app handle");
+                    app.dialog()
+                        .message("Malformed config file. Using default config.")
+                        .kind(MessageDialogKind::Error)
+                        .title("Aw-Tauri")
+                        .show(|_| {});
+
+                    UserConfig::default()
+                }
+            }
         } else {
             FIRST_RUN.set(true).expect("failed to set FIRST_RUN");
 

@@ -6,9 +6,7 @@ use std::path::PathBuf;
 pub fn setup_logging() -> Result<(), fern::InitError> {
     let log_path = get_log_path();
     let log_dir = log_path.parent().expect("Failed to get log dir");
-    if !log_dir.exists() {
-        std::fs::create_dir_all(log_dir)?;
-    }
+    std::fs::create_dir_all(log_dir)?;
 
     // Configure colors for log levels
     let colors = ColoredLevelConfig::new()
