@@ -16,8 +16,8 @@ jobs:
       matrix:
         include:
           - platform: 'macos-latest'
-          - platform: 'ubuntu-22.04'
-          - platform: 'ubuntu-22.04-arm' # for Arm based linux.
+          - platform: 'ubuntu-24.04'
+          - platform: 'ubuntu-24.04-arm' # for Arm based linux.
           - platform: 'windows-latest'
     runs-on: ${{ matrix.platform }}
 
@@ -26,18 +26,33 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Install dependencies (ubuntu only)
-        if: matrix.platform == 'ubuntu-22.04'
+        if: matrix.platform == 'ubuntu-24.04'
         # You can remove libayatana-appindicator3-dev if you don't use the system tray feature.
         run: |
           sudo apt-get update
-           sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+          sudo apt-get install -y libappindicator3-dev librsvg2-dev patchelf
+          sudo apt install -y \
+          libwebkit2gtk-4.1-0=2.44.0-2 \
+          libwebkit2gtk-4.1-dev=2.44.0-2 \
+          libjavascriptcoregtk-4.1-0=2.44.0-2 \
+          libjavascriptcoregtk-4.1-dev=2.44.0-2 \
+          gir1.2-javascriptcoregtk-4.1=2.44.0-2 \
+          gir1.2-webkit2-4.1=2.44.0-2;
       
       - name: Install dependencies (ubuntu-arm only)
-        if: matrix.platform == 'ubuntu-22.04-arm'
+        if: matrix.platform == 'ubuntu-24.04-arm'
         # You can remove libayatana-appindicator3-dev if you don't use the system tray feature.
         run: |
           sudo apt-get update
-           sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libgtk-3-dev xdg-utils
+          sudo apt-get install -y libappindicator3-dev librsvg2-dev patchelf
+          sudo apt install -y \
+          libwebkit2gtk-4.1-0=2.44.0-2 \
+          libwebkit2gtk-4.1-dev=2.44.0-2 \
+          libjavascriptcoregtk-4.1-0=2.44.0-2 \
+          libjavascriptcoregtk-4.1-dev=2.44.0-2 \
+          gir1.2-javascriptcoregtk-4.1=2.44.0-2 \
+          gir1.2-webkit2-4.1=2.44.0-2 \
+          xdg-utils
 
       - name: Rust setup
         uses: dtolnay/rust-toolchain@stable
