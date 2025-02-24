@@ -116,9 +116,12 @@ pub fn handle_first_run() {
             app.notification()
                 .builder()
                 .title("Aw-Tauri")
-                .body("Aw-Tauri is running in the background")
+                .body("Welcome to Aw-Tauri! Click on the tray icon to launch the dashboard")
                 .show()
                 .unwrap();
+            if let Some(window) = app.webview_windows().get("main") {
+                window.show().unwrap();
+            }
         });
     }
 }
@@ -495,10 +498,7 @@ pub fn run() {
                         state.handle_system_click(&event.id().0);
                     }
                 });
-                if user_config.defaults.autostart
-                    && !user_config.defaults.autostart_minimized
-                    && !*is_first_run()
-                {
+                if user_config.defaults.autostart && !user_config.defaults.autostart_minimized {
                     if let Some(window) = app.webview_windows().get("main") {
                         window.show().unwrap();
                     }
