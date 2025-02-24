@@ -82,6 +82,7 @@ impl ManagerState {
         self.modules_running.insert(name.to_string(), true);
         self.modules_pid.insert(name.to_string(), pid);
         self.modules_args.insert(name.to_string(), args);
+        self.modules_pending_shutdown.remove(name);
         debug!("Running modules: {:?}", self.modules_running);
         self.update_tray_menu();
     }
@@ -89,7 +90,6 @@ impl ManagerState {
         info!("Stopped module: {name}");
         self.modules_running.insert(name.to_string(), false);
         self.modules_pid.remove(name);
-        self.modules_pending_shutdown.remove(name);
         self.update_tray_menu();
     }
     fn update_tray_menu(&mut self) {
@@ -281,7 +281,7 @@ fn handle(rx: Receiver<ModuleMessage>, state: Arc<Mutex<ManagerState>>) {
                     error!("Module {name} exited with error status");
                     thread::spawn(move || {
                         thread::sleep(Duration::from_secs(1));
-                        let state = &state_clone.lock().unwrap();
+                        let state = &mut state_clone.lock().unwrap();
                         let restart_count =
                             state.modules_restart_count.get(&name_clone).unwrap_or(&0);
 
@@ -289,12 +289,15 @@ fn handle(rx: Receiver<ModuleMessage>, state: Arc<Mutex<ManagerState>>) {
                             .modules_pending_shutdown
                             .get(&name_clone)
                             .unwrap_or(&false);
-                        let _ = state;
-                        if *restart_count < 3 && !*pending_shutdown {
-                            let mut state = state_clone.lock().unwrap();
+
+                        if *pending_shutdown {
+                            return;
+                        }
+                        if *restart_count < 3 {
+                            let new_count = *restart_count + 1;
                             state
                                 .modules_restart_count
-                                .insert(name_clone.clone(), *restart_count + 1);
+                                .insert(name_clone.clone(), new_count);
                             // Get the stored arguments for this module
                             let stored_args =
                                 state.modules_args.get(&name_clone).cloned().flatten();
