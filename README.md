@@ -29,10 +29,9 @@ Benefits of Tauri:
 
 # Prerequisites
 
+ - Tauri dependencies (see [their docs](https://v2.tauri.app/start/prerequisites/))
  - Node.js
  - Rust
- - Tauri CLI (`npm install -g @tauri-apps/cli`)
- - Tauri dependencies (see [their docs](https://v2.tauri.app/start/prerequisites/))
 
 # Usage
 
