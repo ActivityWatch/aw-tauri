@@ -491,6 +491,7 @@ dependencies = [
  "chrono",
  "directories",
  "fern 0.7.1",
+ "glob",
  "lazy_static",
  "log",
  "nix",
