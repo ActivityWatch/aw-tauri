@@ -220,13 +220,18 @@ impl Default for Defaults {
                 discovery_paths.push(dirs.home_dir().join("aw-modules"));
             }
         } else if cfg!(windows) {
-            if let Ok(username) = std::env::var("USERNAME") {
-                discovery_paths.push(PathBuf::from(format!(r"C:\Users\{}\aw-modules", username)));
-                discovery_paths.push(PathBuf::from(format!(
-                    r"C:\Users\{}\AppData\Local\Programs\ActivityWatch\",
-                    username
-                )));
-            }
+            let username = std::process::Command::new("whoami")
+                .output()
+                .ok()
+                .and_then(|output| String::from_utf8(output.stdout).ok())
+                .map(|s| s.trim().split('\\').last().unwrap_or_default().to_string())
+                .unwrap_or_default();
+
+            discovery_paths.push(PathBuf::from(format!(r"C:\Users\{}\aw-modules", username)));
+            discovery_paths.push(PathBuf::from(format!(
+                r"C:\Users\{}\AppData\Local\Programs\ActivityWatch\",
+                username
+            )));
         } else if cfg!(target_os = "macos") {
             if let Some(dirs) = UserDirs::new() {
                 discovery_paths.push(dirs.home_dir().join("aw-modules"));
