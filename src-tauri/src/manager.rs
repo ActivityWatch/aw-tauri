@@ -22,6 +22,7 @@ use {
     winapi::um::wincon::{GenerateConsoleCtrlEvent, CTRL_BREAK_EVENT},
 };
 
+use glob::glob;
 use log::{debug, error, info};
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
@@ -418,23 +419,35 @@ fn discover_modules() -> BTreeMap<String, PathBuf> {
     let new_paths = env::join_paths(paths).unwrap_or_default();
 
     env::split_paths(&new_paths)
-        .flat_map(|path| fs::read_dir(path).ok())
-        .flatten()
-        .filter_map(Result::ok)
-        .filter_map(|entry| {
-            let metadata = entry.metadata().ok()?;
-            let is_executable = (metadata.is_file() || metadata.is_symlink())
-                && metadata.permissions().mode() & 0o111 != 0;
-            if !is_executable {
+        .flat_map(|path| {
+            let pattern = path.join("**").join("aw*").to_string_lossy().to_string();
+
+            // Use glob to find all matching files (with recursive=true)
+            glob(&pattern)
+                .ok()
+                .into_iter()
+                .flatten()
+                .filter_map(Result::ok)
+        })
+        .filter_map(|path| {
+            let file_name = path.file_name()?.to_str()?.to_string();
+
+            if file_name.contains(".") || excluded.contains(&file_name.as_str()) {
                 return None;
             }
 
-            let path = entry.path();
-            let name = entry.file_name().to_str()?.to_string();
-            if name.starts_with("aw") && !name.contains(".") && !excluded.contains(&name.as_str()) {
-                Some((name, path))
-            } else {
-                None
+            match fs::metadata(&path) {
+                Ok(metadata) => {
+                    let is_executable = (metadata.is_file() || metadata.is_symlink())
+                        && metadata.permissions().mode() & 0o111 != 0;
+
+                    if is_executable {
+                        Some((file_name, path))
+                    } else {
+                        None
+                    }
+                }
+                Err(_) => None,
             }
         })
         .collect()
@@ -466,25 +479,25 @@ fn discover_modules() -> BTreeMap<String, PathBuf> {
     let new_paths = env::join_paths(paths).unwrap_or_default();
 
     env::split_paths(&new_paths)
-        .flat_map(|path| fs::read_dir(path).ok())
-        .flatten()
-        .filter_map(Result::ok)
-        .filter_map(|entry| {
-            let path = entry.path();
-            // Check if it's an executable
-            if !path.is_file() || !path.extension().map_or(false, |ext| ext == "exe") {
+        .flat_map(|path| {
+            let pattern = path.join("**").join("aw*").to_string_lossy().to_string();
+
+            // Use glob to find all matching files (with recursive=true)
+            glob(&pattern)
+                .ok()
+                .into_iter()
+                .flatten()
+                .filter_map(Result::ok)
+        })
+        .filter_map(|path| {
+            let file_name = path.file_name()?.to_str()?.to_string();
+
+            let name = file_name.strip_suffix(".exe")?.to_lowercase();
+
+            if excluded.contains(&name.as_str()) {
                 return None;
-            }
-
-            let name = entry.file_name().to_str()?.to_string();
-            // Remove .exe extension and convert to lowercase for consistent matching
-            let name = name.strip_suffix(".exe")?.to_lowercase();
-
-            // Check if it starts with "aw" and isn't in excluded list
-            if name.starts_with("aw") && !excluded.contains(&name.as_str()) {
-                Some((name, path))
             } else {
-                None
+                Some((name, path))
             }
         })
         .collect()
