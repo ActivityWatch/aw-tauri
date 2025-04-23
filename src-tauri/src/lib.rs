@@ -475,6 +475,7 @@ pub fn run() {
                         let windows = app.webview_windows();
                         let window = windows.get("main").expect("main window not found");
                         window.show().unwrap();
+                        window.set_focus().unwrap();
                     } else if event.id().0 == "quit" {
                         println!("quit clicked!");
                         let mut state = manager_state.lock().unwrap();
