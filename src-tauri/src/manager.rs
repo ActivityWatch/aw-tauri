@@ -238,17 +238,17 @@ pub fn start_manager() -> Arc<Mutex<ManagerState>> {
 
     // Start the modules
     let config = get_config();
-    for module_config in config.autostart_modules.iter() {
-        let args = if module_config.args.is_empty() {
+    for module_entry in config.autostart.modules.iter() {
+        let name = module_entry.name();
+        let args_str = module_entry.args();
+
+        let args = if args_str.is_empty() {
             None
         } else {
             // Split args string on whitespace, preserving quoted arguments
-            Some(shell_words::split(&module_config.args).unwrap_or_default())
+            Some(shell_words::split(args_str).unwrap_or_default())
         };
-        state
-            .lock()
-            .unwrap()
-            .start_module(&module_config.name, args.as_ref());
+        state.lock().unwrap().start_module(name, args.as_ref());
     }
 
     // populate the tray menu if not yet already done
@@ -348,7 +348,7 @@ fn start_module_thread(
 ) {
     thread::spawn(move || {
         // Start the child process
-        let port_string = get_config().defaults.port.to_string();
+        let port_string = get_config().port.to_string();
         let mut command = Command::new(&path);
 
         // Use custom args if provided, otherwise use default port arg
@@ -409,7 +409,7 @@ fn discover_modules() -> BTreeMap<String, PathBuf> {
     let mut paths = env::split_paths(&path).collect::<Vec<_>>();
 
     // check each path in discovery_paths and add it to the start of the paths list if it's not already there
-    for path in config.defaults.discovery_paths.iter() {
+    for path in config.discovery_paths.iter() {
         if !paths.contains(path) {
             paths.insert(0, path.to_owned());
         }
@@ -470,7 +470,7 @@ fn discover_modules() -> BTreeMap<String, PathBuf> {
     let mut paths = env::split_paths(&path).collect::<Vec<_>>();
 
     // check each path in discovery_paths and add it to the start of the paths list if it's not already there
-    for path in config.defaults.discovery_paths.iter() {
+    for path in config.discovery_paths.iter() {
         if !paths.contains(path) {
             paths.insert(0, path.to_owned());
         }
