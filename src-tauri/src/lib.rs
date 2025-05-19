@@ -87,6 +87,54 @@ pub(crate) fn get_tray_id() -> &'static TrayIconId {
     &TRAY_ID.get().expect("TRAY_ID not initialized").0
 }
 
+fn write_formatted_config(config: &UserConfig, path: &Path) -> Result<(), std::io::Error> {
+    // Helper function to write the config prettier
+    let mut output = String::new();
+
+    output.push_str(&format!("port = {}\n", config.port));
+
+    output.push_str("discovery_paths = [");
+    if !config.discovery_paths.is_empty() {
+        output.push('\n');
+        for path in &config.discovery_paths {
+            output.push_str(&format!("  \"{}\",\n", path.to_str().unwrap_or_default()));
+        }
+        output.push_str("]");
+    } else {
+        output.push_str("]\n");
+    }
+    output.push_str("\n\n");
+
+    // Add autostart section
+    output.push_str("[autostart]\n");
+    output.push_str(&format!("enabled = {}\n", config.autostart.enabled));
+    output.push_str(&format!("minimized = {}\n", config.autostart.minimized));
+
+    // Format modules with one per line
+    output.push_str("modules = [\n");
+    for module in &config.autostart.modules {
+        match module {
+            ModuleEntry::Simple(name) => {
+                output.push_str(&format!("  \"{}\",\n", name));
+            }
+            ModuleEntry::Full { name, args } => {
+                output.push_str(&format!(
+                    "  {{ name = \"{}\", args = \"{}\" }},\n",
+                    name, args
+                ));
+            }
+        }
+    }
+
+    if !config.autostart.modules.is_empty() {
+        output.truncate(output.len() - 2); // Remove last comma and newline
+        output.push('\n'); // Add back just the newline
+    }
+    output.push_str("]\n");
+
+    write(path, output)
+}
+
 pub fn is_port_available(port: u16) -> std::io::Result<bool> {
     let addr = format!("127.0.0.1:{}", port)
         .parse::<SocketAddr>()
@@ -196,22 +244,49 @@ impl SpecificFileWatcher {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-pub struct ModuleConfig {
-    pub name: String,
-    #[serde(default = "String::new")]
-    pub args: String,
+// Module representation that can be either a string or an object with name/args
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum ModuleEntry {
+    Simple(String),
+    Full {
+        name: String,
+        #[serde(default = "String::new")]
+        args: String,
+    },
+}
+
+impl ModuleEntry {
+    pub fn name(&self) -> &str {
+        match self {
+            ModuleEntry::Simple(name) => name,
+            ModuleEntry::Full { name, .. } => name,
+        }
+    }
+
+    pub fn args(&self) -> &str {
+        match self {
+            ModuleEntry::Simple(_) => "",
+            ModuleEntry::Full { args, .. } => args,
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-pub struct Defaults {
-    pub autostart: bool,
-    pub autostart_minimized: bool,
+pub struct AutostartConfig {
+    pub enabled: bool,
+    pub minimized: bool,
+    pub modules: Vec<ModuleEntry>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct UserConfig {
     pub port: u16,
     pub discovery_paths: Vec<PathBuf>,
+    pub autostart: AutostartConfig,
 }
 
-impl Default for Defaults {
+impl Default for UserConfig {
     fn default() -> Self {
         let mut discovery_paths = Vec::new();
 
@@ -236,41 +311,22 @@ impl Default for Defaults {
             ));
         }
 
-        Defaults {
-            autostart: true,
-            autostart_minimized: true,
+        UserConfig {
             port: 5699,
             discovery_paths,
-        }
-    }
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct UserConfig {
-    #[serde(default)]
-    pub defaults: Defaults,
-    #[serde(default)]
-    pub autostart_modules: Vec<ModuleConfig>,
-}
-
-impl Default for UserConfig {
-    fn default() -> Self {
-        UserConfig {
-            defaults: Defaults::default(),
-            autostart_modules: vec![
-                ModuleConfig {
-                    name: "aw-watcher-afk".to_string(),
-                    args: String::new(),
-                },
-                ModuleConfig {
-                    name: "aw-watcher-window".to_string(),
-                    args: String::new(),
-                },
-                ModuleConfig {
-                    name: "aw-awatcher".to_string(),
-                    args: String::new(),
-                },
-            ],
+            autostart: AutostartConfig {
+                enabled: true,
+                minimized: true,
+                modules: vec![
+                    ModuleEntry::Simple("aw-watcher-afk".to_string()),
+                    ModuleEntry::Simple("aw-watcher-window".to_string()),
+                    ModuleEntry::Simple("aw-awatcher".to_string()),
+                    ModuleEntry::Full {
+                        name: "aw-sync".to_string(),
+                        args: "daemon".to_string(),
+                    },
+                ],
+            },
         }
     }
 }
@@ -315,9 +371,8 @@ pub(crate) fn get_config() -> &'static UserConfig {
             FIRST_RUN.set(true).expect("failed to set FIRST_RUN");
 
             let config = UserConfig::default();
-            let config_str = toml::to_string(&config).expect("Failed to serialize config");
             create_dir_all(config_path.parent().unwrap()).expect("Failed to create config dir");
-            write(config_path, config_str).expect("Failed to write config file");
+            write_formatted_config(&config, &config_path).expect("Failed to write config file");
             config
         }
     })
@@ -370,7 +425,7 @@ pub fn run() {
                 // Get the autostart manager
                 let autostart_manager = app.autolaunch();
 
-                match user_config.defaults.autostart {
+                match user_config.autostart.enabled {
                     true => {
                         if !autostart_manager
                             .is_enabled()
@@ -395,7 +450,7 @@ pub fn run() {
                 let legacy_import = false;
 
                 let mut aw_config = aw_server::config::create_config(testing);
-                aw_config.port = user_config.defaults.port;
+                aw_config.port = user_config.port;
                 let db_path = aw_server::dirs::db_path(testing)
                     .expect("Failed to get db path")
                     .to_str()
@@ -425,21 +480,17 @@ pub fn run() {
                     asset_resolver: aw_server::endpoints::AssetResolver::new(asset_path_opt),
                     device_id,
                 };
-                if !is_port_available(user_config.defaults.port)
-                    .expect("Failed to check port availability")
+                if !is_port_available(user_config.port).expect("Failed to check port availability")
                 {
                     app.dialog()
-                        .message(format!(
-                            "Port {} is already in use",
-                            user_config.defaults.port
-                        ))
+                        .message(format!("Port {} is already in use", user_config.port))
                         .kind(MessageDialogKind::Error)
                         .title("Aw-Tauri")
                         .show(|_| {});
-                    panic!("Port {} is already in use", user_config.defaults.port);
+                    panic!("Port {} is already in use", user_config.port);
                 }
                 tauri::async_runtime::spawn(build_rocket(server_state, aw_config).launch());
-                let url = format!("http://localhost:{}/", user_config.defaults.port)
+                let url = format!("http://localhost:{}/", user_config.port)
                     .parse()
                     .unwrap();
                 let mut main_window = app.get_webview_window("main").unwrap();
@@ -499,7 +550,7 @@ pub fn run() {
                         state.handle_system_click(&event.id().0);
                     }
                 });
-                if user_config.defaults.autostart && !user_config.defaults.autostart_minimized {
+                if user_config.autostart.enabled && !user_config.autostart.minimized {
                     if let Some(window) = app.webview_windows().get("main") {
                         window.show().unwrap();
                     }
