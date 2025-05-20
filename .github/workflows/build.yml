@@ -18,8 +18,8 @@ jobs:
           - platform: 'ubuntu-22.04'
           - platform: 'ubuntu-22.04-arm' # for Arm based linux.
           - platform: 'windows-latest'
-          - platform: 'windows-latest' # for Windows ARM64
-            args: '--target aarch64-pc-windows-msvc'
+          - platform: 'windows-11-arm' # for Windows ARM64
+            # args: '--target aarch64-pc-windows-msvc'
     runs-on: ${{ matrix.platform }}
 
     steps:
