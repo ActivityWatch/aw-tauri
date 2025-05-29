@@ -312,7 +312,7 @@ impl Default for UserConfig {
         }
 
         UserConfig {
-            port: 5699,
+            port: 5600,
             discovery_paths,
             autostart: AutostartConfig {
                 enabled: true,
@@ -446,7 +446,7 @@ pub fn run() {
                     }
                 }
 
-                let testing = true;
+                let testing = false;
                 let legacy_import = false;
 
                 let mut aw_config = aw_server::config::create_config(testing);
