@@ -40,7 +40,7 @@ package:
 	mkdir -p target/package
 	# Copy binary
 	cp src-tauri/target/$(targetdir)/aw-tauri target/package/aw-tauri
-	# Copy everything into `dist/aw-server-rust`
+	# Copy everything into `dist/aw-tauri`
 	mkdir -p dist
 	rm -rf dist/aw-tauri
 	cp -rf target/package dist/aw-tauri
