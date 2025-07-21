@@ -296,9 +296,9 @@ impl Default for UserConfig {
             }
         } else if cfg!(windows) {
             if let Ok(username) = std::env::var("USERNAME") {
-                discovery_paths.push(PathBuf::from(format!(r"C:\Users\{}\aw-modules", username)));
+                discovery_paths.push(PathBuf::from(format!(r"C:/Users/{}/aw-modules", username)));
                 discovery_paths.push(PathBuf::from(format!(
-                    r"C:\Users\{}\AppData\Local\Programs\ActivityWatch\",
+                    r"C:/Users/{}/AppData/Local/Programs/ActivityWatch",
                     username
                 )));
             }
