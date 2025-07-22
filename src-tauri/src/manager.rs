@@ -364,10 +364,10 @@ fn start_module_thread(
         let port_string = get_config().port.to_string();
         let mut command = Command::new(&path);
 
-        // Use custom args if provided, otherwise use default port arg
+        // Use custom args if provided, otherwise only pass port arg if it's not the default (5600)
         if let Some(ref args) = custom_args {
             command.args(args);
-        } else {
+        } else if get_config().port != 5600 {
             command.args(["--port", port_string.as_str()]);
         }
 
