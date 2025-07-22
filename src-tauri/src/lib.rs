@@ -99,7 +99,7 @@ fn write_formatted_config(config: &UserConfig, path: &Path) -> Result<(), std::i
         for path in &config.discovery_paths {
             output.push_str(&format!("  \"{}\",\n", path.to_str().unwrap_or_default()));
         }
-        output.push_str("]");
+        output.push(']');
     } else {
         output.push_str("]\n");
     }
