@@ -17,9 +17,11 @@ use {
 #[cfg(windows)]
 use {
     std::os::windows::process::CommandExt,
-    winapi::shared::minwindef::DWORD,
+    winapi::shared::minwindef::{DWORD, FALSE},
+    winapi::um::handleapi::CloseHandle,
+    winapi::um::processthreadsapi::{OpenProcess, TerminateProcess},
     winapi::um::winbase::CREATE_NO_WINDOW,
-    winapi::um::wincon::{GenerateConsoleCtrlEvent, CTRL_BREAK_EVENT},
+    winapi::um::winnt::PROCESS_TERMINATE,
 };
 
 use glob::glob;
@@ -222,14 +224,25 @@ fn send_sigterm(pid: u32) -> Result<(), nix::Error> {
 
 #[cfg(windows)]
 fn send_sigterm(pid: u32) -> Result<(), std::io::Error> {
-    // Get the process ID of the child process
     let pid = pid as DWORD;
 
-    // Send SIGTERM signal to the process
-    if unsafe { GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, pid) } == 0 {
+    // Open the process with terminate permission
+    let process_handle = unsafe { OpenProcess(PROCESS_TERMINATE, FALSE, pid) };
+
+    if process_handle.is_null() {
         return Err(std::io::Error::last_os_error());
+    }
+
+    // Terminate the process with exit code 1
+    let result = unsafe { TerminateProcess(process_handle, 1) };
+
+    // Close the process handle
+    unsafe { CloseHandle(process_handle) };
+
+    if result == 0 {
+        Err(std::io::Error::last_os_error())
     } else {
-        return Ok(());
+        Ok(())
     }
 }
 pub fn start_manager() -> Arc<Mutex<ManagerState>> {
