@@ -47,4 +47,3 @@ winapi = { version = "0.3.9", features = ["winuser"] }
 
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
 tauri-plugin-autostart = "2.2.0"
-

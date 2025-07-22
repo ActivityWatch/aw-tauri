@@ -1,0 +1,31 @@
+repos:
+  - repo: local
+    hooks:
+      - id: fmt
+        name: fmt
+        description: Format files with cargo fmt.
+        entry: bash -c 'cd src-tauri && cargo fmt --'
+        pass_filenames: false
+        types: [rust]
+        language: system
+      - id: clippy
+        name: clippy
+        description: Lint rust sources
+        entry: bash -c 'cd src-tauri && cargo clippy -- -D warnings'
+        pass_filenames: false
+        types: [rust]
+        language: system
+      - id: cargo-check
+        name: cargo check
+        description: Check the package for errors.
+        entry: bash -c 'cd src-tauri && cargo check'
+        language: system
+        types: [rust]
+        pass_filenames: false
+
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.4.0
+    hooks:
+      - id: end-of-file-fixer
+      - id: check-added-large-files
+        args: ['--maxkb=500']

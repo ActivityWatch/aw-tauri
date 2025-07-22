@@ -19,4 +19,3 @@ jobs:
           openai_api_key: ${{ secrets.OPENAI_API_KEY }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
           allowlist: "erikbjare 0xbrayo"
-
