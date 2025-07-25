@@ -10,7 +10,7 @@ endif
 
 build: prebuild
 	npm run tauri build
-	
+
 dev: prebuild
 	npm run tauri dev
 
@@ -24,7 +24,7 @@ src-tauri/icons/icon.png: aw-webui/.git
 aw-webui/dist: aw-webui/.git
 	cd aw-webui && make build
 
-prebuild: aw-webui/dist node_modules src-tauri/icons/icon.png 
+prebuild: aw-webui/dist node_modules src-tauri/icons/icon.png
 
 precommit: format check
 
@@ -42,8 +42,8 @@ package:
 	cp src-tauri/target/$(targetdir)/aw-tauri target/package/aw-tauri
 	# Copy everything into `dist/aw-tauri`
 	mkdir -p dist
-	rm -rf dist/aw-tauri
-	cp -rf target/package dist/aw-tauri
+	find dist/ -maxdepth 1 -type f -delete 2>/dev/null || true
+	cp target/package/aw-tauri dist/
 
 node_modules: package-lock.json
 	npm ci
