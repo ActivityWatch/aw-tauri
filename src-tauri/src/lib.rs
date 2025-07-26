@@ -309,6 +309,9 @@ impl Default for UserConfig {
             discovery_paths.push(PathBuf::from(
                 "/Applications/ActivityWatch.app/Contents/MacOS",
             ));
+            discovery_paths.push(PathBuf::from(
+                "/Applications/ActivityWatch.app/Contents/Resources",
+            ));
         }
 
         UserConfig {
