@@ -413,6 +413,7 @@ fn discover_modules() -> BTreeMap<String, PathBuf> {
         "aw-qt",
         "aw-server",
         "aw-server-rust",
+        "aw-watcher-window-macos",
     ];
     let config = crate::get_config();
 
