@@ -24,7 +24,6 @@ use {
     winapi::um::winnt::PROCESS_TERMINATE,
 };
 
-use glob::glob;
 use log::{debug, error, info};
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
@@ -405,7 +404,6 @@ fn start_module_thread(
     });
 }
 
-#[cfg(unix)]
 fn discover_modules() -> BTreeMap<String, PathBuf> {
     let excluded = [
         "awk",
@@ -428,90 +426,39 @@ fn discover_modules() -> BTreeMap<String, PathBuf> {
         }
     }
 
-    // Create new PATH-like string
     let new_paths = env::join_paths(paths).unwrap_or_default();
 
     env::split_paths(&new_paths)
         .flat_map(|path| {
-            let pattern = path.join("**").join("aw*").to_string_lossy().to_string();
-
-            // Use glob to find all matching files (with recursive=true)
-            glob(&pattern)
-                .ok()
+            fs::read_dir(path)
                 .into_iter()
                 .flatten()
-                .filter_map(Result::ok)
-        })
-        .filter_map(|path| {
-            let file_name = path.file_name()?.to_str()?.to_string();
+                .filter_map(|entry| entry.ok())
+                .filter_map(|entry| {
+                    let path = entry.path();
+                    let file_name = path.file_name()?.to_str()?.to_string();
 
-            if file_name.contains(".") || excluded.contains(&file_name.as_str()) {
-                return None;
-            }
+                    #[cfg(windows)]
+                    let name = file_name.to_lowercase().strip_suffix(".exe")?.to_string();
+                    #[cfg(unix)]
+                    let name = file_name.clone();
 
-            match fs::metadata(&path) {
-                Ok(metadata) => {
-                    let is_executable = (metadata.is_file() || metadata.is_symlink())
-                        && metadata.permissions().mode() & 0o111 != 0;
-
-                    if is_executable {
-                        Some((file_name, path))
-                    } else {
-                        None
+                    if excluded.contains(&name.as_str()) || !file_name.starts_with("aw-") {
+                        return None;
                     }
-                }
-                Err(_) => None,
-            }
-        })
-        .collect()
-}
 
-#[cfg(windows)]
-fn discover_modules() -> BTreeMap<String, PathBuf> {
-    let excluded = [
-        "awk",
-        "aw-tauri",
-        "aw-client",
-        "aw-cli",
-        "aw-qt",
-        "aw-server",
-        "aw-server-rust",
-    ];
-    let config = crate::get_config();
+                    #[cfg(unix)]
+                    {
+                        let metadata = fs::metadata(&path).ok()?;
+                        let is_executable = (metadata.is_file() || metadata.is_symlink())
+                            && metadata.permissions().mode() & 0o111 != 0;
+                        if !is_executable {
+                            return None;
+                        }
+                    }
 
-    let path = env::var_os("PATH").unwrap_or_default();
-    let mut paths = env::split_paths(&path).collect::<Vec<_>>();
-
-    // check each path in discovery_paths and add it to the start of the paths list if it's not already there
-    for path in config.discovery_paths.iter() {
-        if !paths.contains(path) {
-            paths.insert(0, path.to_owned());
-        }
-    }
-
-    let new_paths = env::join_paths(paths).unwrap_or_default();
-
-    env::split_paths(&new_paths)
-        .flat_map(|path| {
-            let pattern = path.join("**").join("aw*").to_string_lossy().to_string();
-
-            // Use glob to find all matching files (with recursive=true)
-            glob(&pattern)
-                .ok()
-                .into_iter()
-                .flatten()
-                .filter_map(Result::ok)
-        })
-        .filter_map(|path| {
-            let file_name = path.file_name()?.to_str()?.to_string();
-
-            let name = file_name.strip_suffix(".exe")?.to_lowercase();
-
-            if excluded.contains(&name.as_str()) {
-                return None;
-            } else {
-                Some((name, path))
-            }
+                    Some((name, path))
+                })
         })
         .collect()
 }
