@@ -1,12 +1,8 @@
-# Build in release mode by default, unless RELEASE=false
-ifeq ($(RELEASE), false)
-		cargoflag :=
-		targetdir := debug
+ifeq ($(shell uname -m), arm64)
+	ARCH := _arm64
 else
-		cargoflag := --release
-		targetdir := release
+	ARCH :=
 endif
-
 
 build: prebuild
 	npm run tauri build
@@ -39,11 +35,17 @@ package:
 	rm -rf target/package
 	mkdir -p target/package
 	# Copy binary
-	cp src-tauri/target/$(targetdir)/aw-tauri target/package/aw-tauri
+ifeq ($(OS),linux)
+	cp src-tauri/target/release/bundle/deb/*.deb target/package/aw-tauri$(ARCH).deb
+	cp src-tauri/target/release/bundle/rpm/*.rpm target/package/aw-tauri$(ARCH).rpm
+	cp src-tauri/target/release/bundle/appimage/*.AppImage target/package/aw-tauri$(ARCH).AppImage
+else
+	cp src-tauri/target/release/aw-tauri target/package/aw-tauri
+endif
 	# Copy everything into `dist/aw-tauri`
 	mkdir -p dist
 	find dist/ -maxdepth 1 -type f -delete 2>/dev/null || true
-	cp target/package/aw-tauri dist/
+	cp target/package/* dist/
 
 node_modules: package-lock.json
 	npm ci
