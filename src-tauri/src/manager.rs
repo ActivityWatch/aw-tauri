@@ -24,6 +24,7 @@ use {
     winapi::um::winnt::PROCESS_TERMINATE,
 };
 
+use glob::glob;
 use log::{debug, error, info};
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
@@ -404,9 +405,87 @@ fn start_module_thread(
     });
 }
 
+#[cfg(unix)]
 fn discover_modules() -> BTreeMap<String, PathBuf> {
     let excluded = [
-        "awk",
+        "aw-tauri",
+        "aw-client",
+        "aw-cli",
+        "aw-qt",
+        "aw-server",
+        "aw-server-rust",
+    ];
+    let config = crate::get_config();
+
+    let path = env::var_os("PATH").unwrap_or_default();
+    let mut paths = env::split_paths(&path).collect::<Vec<_>>();
+
+    // check each path in discovery_paths and add it to the start of the paths list if it's not already there
+    for path in config.discovery_paths.iter() {
+        if !paths.contains(path) {
+            paths.insert(0, path.to_owned());
+        }
+    }
+
+    // Create new PATH-like string
+    let new_paths = env::join_paths(paths).unwrap_or_default();
+
+    env::split_paths(&new_paths)
+        .flat_map(|path| {
+            // Limit recursive search to 3 levels deep
+            // Create patterns for each depth level (0, 1, 2, 3)
+            let patterns = vec![
+                path.join("aw-*").to_string_lossy().to_string(),
+                path.join("*").join("aw-*").to_string_lossy().to_string(),
+                path.join("*")
+                    .join("*")
+                    .join("aw-*")
+                    .to_string_lossy()
+                    .to_string(),
+                path.join("*")
+                    .join("*")
+                    .join("*")
+                    .join("aw-*")
+                    .to_string_lossy()
+                    .to_string(),
+            ];
+
+            // Collect results from all patterns
+            patterns.into_iter().flat_map(|pattern| {
+                glob(&pattern)
+                    .ok()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(Result::ok)
+            })
+        })
+        .filter_map(|path| {
+            let file_name = path.file_name()?.to_str()?.to_string();
+
+            if file_name.contains(".") || excluded.contains(&file_name.as_str()) {
+                return None;
+            }
+
+            match fs::metadata(&path) {
+                Ok(metadata) => {
+                    let is_executable = (metadata.is_file() || metadata.is_symlink())
+                        && metadata.permissions().mode() & 0o111 != 0;
+
+                    if is_executable {
+                        Some((file_name, path))
+                    } else {
+                        None
+                    }
+                }
+                Err(_) => None,
+            }
+        })
+        .collect()
+}
+
+#[cfg(windows)]
+fn discover_modules() -> BTreeMap<String, PathBuf> {
+    let excluded = [
         "aw-tauri",
         "aw-client",
         "aw-cli",
@@ -431,35 +510,43 @@ fn discover_modules() -> BTreeMap<String, PathBuf> {
 
     env::split_paths(&new_paths)
         .flat_map(|path| {
-            fs::read_dir(path)
-                .into_iter()
-                .flatten()
-                .filter_map(|entry| entry.ok())
-                .filter_map(|entry| {
-                    let path = entry.path();
-                    let file_name = path.file_name()?.to_str()?.to_string();
+            // Limit recursive search to 3 levels deep
+            // Create patterns for each depth level (0, 1, 2, 3)
+            let patterns = vec![
+                path.join("aw-*").to_string_lossy().to_string(),
+                path.join("*").join("aw-*").to_string_lossy().to_string(),
+                path.join("*")
+                    .join("*")
+                    .join("aw-*")
+                    .to_string_lossy()
+                    .to_string(),
+                path.join("*")
+                    .join("*")
+                    .join("*")
+                    .join("aw-*")
+                    .to_string_lossy()
+                    .to_string(),
+            ];
 
-                    #[cfg(windows)]
-                    let name = file_name.to_lowercase().strip_suffix(".exe")?.to_string();
-                    #[cfg(unix)]
-                    let name = file_name.clone();
+            // Collect results from all patterns
+            patterns.into_iter().flat_map(|pattern| {
+                glob(&pattern)
+                    .ok()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(Result::ok)
+            })
+        })
+        .filter_map(|path| {
+            let file_name = path.file_name()?.to_str()?.to_string();
 
-                    if excluded.contains(&name.as_str()) || !file_name.starts_with("aw-") {
-                        return None;
-                    }
+            let name = file_name.strip_suffix(".exe")?.to_lowercase();
 
-                    #[cfg(unix)]
-                    {
-                        let metadata = fs::metadata(&path).ok()?;
-                        let is_executable = (metadata.is_file() || metadata.is_symlink())
-                            && metadata.permissions().mode() & 0o111 != 0;
-                        if !is_executable {
-                            return None;
-                        }
-                    }
-
-                    Some((name, path))
-                })
+            if excluded.contains(&name.as_str()) {
+                return None;
+            } else {
+                Some((name, path))
+            }
         })
         .collect()
 }
