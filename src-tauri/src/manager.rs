@@ -408,7 +408,6 @@ fn start_module_thread(
 #[cfg(unix)]
 fn discover_modules() -> BTreeMap<String, PathBuf> {
     let excluded = [
-        "awk",
         "aw-tauri",
         "aw-client",
         "aw-cli",
@@ -433,14 +432,32 @@ fn discover_modules() -> BTreeMap<String, PathBuf> {
 
     env::split_paths(&new_paths)
         .flat_map(|path| {
-            let pattern = path.join("**").join("aw*").to_string_lossy().to_string();
+            // Limit recursive search to 3 levels deep
+            // Create patterns for each depth level (0, 1, 2, 3)
+            let patterns = vec![
+                path.join("aw-*").to_string_lossy().to_string(),
+                path.join("*").join("aw-*").to_string_lossy().to_string(),
+                path.join("*")
+                    .join("*")
+                    .join("aw-*")
+                    .to_string_lossy()
+                    .to_string(),
+                path.join("*")
+                    .join("*")
+                    .join("*")
+                    .join("aw-*")
+                    .to_string_lossy()
+                    .to_string(),
+            ];
 
-            // Use glob to find all matching files (with recursive=true)
-            glob(&pattern)
-                .ok()
-                .into_iter()
-                .flatten()
-                .filter_map(Result::ok)
+            // Collect results from all patterns
+            patterns.into_iter().flat_map(|pattern| {
+                glob(&pattern)
+                    .ok()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(Result::ok)
+            })
         })
         .filter_map(|path| {
             let file_name = path.file_name()?.to_str()?.to_string();
@@ -469,7 +486,6 @@ fn discover_modules() -> BTreeMap<String, PathBuf> {
 #[cfg(windows)]
 fn discover_modules() -> BTreeMap<String, PathBuf> {
     let excluded = [
-        "awk",
         "aw-tauri",
         "aw-client",
         "aw-cli",
@@ -493,14 +509,32 @@ fn discover_modules() -> BTreeMap<String, PathBuf> {
 
     env::split_paths(&new_paths)
         .flat_map(|path| {
-            let pattern = path.join("**").join("aw*").to_string_lossy().to_string();
+            // Limit recursive search to 3 levels deep
+            // Create patterns for each depth level (0, 1, 2, 3)
+            let patterns = vec![
+                path.join("aw-*").to_string_lossy().to_string(),
+                path.join("*").join("aw-*").to_string_lossy().to_string(),
+                path.join("*")
+                    .join("*")
+                    .join("aw-*")
+                    .to_string_lossy()
+                    .to_string(),
+                path.join("*")
+                    .join("*")
+                    .join("*")
+                    .join("aw*")
+                    .to_string_lossy()
+                    .to_string(),
+            ];
 
-            // Use glob to find all matching files (with recursive=true)
-            glob(&pattern)
-                .ok()
-                .into_iter()
-                .flatten()
-                .filter_map(Result::ok)
+            // Collect results from all patterns
+            patterns.into_iter().flat_map(|pattern| {
+                glob(&pattern)
+                    .ok()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(Result::ok)
+            })
         })
         .filter_map(|path| {
             let file_name = path.file_name()?.to_str()?.to_string();
