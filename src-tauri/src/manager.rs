@@ -24,9 +24,8 @@ use {
     winapi::um::winnt::PROCESS_TERMINATE,
 };
 
-use glob::glob;
 use log::{debug, error, info};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::{
@@ -430,57 +429,59 @@ fn discover_modules() -> BTreeMap<String, PathBuf> {
     // Create new PATH-like string
     let new_paths = env::join_paths(paths).unwrap_or_default();
 
-    env::split_paths(&new_paths)
-        .flat_map(|path| {
-            // Limit recursive search to 3 levels deep
-            // Create patterns for each depth level (0, 1, 2, 3)
-            let patterns = vec![
-                path.join("aw-*").to_string_lossy().to_string(),
-                path.join("*").join("aw-*").to_string_lossy().to_string(),
-                path.join("*")
-                    .join("*")
-                    .join("aw-*")
-                    .to_string_lossy()
-                    .to_string(),
-                path.join("*")
-                    .join("*")
-                    .join("*")
-                    .join("aw-*")
-                    .to_string_lossy()
-                    .to_string(),
-            ];
+    // Build a set of paths to search
+    let mut found_modules = BTreeMap::new();
+    let mut visited_dirs = HashSet::new();
 
-            // Collect results from all patterns
-            patterns.into_iter().flat_map(|pattern| {
-                glob(&pattern)
-                    .ok()
-                    .into_iter()
-                    .flatten()
-                    .filter_map(Result::ok)
-            })
-        })
-        .filter_map(|path| {
-            let file_name = path.file_name()?.to_str()?.to_string();
+    // Create a stack of directories to search, starting with PATH entries
+    let mut dirs_to_search: Vec<PathBuf> = env::split_paths(&new_paths).collect();
 
-            if file_name.contains(".") || excluded.contains(&file_name.as_str()) {
-                return None;
-            }
+    // Process directories in depth-first order
+    while let Some(dir) = dirs_to_search.pop() {
+        if !visited_dirs.insert(dir.canonicalize().unwrap_or(dir.clone())) {
+            continue;
+        }
 
-            match fs::metadata(&path) {
-                Ok(metadata) => {
-                    let is_executable = (metadata.is_file() || metadata.is_symlink())
-                        && metadata.permissions().mode() & 0o111 != 0;
+        // Look for aw-* executables in this directory
+        if let Ok(entries) = fs::read_dir(&dir) {
+            for entry in entries.filter_map(Result::ok) {
+                let path = entry.path();
 
-                    if is_executable {
-                        Some((file_name, path))
-                    } else {
-                        None
+                // Skip if not a file or directory
+                if let Ok(metadata) = fs::metadata(&path) {
+                    let file_name = match path.file_name().and_then(|n| n.to_str()) {
+                        Some(name) => name.to_string(),
+                        None => continue,
+                    };
+
+                    // Process only items starting with "aw-"
+                    if !file_name.starts_with("aw-") {
+                        continue;
+                    }
+
+                    // If it's a directory starting with "aw-", add to search stack
+                    if metadata.is_dir() {
+                        dirs_to_search.push(path);
+                    }
+                    // If it's an executable file
+                    else if metadata.is_file() || metadata.is_symlink() {
+                        // Skip if has extension or is excluded
+                        if file_name.contains(".") || excluded.contains(&file_name.as_str()) {
+                            continue;
+                        }
+
+                        // Check if executable
+                        let is_executable = metadata.permissions().mode() & 0o111 != 0;
+                        if is_executable {
+                            found_modules.insert(file_name, path);
+                        }
                     }
                 }
-                Err(_) => None,
             }
-        })
-        .collect()
+        }
+    }
+
+    found_modules
 }
 
 #[cfg(windows)]
@@ -508,45 +509,60 @@ fn discover_modules() -> BTreeMap<String, PathBuf> {
 
     let new_paths = env::join_paths(paths).unwrap_or_default();
 
-    env::split_paths(&new_paths)
-        .flat_map(|path| {
-            // Limit recursive search to 3 levels deep
-            // Create patterns for each depth level (0, 1, 2, 3)
-            let patterns = vec![
-                path.join("aw-*").to_string_lossy().to_string(),
-                path.join("*").join("aw-*").to_string_lossy().to_string(),
-                path.join("*")
-                    .join("*")
-                    .join("aw-*")
-                    .to_string_lossy()
-                    .to_string(),
-                path.join("*")
-                    .join("*")
-                    .join("*")
-                    .join("aw-*")
-                    .to_string_lossy()
-                    .to_string(),
-            ];
+    // Build a set of paths to search
+    let mut found_modules = BTreeMap::new();
+    let mut visited_dirs = HashSet::new();
 
-            // Collect results from all patterns
-            patterns.into_iter().flat_map(|pattern| {
-                glob(&pattern)
-                    .ok()
-                    .into_iter()
-                    .flatten()
-                    .filter_map(Result::ok)
-            })
-        })
-        .filter_map(|path| {
-            let file_name = path.file_name()?.to_str()?.to_string();
+    // Create a stack of directories to search, starting with PATH entries
+    let mut dirs_to_search: Vec<PathBuf> = env::split_paths(&new_paths).collect();
 
-            let name = file_name.strip_suffix(".exe")?.to_lowercase();
+    // Process directories in depth-first order
+    while let Some(dir) = dirs_to_search.pop() {
+        // Skip if already visited
+        if !visited_dirs.insert(dir.clone()) {
+            continue;
+        }
 
-            if excluded.contains(&name.as_str()) {
-                return None;
-            } else {
-                Some((name, path))
+        // Look for aw-* executables in this directory
+        if let Ok(entries) = fs::read_dir(&dir) {
+            for entry in entries.filter_map(Result::ok) {
+                let path = entry.path();
+
+                // Skip if not a file or directory
+                if let Ok(metadata) = fs::metadata(&path) {
+                    let file_name = match path.file_name().and_then(|n| n.to_str()) {
+                        Some(name) => name.to_string(),
+                        None => continue,
+                    };
+
+                    // Process only items starting with "aw-"
+                    if !file_name.starts_with("aw-") {
+                        continue;
+                    }
+
+                    // If it's a directory starting with "aw-", add to search stack
+                    if metadata.is_dir() {
+                        dirs_to_search.push(path);
+                    }
+                    // If it's an executable file
+                    else if metadata.is_file() && file_name.ends_with(".exe") {
+                        // Extract name without .exe suffix
+                        let name = match file_name.strip_suffix(".exe") {
+                            Some(name) => name.to_lowercase(),
+                            None => continue,
+                        };
+
+                        // Skip if excluded
+                        if excluded.contains(&name.as_str()) {
+                            continue;
+                        }
+
+                        found_modules.insert(name, path);
+                    }
+                }
             }
-        })
-        .collect()
+        }
+    }
+
+    found_modules
 }
