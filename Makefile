@@ -32,11 +32,9 @@ check:
 	cd src-tauri && cargo check && cargo clippy
 
 package:
-	# Clean and prepare target/package folder
-	rm -rf target/package
-	mkdir -p target/package
-	# Copy binary
 ifeq ($(OS),Linux)
+	rm -rf target/package/aw-tauri
+	mkdir -p target/package/aw-tauri
 	cp src-tauri/target/release/bundle/deb/*.deb target/package/aw-tauri/aw-tauri$(ARCH).deb
 	cp src-tauri/target/release/bundle/rpm/*.rpm target/package/aw-tauri/aw-tauri$(ARCH).rpm
 	cp src-tauri/target/release/bundle/appimage/*.AppImage target/package/aw-tauri/aw-tauri$(ARCH).AppImage
@@ -45,6 +43,8 @@ ifeq ($(OS),Linux)
 	rm -rf dist/aw-tauri/*
 	cp target/package/aw-tauri/ dist/aw-tauri/
 else
+	rm -rf target/package
+	mkdir -p target/package
 	cp src-tauri/target/release/aw-tauri target/package/aw-tauri
 
 	mkdir -p dist
