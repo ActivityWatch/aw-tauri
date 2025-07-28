@@ -40,13 +40,17 @@ ifeq ($(OS),Linux)
 	cp src-tauri/target/release/bundle/deb/*.deb target/package/aw-tauri$(ARCH).deb
 	cp src-tauri/target/release/bundle/rpm/*.rpm target/package/aw-tauri$(ARCH).rpm
 	cp src-tauri/target/release/bundle/appimage/*.AppImage target/package/aw-tauri$(ARCH).AppImage
+
+	mkdir -p dist/aw-tauri
+	rm -rf dist/aw-tauri/*
+	cp target/package/aw-tauri/ dist/aw-tauri/
 else
 	cp src-tauri/target/release/aw-tauri target/package/aw-tauri
-endif
-	# Copy everything into `dist/aw-tauri`
+
 	mkdir -p dist
 	find dist/ -maxdepth 1 -type f -delete 2>/dev/null || true
 	cp target/package/* dist/
+endif
 
 node_modules: package-lock.json
 	npm ci
