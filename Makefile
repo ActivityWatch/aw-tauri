@@ -3,7 +3,7 @@ ifeq ($(shell uname -m), arm64)
 else
 	ARCH :=
 endif
-OS := $(shell uname)
+OS := $(shell uname -s)
 
 build: prebuild
 	npm run tauri build
