@@ -41,7 +41,7 @@ ifeq ($(OS),Linux)
 
 	mkdir -p dist/aw-tauri
 	rm -rf dist/aw-tauri/*
-	cp target/package/aw-tauri/ dist/aw-tauri/
+	cp target/package/aw-tauri/* dist/aw-tauri/
 else
 	rm -rf target/package
 	mkdir -p target/package
