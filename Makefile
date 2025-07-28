@@ -36,7 +36,7 @@ package:
 	rm -rf target/package
 	mkdir -p target/package
 	# Copy binary
-ifeq ($OS),linux)
+ifeq ($(OS),Linux)
 	cp src-tauri/target/release/bundle/deb/*.deb target/package/aw-tauri$(ARCH).deb
 	cp src-tauri/target/release/bundle/rpm/*.rpm target/package/aw-tauri$(ARCH).rpm
 	cp src-tauri/target/release/bundle/appimage/*.AppImage target/package/aw-tauri$(ARCH).AppImage
