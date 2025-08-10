@@ -547,9 +547,7 @@ pub fn run() {
                     tray_builder = tray_builder.tooltip("ActivityWatch");
                 }
 
-                let tray = tray_builder
-                    .build(app)
-                    .expect("failed to create tray");
+                let tray = tray_builder.build(app).expect("failed to create tray");
 
                 init_tray_id(tray.id().clone());
                 app.on_menu_event(move |app, event| {
