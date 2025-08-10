@@ -533,16 +533,21 @@ pub fn run() {
                 let menu =
                     Menu::with_items(app, &[&open, &quit]).expect("failed to create tray menu");
 
-                let tray = TrayIconBuilder::new()
+                let mut tray_builder = TrayIconBuilder::new()
                     .icon(
                         app.default_window_icon()
                             .expect("failed to get window icon")
                             .clone(),
                     )
                     .menu(&menu)
-                    .show_menu_on_left_click(true)
-                    .build(app)
-                    .expect("failed to create tray");
+                    .show_menu_on_left_click(true);
+
+                #[cfg(target_os = "windows")]
+                {
+                    tray_builder = tray_builder.tooltip("ActivityWatch");
+                }
+
+                let tray = tray_builder.build(app).expect("failed to create tray");
 
                 init_tray_id(tray.id().clone());
                 app.on_menu_event(move |app, event| {
