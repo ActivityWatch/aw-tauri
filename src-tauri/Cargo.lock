@@ -409,7 +409,7 @@ checksum = "ace50bade8e6234aa140d9a2f552bbee1db4d353f69b8217bc503490fc1a9f26"
 [[package]]
 name = "aw-datastore"
 version = "0.1.0"
-source = "git+https://github.com/ActivityWatch/aw-server-rust.git?branch=master#a0cdef90cf86cd8d2cc89723f5751c1123ae7e2b"
+source = "git+https://github.com/ActivityWatch/aw-server-rust.git?branch=master#f4bb94dfd5732ec61d164400e3b9e706b2b4dc78"
 dependencies = [
  "appdirs",
  "aw-models",
@@ -425,7 +425,7 @@ dependencies = [
 [[package]]
 name = "aw-models"
 version = "0.1.0"
-source = "git+https://github.com/ActivityWatch/aw-server-rust.git?branch=master#a0cdef90cf86cd8d2cc89723f5751c1123ae7e2b"
+source = "git+https://github.com/ActivityWatch/aw-server-rust.git?branch=master#f4bb94dfd5732ec61d164400e3b9e706b2b4dc78"
 dependencies = [
  "chrono",
  "log",
@@ -437,7 +437,7 @@ dependencies = [
 [[package]]
 name = "aw-query"
 version = "0.1.0"
-source = "git+https://github.com/ActivityWatch/aw-server-rust.git?branch=master#a0cdef90cf86cd8d2cc89723f5751c1123ae7e2b"
+source = "git+https://github.com/ActivityWatch/aw-server-rust.git?branch=master#f4bb94dfd5732ec61d164400e3b9e706b2b4dc78"
 dependencies = [
  "aw-datastore",
  "aw-models",
@@ -453,7 +453,7 @@ dependencies = [
 [[package]]
 name = "aw-server"
 version = "0.13.1"
-source = "git+https://github.com/ActivityWatch/aw-server-rust.git?branch=master#a0cdef90cf86cd8d2cc89723f5751c1123ae7e2b"
+source = "git+https://github.com/ActivityWatch/aw-server-rust.git?branch=master#f4bb94dfd5732ec61d164400e3b9e706b2b4dc78"
 dependencies = [
  "android_logger",
  "appdirs",
@@ -463,7 +463,7 @@ dependencies = [
  "aw-transform",
  "chrono",
  "clap",
- "fern 0.6.2",
+ "fern",
  "gethostname",
  "jemallocator",
  "jni 0.20.0",
@@ -490,7 +490,7 @@ dependencies = [
  "aw-server",
  "chrono",
  "directories",
- "fern 0.7.1",
+ "fern",
  "glob",
  "lazy_static",
  "log",
@@ -514,7 +514,7 @@ dependencies = [
 [[package]]
 name = "aw-transform"
 version = "0.1.0"
-source = "git+https://github.com/ActivityWatch/aw-server-rust.git?branch=master#a0cdef90cf86cd8d2cc89723f5751c1123ae7e2b"
+source = "git+https://github.com/ActivityWatch/aw-server-rust.git?branch=master#f4bb94dfd5732ec61d164400e3b9e706b2b4dc78"
 dependencies = [
  "aw-models",
  "chrono",
@@ -878,17 +878,6 @@ name = "colorchoice"
 version = "1.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5b63caa9aa9397e2d9480a9b13673856c78d8ac123288526c37d7839f2a86990"
-
-[[package]]
-name = "colored"
-version = "1.9.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5a5f741c91823341bebf717d4c71bda820630ce065443b58bd1b7451af008355"
-dependencies = [
- "is-terminal",
- "lazy_static",
- "winapi 0.3.9",
-]
 
 [[package]]
 name = "colored"
@@ -1489,21 +1478,11 @@ dependencies = [
 
 [[package]]
 name = "fern"
-version = "0.6.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d9f0c14694cbd524c8720dd69b0e3179344f04ebb5f90f2e4a440c6ea3b2f1ee"
-dependencies = [
- "colored 1.9.4",
- "log",
-]
-
-[[package]]
-name = "fern"
 version = "0.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4316185f709b23713e41e3195f90edef7fb00c3ed4adc79769cf09cc762a3b29"
 dependencies = [
- "colored 2.2.0",
+ "colored",
  "log",
 ]
 
@@ -4654,7 +4633,7 @@ version = "3.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "da03fa3b94cc19e3ebfc88c4229c49d8f08cdbd1228870a45f0ffdf84988e14b"
 dependencies = [
- "dirs 5.0.1",
+ "dirs 4.0.0",
 ]
 
 [[package]]
