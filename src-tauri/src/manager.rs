@@ -38,6 +38,8 @@ use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem, SubmenuBuil
 use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
 
 use crate::{get_app_handle, get_config, get_tray_id, HANDLE_CONDVAR};
+use std::io::{BufRead, BufReader, Read};
+use tauri_plugin_notification::NotificationExt;
 
 #[derive(Debug)]
 pub enum ModuleMessage {
@@ -358,6 +360,13 @@ fn start_module_thread(
     custom_args: Option<Vec<String>>,
     tx: Sender<ModuleMessage>,
 ) {
+    // Special handling for aw-notify module
+    if name == "aw-notify" {
+        info!("Using special aw-notify handler for module: {name}");
+        start_notify_module_thread(name, path, custom_args, tx);
+        return;
+    }
+
     thread::spawn(move || {
         // Start the child process
         let port_string = get_config().port.to_string();
@@ -402,6 +411,136 @@ fn start_module_thread(
         })
         .unwrap();
     });
+}
+
+fn start_notify_module_thread(
+    name: String,
+    path: PathBuf,
+    custom_args: Option<Vec<String>>,
+    tx: Sender<ModuleMessage>,
+) {
+    thread::spawn(move || {
+        // Start the child process with --output-only flag
+        let port_string = get_config().port.to_string();
+        let mut command = Command::new(&path);
+
+        // Always add --output-only flag for aw-notify
+        let mut args = vec!["--output-only".to_string()];
+
+        // Add any custom args
+        if let Some(ref custom) = custom_args {
+            args.extend_from_slice(custom);
+        }
+
+        command.args(&args);
+
+        // Set creation flags on Windows to hide console window
+        #[cfg(windows)]
+        command.creation_flags(CREATE_NO_WINDOW);
+
+        let mut child = match command
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+        {
+            Ok(child) => child,
+            Err(e) => {
+                let error_msg = e.to_string();
+                if error_msg.contains("No such option: --output-only") {
+                    info!("aw-notify module doesn't support --output-only, falling back to default behavior");
+                    // Fallback to default module handler
+                    start_module_thread(name, path, custom_args, tx);
+                    return;
+                } else {
+                    error!("Failed to start module {name}: {e}");
+                    return;
+                }
+            }
+        };
+
+        // Send a message to the manager that the module has started
+        tx.send(ModuleMessage::Started {
+            name: name.to_string(),
+            pid: child.id(),
+            args: Some(args),
+        })
+        .unwrap();
+
+        // Read output continuously and parse notifications
+        let stdout = child.stdout.take().expect("Failed to get stdout");
+        let reader = BufReader::new(stdout);
+
+        let mut in_notification = false;
+        let mut notification_content = Vec::new();
+
+        for line in reader.lines() {
+            match line {
+                Ok(line_content) => {
+                    // Check for notification boundaries (exactly 50 dashes)
+                    if line_content == "-".repeat(50) {
+                        if in_notification {
+                            // End of notification - send it
+                            if !notification_content.is_empty() {
+                                let content = notification_content.join("\n");
+                                send_notification(&content);
+                                notification_content.clear();
+                            }
+                            in_notification = false;
+                        } else {
+                            // Start of notification
+                            in_notification = true;
+                        }
+                    } else if in_notification && !line_content.trim().is_empty() {
+                        // Collect notification content
+                        notification_content.push(line_content.clone());
+                    }
+                    // Log all output for debugging
+                    debug!("aw-notify output: {}", line_content);
+                }
+                Err(e) => {
+                    error!("Error reading aw-notify output: {}", e);
+                    break;
+                }
+            }
+        }
+
+        // Wait for the child to exit
+        let output = child.wait_with_output().expect("failed to wait on child");
+
+        // Send the process output to the manager
+        tx.send(ModuleMessage::Stopped {
+            name: name.to_string(),
+            output,
+        })
+        .unwrap();
+    });
+}
+
+fn send_notification(content: &str) {
+    // Get app handle and send notification
+    if let Ok(app_handle_guard) = get_app_handle().lock() {
+        let app_handle = &*app_handle_guard;
+        let result = app_handle
+            .notification()
+            .builder()
+            .title("ActivityWatch")
+            .body(content)
+            .show();
+
+        match result {
+            Ok(_) => {
+                info!(
+                    "Sent notification: {}",
+                    content.lines().next().unwrap_or("")
+                );
+            }
+            Err(e) => {
+                error!("Failed to send notification: {}", e);
+            }
+        }
+    } else {
+        error!("Failed to get app handle lock for notification");
+    }
 }
 
 #[cfg(unix)]
@@ -481,6 +620,10 @@ fn discover_modules() -> BTreeMap<String, PathBuf> {
         }
     }
 
+    debug!(
+        "Discovered modules: {:?}",
+        found_modules.keys().collect::<Vec<_>>()
+    );
     found_modules
 }
 
