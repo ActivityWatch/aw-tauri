@@ -24,7 +24,7 @@ use {
     winapi::um::winnt::PROCESS_TERMINATE,
 };
 
-use log::{debug, error, info};
+use log::{debug, error, info, trace};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 use std::process::Command;
@@ -38,11 +38,11 @@ use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem, SubmenuBuil
 use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
 
 use crate::{get_app_handle, get_config, get_tray_id, HANDLE_CONDVAR};
-use std::io::{BufRead, BufReader, Read};
+use std::io::{BufRead, BufReader};
 use tauri_plugin_notification::NotificationExt;
 
 #[derive(Debug)]
-pub enum ModuleMessage {
+enum ModuleMessage {
     Started {
         name: String,
         pid: u32,
@@ -167,7 +167,7 @@ impl ManagerState {
             .expect("failed to get tray by id")
             .set_menu(Some(menu))
             .unwrap();
-        println!("set tray menu");
+        trace!("set tray menu");
     }
     pub fn start_module(&self, name: &str, args: Option<&Vec<String>>) {
         if !self.is_module_running(name) {
@@ -369,14 +369,13 @@ fn start_module_thread(
 
     thread::spawn(move || {
         // Start the child process
-        let port_string = get_config().port.to_string();
         let mut command = Command::new(&path);
 
         // Use custom args if provided, otherwise only pass port arg if it's not the default (5600)
         if let Some(ref args) = custom_args {
             command.args(args);
         } else if get_config().port != 5600 {
-            command.args(["--port", port_string.as_str()]);
+            command.args(["--port", get_config().port.to_string().as_str()]);
         }
 
         // Set creation flags on Windows to hide console window
@@ -421,7 +420,6 @@ fn start_notify_module_thread(
 ) {
     thread::spawn(move || {
         // Start the child process with --output-only flag
-        let port_string = get_config().port.to_string();
         let mut command = Command::new(&path);
 
         // Always add --output-only flag for aw-notify
@@ -494,7 +492,7 @@ fn start_notify_module_thread(
                         // Collect notification content
                         notification_content.push(line_content.clone());
                     }
-                    // Log all output for debugging
+                    // Debug log aw-notify output (won't show at Info level)
                     debug!("aw-notify output: {}", line_content);
                 }
                 Err(e) => {
@@ -529,7 +527,7 @@ fn send_notification(content: &str) {
 
         match result {
             Ok(_) => {
-                info!(
+                trace!(
                     "Sent notification: {}",
                     content.lines().next().unwrap_or("")
                 );
