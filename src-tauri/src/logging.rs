@@ -3,7 +3,12 @@ use fern::colors::{Color, ColoredLevelConfig};
 use log::LevelFilter;
 use std::path::PathBuf;
 
+/// Set up logging configuration - only capture log calls, suppress all other output
 pub fn setup_logging() -> Result<(), fern::InitError> {
+    // Check environment variables for verbose logging
+    let aw_trace = std::env::var("AW_TRACE").is_ok();
+    let aw_debug = std::env::var("AW_DEBUG").is_ok();
+
     let log_path = get_log_path();
     let log_dir = log_path.parent().expect("Failed to get log dir");
     std::fs::create_dir_all(log_dir)?;
@@ -16,6 +21,21 @@ pub fn setup_logging() -> Result<(), fern::InitError> {
         .debug(Color::Blue)
         .trace(Color::BrightBlue);
 
+    // Determine log levels based on environment variables
+    let logging_level = if aw_trace {
+        LevelFilter::Trace
+    } else if aw_debug {
+        LevelFilter::Debug
+    } else {
+        LevelFilter::Info
+    };
+
+    let module_logging_level = if aw_debug || aw_trace {
+        LevelFilter::Info
+    } else {
+        LevelFilter::Error
+    };
+
     // Base configuration
     let base_config = fern::Dispatch::new()
         .format(move |out, message, record| {
@@ -27,22 +47,17 @@ pub fn setup_logging() -> Result<(), fern::InitError> {
                 message = message,
             ))
         })
-        .level(LevelFilter::Info)
-        // Set specific log levels for modules
+        .level(module_logging_level) // Default level based on environment variables
+        // Set specific log levels for modules - only show our own code
         .level_for("aw_tauri", LevelFilter::Debug)
-        .level_for("aw_server", LevelFilter::Info);
+        .level_for("aw_tauri_lib", logging_level);
 
     // Configure output to file
     let file = fern::log_file(log_path)?;
 
     // Build the final dispatcher
     base_config
-        .chain(fern::Dispatch::new().level(LevelFilter::Debug).chain(file))
-        .chain(
-            fern::Dispatch::new()
-                .level(LevelFilter::Info)
-                .chain(std::io::stdout()),
-        )
+        .chain(fern::Dispatch::new().level(LevelFilter::Info).chain(file))
         .apply()?;
 
     log::info!("Logging initialized");

@@ -20,7 +20,7 @@ use tauri_plugin_opener::OpenerExt;
 mod logging;
 mod manager;
 
-use log::{info, warn};
+use log::{info, trace, warn};
 use tauri::{
     menu::{Menu, MenuItem},
     tray::{TrayIconBuilder, TrayIconId},
@@ -235,7 +235,7 @@ impl SpecificFileWatcher {
                         }
                         _ => {}
                     },
-                    Err(e) => eprintln!("Watch error: {}", e),
+                    Err(e) => warn!("Watch error: {}", e),
                 }
             }
 
@@ -413,6 +413,7 @@ fn greet(name: &str) -> String {
 pub fn run() {
     // Initialize logging
     if let Err(e) = logging::setup_logging() {
+        // Can't use log here since logging isn't initialized yet
         eprintln!("Failed to initialize logging: {}", e);
     }
 
@@ -494,7 +495,7 @@ pub fn run() {
                         panic!("Path set via env var AW_WEBUI_DIR does not exist");
                     }
                 } else {
-                    println!("Using bundled assets");
+                    info!("Using bundled assets");
                     None
                 };
 
@@ -558,13 +559,13 @@ pub fn run() {
                 init_tray_id(tray.id().clone());
                 app.on_menu_event(move |app, event| {
                     if event.id().0 == "open" {
-                        println!("system tray received a open click");
+                        trace!("system tray received a open click");
                         let windows = app.webview_windows();
                         let window = windows.get("main").expect("main window not found");
                         window.show().unwrap();
                         window.set_focus().unwrap();
                     } else if event.id().0 == "quit" {
-                        println!("quit clicked!");
+                        trace!("quit clicked!");
                         let mut state = manager_state.lock().unwrap();
                         state.stop_modules();
                         app.exit(0);
