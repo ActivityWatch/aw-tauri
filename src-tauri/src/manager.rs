@@ -425,6 +425,12 @@ fn start_notify_module_thread(
         // Always add --output-only flag for aw-notify
         let mut args = vec!["--output-only".to_string()];
 
+        // Add port argument if not default (5600)
+        if get_config().port != 5600 {
+            args.push("--port".to_string());
+            args.push(get_config().port.to_string());
+        }
+
         // Add any custom args
         if let Some(ref custom) = custom_args {
             args.extend_from_slice(custom);
