@@ -1,7 +1,4 @@
 use aw_server::endpoints::build_rocket;
-#[cfg(not(target_os = "linux"))]
-use directories::ProjectDirs;
-use directories::UserDirs;
 use lazy_static::lazy_static;
 use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use serde::{Deserialize, Serialize};
@@ -17,6 +14,7 @@ use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
 use tauri_plugin_notification::NotificationExt;
 use tauri_plugin_opener::OpenerExt;
 
+mod dirs;
 mod logging;
 mod manager;
 
@@ -177,13 +175,12 @@ pub fn handle_first_run() {
 
 pub fn listen_for_lockfile() {
     thread::spawn(|| {
-        let config_path = get_config_path();
-        let watcher =
-            SpecificFileWatcher::new(config_path.parent().unwrap(), "single_instance.lock")
-                .expect("Failed to create file watcher");
+        let runtime_path = get_runtime_path();
+        let watcher = SpecificFileWatcher::new(&runtime_path, "single_instance.lock")
+            .expect("Failed to create file watcher");
         loop {
             if watcher.wait_for_file().is_ok() {
-                remove_file(config_path.parent().unwrap().join("single_instance.lock"))
+                remove_file(get_runtime_path().join("single_instance.lock"))
                     .expect("Failed to remove lock file");
                 let app = &*get_app_handle().lock().expect("failed to get app handle");
                 if let Some(window) = app.webview_windows().get("main") {
@@ -289,31 +286,7 @@ pub struct UserConfig {
 
 impl Default for UserConfig {
     fn default() -> Self {
-        let mut discovery_paths = Vec::new();
-
-        if cfg!(target_os = "linux") {
-            if let Some(dirs) = UserDirs::new() {
-                discovery_paths.push(dirs.home_dir().join("aw-modules"));
-            }
-        } else if cfg!(windows) {
-            if let Ok(username) = std::env::var("USERNAME") {
-                discovery_paths.push(PathBuf::from(format!(r"C:/Users/{}/aw-modules", username)));
-                discovery_paths.push(PathBuf::from(format!(
-                    r"C:/Users/{}/AppData/Local/Programs/ActivityWatch",
-                    username
-                )));
-            }
-        } else if cfg!(target_os = "macos") {
-            if let Some(dirs) = UserDirs::new() {
-                discovery_paths.push(dirs.home_dir().join("aw-modules"));
-            }
-            discovery_paths.push(PathBuf::from(
-                "/Applications/ActivityWatch.app/Contents/MacOS",
-            ));
-            discovery_paths.push(PathBuf::from(
-                "/Applications/ActivityWatch.app/Contents/Resources",
-            ));
-        }
+        let discovery_paths = dirs::get_discovery_paths();
 
         // Build default modules list based on platform and display server
         let mut modules = Vec::new();
@@ -356,19 +329,14 @@ impl Default for UserConfig {
     }
 }
 
-#[cfg(not(target_os = "linux"))]
 fn get_config_path() -> PathBuf {
-    let project_dirs =
-        ProjectDirs::from("net", "ActivityWatch", "Aw-Tauri").expect("Failed to get project dirs");
-    project_dirs.config_dir().join("config.toml")
+    dirs::get_config_path()
 }
-#[cfg(target_os = "linux")]
-fn get_config_path() -> PathBuf {
-    let userdirs = UserDirs::new().expect("Failed to get user dirs");
-    let home = userdirs.home_dir();
-    let config_dir = home.join(".config/activitywatch/aw-tauri");
-    config_dir.join("config.toml")
+
+fn get_runtime_path() -> PathBuf {
+    dirs::get_runtime_dir()
 }
+
 pub(crate) fn get_config() -> &'static UserConfig {
     CONFIG.get_or_init(|| {
         let config_path = get_config_path();
@@ -426,12 +394,9 @@ pub fn run() {
             Some(vec![]),
         ))
         .plugin(tauri_plugin_single_instance::init(|_app, _args, _cwd| {
-            let lock_path = get_config_path()
-                .parent()
-                .unwrap()
-                .join("single_instance.lock");
+            let lock_path = get_runtime_path().join("single_instance.lock");
             if !lock_path.parent().unwrap().exists() {
-                create_dir_all(lock_path.parent().unwrap()).expect("Failed to create lock dir");
+                create_dir_all(lock_path.parent().unwrap()).expect("Failed to create runtime dir");
             }
             let _lock_file = OpenOptions::new()
                 .create(true)
