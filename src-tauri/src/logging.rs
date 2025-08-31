@@ -1,5 +1,3 @@
-#[allow(unused_imports)]
-use directories::{ProjectDirs, UserDirs};
 use fern::colors::{Color, ColoredLevelConfig};
 use log::LevelFilter;
 use std::path::PathBuf;
@@ -66,49 +64,5 @@ pub fn setup_logging() -> Result<(), fern::InitError> {
 }
 
 pub fn get_log_path() -> PathBuf {
-    #[cfg(target_os = "windows")]
-    {
-        // Windows: C:\Users\<USER>\AppData\Local\activitywatch\activitywatch\Logs\aw-tauri
-        let user_dirs = UserDirs::new().expect("Failed to get user directories");
-        let home_dir = user_dirs.home_dir();
-        home_dir
-            .join("AppData")
-            .join("Local")
-            .join("activitywatch")
-            .join("activitywatch")
-            .join("Logs")
-            .join("aw-tauri")
-            .join("aw-tauri.log")
-    }
-    #[cfg(target_os = "macos")]
-    {
-        // macOS: ~/Library/Logs/activitywatch/aw-tauri
-        let user_dirs = UserDirs::new().expect("Failed to get user directories");
-        let home_dir = user_dirs.home_dir();
-        home_dir
-            .join("Library")
-            .join("Logs")
-            .join("activitywatch")
-            .join("aw-tauri")
-            .join("aw-tauri.log")
-    }
-    #[cfg(target_os = "linux")]
-    {
-        // Linux: ~/.cache/activitywatch/logs/aw-tauri/
-        let user_dirs = UserDirs::new().expect("Failed to get user directories");
-        let home_dir = user_dirs.home_dir();
-        home_dir
-            .join(".cache")
-            .join("activitywatch")
-            .join("logs")
-            .join("aw-tauri")
-            .join("aw-tauri.log")
-    }
-    #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
-    {
-        // Fallback for other platforms
-        let project_dirs = ProjectDirs::from("net", "ActivityWatch", "Aw-Tauri")
-            .expect("Failed to get project dirs");
-        project_dirs.data_dir().join("logs").join("aw-tauri.log")
-    }
+    crate::dirs::get_log_path()
 }
