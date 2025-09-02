@@ -21,7 +21,7 @@ tauri-build = { version = "2.0.5", features = [] }
 
 [dependencies]
 shell-words = "1.1.0"
-tauri = { version = "2.2.2", features = ["tray-icon"] }
+tauri = { version = "2.2.5", features = ["tray-icon"] }
 tauri-plugin-shell = "2.2.0"
 tauri-plugin-dialog = "2.2.0"
 tauri-plugin-notification = "2.2.1"
@@ -31,7 +31,7 @@ notify = "8.0.0"
 directories = "6.0.0"
 serde = { version = "1.0.217", features = ["derive"] }
 serde_json = "1.0.140"
-toml = "0.8.19"
+toml = "0.9.5"
 lazy_static = "1.5.0"
 log = "0.4.25"
 fern = { version = "0.7.1", features = ["colored"] }
