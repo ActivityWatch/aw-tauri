@@ -13,9 +13,8 @@ use lazy_static::lazy_static;
 
 #[cfg(target_os = "android")]
 lazy_static! {
-    static ref ANDROID_DATA_DIR: Mutex<PathBuf> = Mutex::new(PathBuf::from(
-        "/data/user/0/net.activitywatch.android/files"
-    ));
+    static ref ANDROID_DATA_DIR: Mutex<PathBuf> =
+        Mutex::new(PathBuf::from("/data/user/0/net.activitywatch.app/files"));
 }
 
 #[cfg(not(target_os = "android"))]
