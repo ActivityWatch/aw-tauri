@@ -379,6 +379,11 @@ fn greet(name: &str) -> String {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Rotate log if needed (before initializing logging)
+    if let Err(e) = logging::rotate_log_if_needed() {
+        eprintln!("Failed to rotate log: {}", e);
+    }
+
     // Initialize logging
     if let Err(e) = logging::setup_logging() {
         // Can't use log here since logging isn't initialized yet
