@@ -321,8 +321,8 @@ fn handle(rx: Receiver<ModuleMessage>, state: Arc<Mutex<ManagerState>>) {
 
                             app.dialog()
                                 .message(format!("{name_clone} crashed. Restarting..."))
-                                .kind(MessageDialogKind::Error)
-                                .title("Aw-Tauri")
+                                .kind(MessageDialogKind::Warning)
+                                .title("Warning")
                                 .show(|_| {});
                             error!("Module {name_clone} crashed and is being restarted");
                         } else {
@@ -332,7 +332,7 @@ fn handle(rx: Receiver<ModuleMessage>, state: Arc<Mutex<ManagerState>>) {
                                 .message(format!(
                                     "{name_clone} keeps on crashing. Restart limit reached."
                                 ))
-                                .kind(MessageDialogKind::Error)
+                                .kind(MessageDialogKind::Warning)
                                 .title("Warning")
                                 .show(|_| {});
                             error!("Module {name_clone} exceeded crash restart limit");
