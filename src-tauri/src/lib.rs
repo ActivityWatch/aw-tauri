@@ -354,7 +354,7 @@ pub(crate) fn get_config() -> &'static UserConfig {
                     app.dialog()
                         .message("Malformed config file. Using default config.")
                         .kind(MessageDialogKind::Error)
-                        .title("Aw-Tauri")
+                        .title("Error")
                         .show(|_| {});
 
                     UserConfig::default()
@@ -476,7 +476,7 @@ pub fn run() {
                     app.dialog()
                         .message(format!("Port {} is already in use", user_config.port))
                         .kind(MessageDialogKind::Error)
-                        .title("Aw-Tauri")
+                        .title("Error")
                         .show(|_| {});
                     panic!("Port {} is already in use", user_config.port);
                 }
