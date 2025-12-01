@@ -40,7 +40,7 @@ pub fn get_data_dir() -> Result<PathBuf, ()> {
 
 #[cfg(target_os = "android")]
 pub fn get_data_dir() -> Result<PathBuf, ()> {
-    Ok(ANDROID_DATA_DIR.lock().unwrap().to_path_buf())
+    Ok(ANDROID_DATA_DIR.lock()..expect("Unable to create data dir").to_path_buf())
 }
 
 #[cfg(all(not(target_os = "android"), target_os = "linux"))]
@@ -174,7 +174,9 @@ pub fn get_discovery_paths() -> Vec<PathBuf> {
 
 #[cfg(target_os = "android")]
 pub fn set_android_data_dir(path: &str) {
-    let mut android_data_dir = ANDROID_DATA_DIR.lock().unwrap();
+    let mut android_data_dir = ANDROID_DATA_DIR
+        .lock()
+        .expect("Unable to acquire ANDROID_DATA_DIR lock");
     *android_data_dir = PathBuf::from(path);
 }
 
@@ -189,11 +191,11 @@ mod tests {
 
         #[cfg(not(target_os = "android"))]
         {
-            get_config_dir().unwrap();
-            get_log_dir().unwrap();
+            get_config_dir().expect("Failed to get config directory");
+            get_log_dir().expect("Failed to get log directory");
         }
 
-        get_data_dir().unwrap();
+        get_data_dir().expect("Failed to get data directory");
 
         let _ = get_config_path();
         let _ = get_log_path();

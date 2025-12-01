@@ -58,7 +58,7 @@ static FIRST_RUN: OnceLock<bool> = OnceLock::new();
 fn init_app_handle(handle: AppHandle) {
     HANDLE.get_or_init(|| AppHandleWrapper(Mutex::new(handle)));
     let (lock, cvar) = &*HANDLE_CONDVAR;
-    let mut started = lock.lock().expect("failed to lock HANDLE_CONDVAR");
+    let mut started = lock.lock().expect("Failed to lock HANDLE_CONDVAR");
     *started = true;
     cvar.notify_all();
 }
@@ -72,16 +72,16 @@ fn init_tray_id(id: TrayIconId) {
         .set(TrayIdWrapper(id))
         .expect("failed to set TRAY_ID");
     let (lock, cvar) = &*TRAY_CONDVAR;
-    let mut initialized = lock.lock().expect("failed to lock TRAY_CONDVAR");
+    let mut initialized = lock.lock().expect("Failed to lock TRAY_CONDVAR");
     *initialized = true;
     cvar.notify_all();
 }
 
 pub(crate) fn get_tray_id() -> &'static TrayIconId {
     let (lock, cvar) = &*TRAY_CONDVAR;
-    let mut initialized = lock.lock().expect("failed to lock TRAY_CONDVAR");
+    let mut initialized = lock.lock().expect("Failed to lock TRAY_CONDVAR");
     while !*initialized {
-        initialized = cvar.wait(initialized).expect("failed to wait for TRAY_ID");
+        initialized = cvar.wait(initialized).expect("Failed to wait for TRAY_ID");
     }
     &TRAY_ID.get().expect("TRAY_ID not initialized").0
 }
@@ -159,15 +159,15 @@ pub fn handle_first_run() {
     let first_run = is_first_run();
     if *first_run {
         thread::spawn(|| {
-            let app = &*get_app_handle().lock().expect("failed to get app handle");
+            let app = &*get_app_handle().lock().expect("Failed to get app handle");
             app.notification()
                 .builder()
                 .title("Aw-Tauri")
                 .body("Welcome to Aw-Tauri! Click on the tray icon to launch the dashboard")
                 .show()
-                .unwrap();
+                .expect("Failed to show first run notification");
             if let Some(window) = app.webview_windows().get("main") {
-                window.show().unwrap();
+                window.show().expect("Failed to show main window");
             }
         });
     }
@@ -182,9 +182,9 @@ pub fn listen_for_lockfile() {
             if watcher.wait_for_file().is_ok() {
                 remove_file(get_runtime_path().join("single_instance.lock"))
                     .expect("Failed to remove lock file");
-                let app = &*get_app_handle().lock().expect("failed to get app handle");
+                let app = &*get_app_handle().lock().expect("Failed to get app handle");
                 if let Some(window) = app.webview_windows().get("main") {
-                    window.show().unwrap();
+                    window.show().expect("Failed to show main window");
                 }
             }
         }
@@ -341,7 +341,7 @@ pub(crate) fn get_config() -> &'static UserConfig {
     CONFIG.get_or_init(|| {
         let config_path = get_config_path();
         if config_path.exists() {
-            FIRST_RUN.set(false).expect("failed to set FIRST_RUN");
+            FIRST_RUN.set(false).expect("Failed to set FIRST_RUN");
             let config_str = read_to_string(&config_path).expect("Failed to read config file");
 
             // Try to parse the config file
@@ -350,7 +350,7 @@ pub(crate) fn get_config() -> &'static UserConfig {
                 Err(e) => {
                     warn!("Failed to parse config file: {}. Using default config.", e);
 
-                    let app = &*get_app_handle().lock().expect("failed to get app handle");
+                    let app = &*get_app_handle().lock().expect("Failed to get app handle");
                     app.dialog()
                         .message("Malformed config file. Using default config.")
                         .kind(MessageDialogKind::Error)
@@ -425,7 +425,7 @@ pub fn run() {
                     true => {
                         if !autostart_manager
                             .is_enabled()
-                            .expect("failed to get autostart state")
+                            .expect("Failed to get autostart state")
                         {
                             autostart_manager
                                 .enable()
@@ -488,27 +488,29 @@ pub fn run() {
                 tauri::async_runtime::spawn(build_rocket(server_state, aw_config).launch());
                 let url = format!("http://localhost:{}/", user_config.port)
                     .parse()
-                    .unwrap();
-                let mut main_window = app.get_webview_window("main").unwrap();
+                    .expect("Failed to parse localhost url");
+                let mut main_window = app
+                    .get_webview_window("main")
+                    .expect("Failed to show main window");
 
                 main_window
                     .navigate(url)
-                    .expect("error navigating main window");
+                    .expect("Error navigating main window");
                 let manager_state = manager::start_manager();
 
                 let open = MenuItem::with_id(app, "open", "Open Dashboard", true, None::<&str>)
-                    .expect("failed to create open menu item");
+                    .expect("Failed to create open menu item");
                 let quit = MenuItem::with_id(app, "quit", "Quit ActivityWatch", true, None::<&str>)
-                    .expect("failed to create quit menu item");
+                    .expect("Failed to create quit menu item");
 
                 let menu =
-                    Menu::with_items(app, &[&open, &quit]).expect("failed to create tray menu");
+                    Menu::with_items(app, &[&open, &quit]).expect("Failed to create tray menu");
 
                 #[cfg(not(target_os = "windows"))]
                 let tray_builder = TrayIconBuilder::new()
                     .icon(
                         app.default_window_icon()
-                            .expect("failed to get window icon")
+                            .expect("Failed to get window icon")
                             .clone(),
                     )
                     .menu(&menu)
@@ -518,25 +520,27 @@ pub fn run() {
                 let tray_builder = TrayIconBuilder::new()
                     .icon(
                         app.default_window_icon()
-                            .expect("failed to get window icon")
+                            .expect("Failed to get window icon")
                             .clone(),
                     )
                     .menu(&menu)
                     .show_menu_on_left_click(true)
                     .tooltip("ActivityWatch");
-                let tray = tray_builder.build(app).expect("failed to create tray");
+                let tray = tray_builder.build(app).expect("Failed to create tray");
 
                 init_tray_id(tray.id().clone());
                 app.on_menu_event(move |app, event| {
                     if event.id().0 == "open" {
                         trace!("system tray received a open click");
                         let windows = app.webview_windows();
-                        let window = windows.get("main").expect("main window not found");
-                        window.show().unwrap();
-                        window.set_focus().unwrap();
+                        let window = windows.get("main").expect("Main window not found");
+                        window.show().expect("Failed to show window");
+                        window.set_focus().expect("Failed to focus window");
                     } else if event.id().0 == "quit" {
                         trace!("quit clicked!");
-                        let mut state = manager_state.lock().unwrap();
+                        let mut state = manager_state
+                            .lock()
+                            .expect("Failed to acquire manager_state lock");
                         state.stop_modules();
                         app.exit(0);
                     } else if event.id().0 == "config_folder" {
@@ -553,13 +557,15 @@ pub fn run() {
                             .expect("Failed to open log folder");
                     } else {
                         // Modules menu clicks
-                        let mut state = manager_state.lock().unwrap();
+                        let mut state = manager_state
+                            .lock()
+                            .expect("Failed to acquire manager_state lock");
                         state.handle_system_click(&event.id().0);
                     }
                 });
                 if user_config.autostart.enabled && !user_config.autostart.minimized {
                     if let Some(window) = app.webview_windows().get("main") {
-                        window.show().unwrap();
+                        window.show().expect("Failed to show main window");
                     }
                 }
             }
@@ -571,7 +577,7 @@ pub fn run() {
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = &event {
                 api.prevent_close();
-                window.hide().unwrap();
+                window.hide().expect("Failed to hide main window");
             };
         })
         .plugin(tauri_plugin_shell::init())
