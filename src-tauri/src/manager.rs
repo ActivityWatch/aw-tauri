@@ -98,14 +98,16 @@ impl ManagerState {
     }
     fn update_tray_menu(&mut self) {
         let (lock, cvar) = &*HANDLE_CONDVAR;
-        let mut state = lock.lock().unwrap();
+        let mut state = lock.lock().expect("Failed to acquire manager_state lock");
 
         debug!("Attempting to get app handle");
         while !*state {
-            state = cvar.wait(state).unwrap();
+            state = cvar
+                .wait(state)
+                .expect("Failed to wait on condition variable");
         }
         debug!("Condition variable set");
-        let app = &*get_app_handle().lock().expect("failed to get app handle");
+        let app = &*get_app_handle().lock().expect("Failed to get app handle");
         debug!("App handle acquired");
 
         let open = MenuItem::with_id(app, "open", "Open Dashboard", true, None::<&str>)
@@ -118,7 +120,7 @@ impl ManagerState {
             let label = module;
             let module_menu =
                 CheckMenuItem::with_id(app, module, label, true, *running, None::<&str>)
-                    .expect("failed to create module menu item");
+                    .expect("Failed to create module menu item");
             modules_submenu_builder = modules_submenu_builder.item(&module_menu);
         }
 
@@ -126,14 +128,14 @@ impl ManagerState {
             if !self.modules_running.contains_key(module_name) {
                 let module_menu =
                     MenuItem::with_id(app, module_name, module_name, true, None::<&str>)
-                        .expect("failed to create module menu item");
+                        .expect("Failed to create module menu item");
                 modules_submenu_builder = modules_submenu_builder.item(&module_menu);
             }
         }
 
         let module_submenu = modules_submenu_builder
             .build()
-            .expect("failed to create module submenu");
+            .expect("Failed to create module submenu");
         let config_folder = MenuItem::with_id(
             app,
             "config_folder",
@@ -141,12 +143,12 @@ impl ManagerState {
             true,
             None::<&str>,
         )
-        .expect("failed to create config folder menu item");
+        .expect("Failed to create config folder menu item");
 
         let log_folder =
             MenuItem::with_id(app, "log_folder", "Open log folder", true, None::<&str>)
-                .expect("failed to create log folder menu item");
-        let separator = PredefinedMenuItem::separator(app).expect("failed to create separator");
+                .expect("Failed to create log folder menu item");
+        let separator = PredefinedMenuItem::separator(app).expect("Failed to create separator");
         let menu = Menu::with_items(
             app,
             &[
@@ -160,13 +162,13 @@ impl ManagerState {
                 &quit,
             ],
         )
-        .expect("failed to create tray menu");
+        .expect("Failed to create tray menu");
 
         let tray_id = get_tray_id();
         app.tray_by_id(tray_id)
-            .expect("failed to get tray by id")
+            .expect("Failed to get tray by id")
             .set_menu(Some(menu))
-            .unwrap();
+            .expect("Failed to set tray menu");
         trace!("set tray menu");
     }
     pub fn start_module(&self, name: &str, args: Option<&Vec<String>>) {
@@ -262,13 +264,20 @@ pub fn start_manager() -> Arc<Mutex<ManagerState>> {
             // Split args string on whitespace, preserving quoted arguments
             Some(shell_words::split(args_str).unwrap_or_default())
         };
-        state.lock().unwrap().start_module(name, args.as_ref());
+        state
+            .lock()
+            .expect("Failed to acquire manager_state lock")
+            .start_module(name, args.as_ref());
     }
 
     // populate the tray menu if not yet already done
-    let modules_menu_set = state.lock().unwrap().modules_menu_set;
+    let modules_menu_set = state
+        .lock()
+        .expect("Failed to acquire manager_state lock")
+        .modules_menu_set;
     if !modules_menu_set {
-        tx.send(ModuleMessage::Init {}).unwrap();
+        tx.send(ModuleMessage::Init {})
+            .expect("Failed to send \"Module Init\" message");
     }
 
     let state_clone = Arc::clone(&state);
@@ -280,9 +289,9 @@ pub fn start_manager() -> Arc<Mutex<ManagerState>> {
 
 fn handle(rx: Receiver<ModuleMessage>, state: Arc<Mutex<ManagerState>>) {
     loop {
-        let msg = rx.recv().unwrap();
+        let msg = rx.recv().expect("Failed to receive Module message");
         let state_clone = Arc::clone(&state);
-        let state = &mut state.lock().unwrap();
+        let state = &mut state.lock().expect("Failed to acquire manager_state lock");
         match msg {
             ModuleMessage::Started { name, pid, args } => {
                 state.started_module(&name, pid, args);
@@ -296,7 +305,9 @@ fn handle(rx: Receiver<ModuleMessage>, state: Arc<Mutex<ManagerState>>) {
                     error!("Module {name} exited with error status");
                     thread::spawn(move || {
                         thread::sleep(Duration::from_secs(1));
-                        let state = &mut state_clone.lock().unwrap();
+                        let state = &mut state_clone
+                            .lock()
+                            .expect("Failed to acquire manager_state lock");
                         let restart_count =
                             state.modules_restart_count.get(&name_clone).unwrap_or(&0);
 
@@ -317,7 +328,7 @@ fn handle(rx: Receiver<ModuleMessage>, state: Arc<Mutex<ManagerState>>) {
                             let stored_args =
                                 state.modules_args.get(&name_clone).cloned().flatten();
                             state.start_module(&name_clone, stored_args.as_ref());
-                            let app = &*get_app_handle().lock().expect("failed to get app handle");
+                            let app = &*get_app_handle().lock().expect("Failed to get app handle");
 
                             app.dialog()
                                 .message(format!("{name_clone} crashed. Restarting..."))
@@ -326,7 +337,7 @@ fn handle(rx: Receiver<ModuleMessage>, state: Arc<Mutex<ManagerState>>) {
                                 .show(|_| {});
                             error!("Module {name_clone} crashed and is being restarted");
                         } else {
-                            let app = &*get_app_handle().lock().expect("failed to get app handle");
+                            let app = &*get_app_handle().lock().expect("Failed to get app handle");
 
                             app.dialog()
                                 .message(format!(
@@ -392,23 +403,23 @@ fn start_module_thread(
         // Send a message to the manager that the module has started
         tx.send(ModuleMessage::Started {
             name: name.to_string(),
-            pid: child.as_ref().unwrap().id(),
+            pid: child.as_ref().expect("Failed to get child PID").id(),
             args: custom_args,
         })
-        .unwrap();
+        .expect("Failed to send Module Started message");
 
         // Wait for the child to exit
         let output = child
-            .unwrap()
+            .expect("Failed to create child process")
             .wait_with_output()
-            .expect("failed to wait on child");
+            .expect("Failed to wait on child process");
 
         // Send the process output to the manager
         tx.send(ModuleMessage::Stopped {
             name: name.to_string(),
             output,
         })
-        .unwrap();
+        .expect("Failed to send module stopped message");
     });
 }
 
@@ -468,7 +479,7 @@ fn start_notify_module_thread(
             pid: child.id(),
             args: Some(args),
         })
-        .unwrap();
+        .expect("Failed to send module started message");
 
         // Read output continuously and parse notifications
         let stdout = child.stdout.take().expect("Failed to get stdout");
@@ -509,14 +520,14 @@ fn start_notify_module_thread(
         }
 
         // Wait for the child to exit
-        let output = child.wait_with_output().expect("failed to wait on child");
+        let output = child.wait_with_output().expect("Failed to wait on child");
 
         // Send the process output to the manager
         tx.send(ModuleMessage::Stopped {
             name: name.to_string(),
             output,
         })
-        .unwrap();
+        .expect("Failed to send module stopped message");
     });
 }
 
