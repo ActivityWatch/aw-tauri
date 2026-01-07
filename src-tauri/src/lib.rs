@@ -57,10 +57,9 @@ static FIRST_RUN: OnceLock<bool> = OnceLock::new();
 
 fn init_app_handle(handle: AppHandle) {
     HANDLE.get_or_init(|| AppHandleWrapper(Mutex::new(handle)));
-    let (lock, cvar) = &*HANDLE_CONDVAR;
+    let (lock, _cvar) = &*HANDLE_CONDVAR;
     let mut started = lock.lock().expect("Failed to lock HANDLE_CONDVAR");
     *started = true;
-    cvar.notify_all();
 }
 
 pub(crate) fn get_app_handle() -> &'static Mutex<AppHandle> {
@@ -71,10 +70,9 @@ fn init_tray_id(id: TrayIconId) {
     TRAY_ID
         .set(TrayIdWrapper(id))
         .expect("failed to set TRAY_ID");
-    let (lock, cvar) = &*TRAY_CONDVAR;
+    let (lock, _cvar) = &*TRAY_CONDVAR;
     let mut initialized = lock.lock().expect("Failed to lock TRAY_CONDVAR");
     *initialized = true;
-    cvar.notify_all();
 }
 
 pub(crate) fn get_tray_id() -> &'static TrayIconId {
