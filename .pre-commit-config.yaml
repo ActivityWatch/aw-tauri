@@ -27,5 +27,6 @@ repos:
     rev: v4.4.0
     hooks:
       - id: end-of-file-fixer
+        exclude: '^src-tauri/gen/'
       - id: check-added-large-files
         args: ['--maxkb=500']
