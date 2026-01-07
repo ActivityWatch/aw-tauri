@@ -337,6 +337,11 @@ fn handle(rx: Receiver<ModuleMessage>, state: Arc<Mutex<ManagerState>>) {
                                 .show(|_| {});
                             error!("Module {name_clone} crashed and is being restarted");
                         } else {
+                            // Prevent further restarts
+                            state
+                                .modules_pending_shutdown
+                                .insert(name_clone.clone(), true);
+
                             let app = &*get_app_handle().lock().expect("Failed to get app handle");
 
                             app.dialog()
@@ -378,6 +383,15 @@ fn start_module_thread(
         return;
     }
 
+    start_generic_module_thread(name, path, custom_args, tx);
+}
+
+fn start_generic_module_thread(
+    name: String,
+    path: PathBuf,
+    custom_args: Option<Vec<String>>,
+    tx: Sender<ModuleMessage>,
+) {
     thread::spawn(move || {
         // Start the child process
         let mut command = Command::new(&path);
@@ -463,8 +477,8 @@ fn start_notify_module_thread(
                 let error_msg = e.to_string();
                 if error_msg.contains("No such option: --output-only") {
                     info!("aw-notify module doesn't support --output-only, falling back to default behavior");
-                    // Fallback to default module handler
-                    start_module_thread(name, path, custom_args, tx);
+                    // Fallback to generic module handler to avoid recursion
+                    start_generic_module_thread(name, path, custom_args, tx);
                     return;
                 } else {
                     error!("Failed to start module {name}: {e}");
