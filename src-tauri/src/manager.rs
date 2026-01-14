@@ -11,17 +11,23 @@
 #[cfg(unix)]
 use {
     nix::sys::signal::{self, Signal},
-    nix::unistd::Pid,
+    nix::unistd::{close, pipe, read, Pid},
     std::os::unix::fs::PermissionsExt,
+    std::os::unix::io::AsRawFd,
 };
 #[cfg(windows)]
 use {
     std::os::windows::process::CommandExt,
+    std::ptr::null_mut,
     winapi::shared::minwindef::{DWORD, FALSE},
     winapi::um::handleapi::CloseHandle,
+    winapi::um::jobapi2::{AssignProcessToJobObject, CreateJobObjectW, SetInformationJobObject},
     winapi::um::processthreadsapi::{OpenProcess, TerminateProcess},
     winapi::um::winbase::CREATE_NO_WINDOW,
-    winapi::um::winnt::PROCESS_TERMINATE,
+    winapi::um::winnt::{
+        JobObjectExtendedLimitInformation, HANDLE, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+        JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, PROCESS_TERMINATE,
+    },
 };
 
 use log::{debug, error, info, trace};
@@ -248,6 +254,83 @@ fn send_sigterm(pid: u32) -> Result<(), std::io::Error> {
         Ok(())
     }
 }
+
+#[cfg(windows)]
+fn create_job_object() -> Result<HANDLE, std::io::Error> {
+    unsafe {
+        // Create a new job object
+        let job_handle = CreateJobObjectW(null_mut(), null_mut());
+        if job_handle.is_null() {
+            return Err(std::io::Error::last_os_error());
+        }
+
+        // Set job object to kill all associated processes when it's closed
+        let mut job_info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
+        job_info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+
+        let result = SetInformationJobObject(
+            job_handle,
+            JobObjectExtendedLimitInformation,
+            &mut job_info as *mut _ as *mut _,
+            std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as DWORD,
+        );
+
+        if result == 0 {
+            CloseHandle(job_handle);
+            return Err(std::io::Error::last_os_error());
+        }
+
+        Ok(job_handle)
+    }
+}
+
+#[cfg(unix)]
+fn monitor_parent_process(child_pid: u32, read_fd: i32) {
+    thread::spawn(move || {
+        // Read from the pipe - when parent dies, the write end is closed by the OS
+        // and we'll get EOF (read returns 0)
+        let mut buf = [0u8; 1];
+        loop {
+            match read(read_fd, &mut buf) {
+                Ok(0) => {
+                    // EOF means parent died (write end of pipe closed)
+                    info!(
+                        "Parent process died (pipe closed), terminating child {}",
+                        child_pid
+                    );
+
+                    // Close our read end of the pipe
+                    let _ = close(read_fd);
+
+                    // Send SIGTERM to the child process
+                    if let Err(e) = send_sigterm(child_pid) {
+                        error!("Failed to terminate child process {}: {}", child_pid, e);
+                    } else {
+                        debug!("Successfully sent SIGTERM to child process {}", child_pid);
+                    }
+                    break;
+                }
+                Ok(_) => {
+                    // Should never receive data, but if we do, just continue monitoring
+                    // This handles spurious wake-ups gracefully
+                }
+                Err(e) => {
+                    // Error reading from pipe - parent likely died
+                    error!("Error reading from parent monitor pipe: {}", e);
+                    let _ = close(read_fd);
+
+                    if let Err(e) = send_sigterm(child_pid) {
+                        error!("Failed to terminate child process {}: {}", child_pid, e);
+                    } else {
+                        debug!("Successfully sent SIGTERM to child process {}", child_pid);
+                    }
+                    break;
+                }
+            }
+        }
+    });
+}
+
 pub fn start_manager() -> Arc<Mutex<ManagerState>> {
     let (tx, rx) = channel();
     let state = Arc::new(Mutex::new(ManagerState::new(tx.clone())));
@@ -393,6 +476,30 @@ fn start_generic_module_thread(
     tx: Sender<ModuleMessage>,
 ) {
     thread::spawn(move || {
+        // Create job object on Windows to ensure child dies with parent
+        #[cfg(windows)]
+        let job_handle = match create_job_object() {
+            Ok(handle) => Some(handle),
+            Err(e) => {
+                error!("Failed to create job object for {name}: {e}");
+                None
+            }
+        };
+
+        // Create pipe for Unix parent death detection
+        #[cfg(unix)]
+        let pipe_read_fd = match pipe() {
+            Ok((read_fd, _write_fd)) => {
+                // read_fd is read end, write_fd stays open in parent and auto-closes when parent dies
+                use std::os::unix::io::AsRawFd;
+                read_fd.as_raw_fd()
+            }
+            Err(e) => {
+                error!("Failed to create pipe for parent monitoring: {}", e);
+                -1 // Use -1 to indicate pipe creation failed
+            }
+        };
+
         // Start the child process
         let mut command = Command::new(&path);
 
@@ -409,24 +516,67 @@ fn start_generic_module_thread(
 
         let child = command.stdout(std::process::Stdio::piped()).spawn();
 
-        if let Err(e) = child {
-            error!("Failed to start module {name}: {e}");
-            return;
+        let child = match child {
+            Ok(c) => c,
+            Err(e) => {
+                error!("Failed to start module {name}: {e}");
+                #[cfg(windows)]
+                if let Some(handle) = job_handle {
+                    unsafe {
+                        CloseHandle(handle);
+                    }
+                }
+                #[cfg(unix)]
+                if pipe_read_fd >= 0 {
+                    let _ = close(pipe_read_fd);
+                }
+                return;
+            }
+        };
+
+        let child_pid = child.id();
+
+        // On Windows, assign child to job object
+        #[cfg(windows)]
+        if let Some(handle) = job_handle {
+            use std::os::windows::io::AsRawHandle;
+            let child_handle = child.as_raw_handle() as HANDLE;
+            unsafe {
+                if AssignProcessToJobObject(handle, child_handle) == 0 {
+                    error!(
+                        "Failed to assign child process to job object: {:?}",
+                        std::io::Error::last_os_error()
+                    );
+                }
+            }
+        }
+
+        // On Unix, start parent process monitor with pipe
+        #[cfg(unix)]
+        if pipe_read_fd >= 0 {
+            monitor_parent_process(child_pid, pipe_read_fd);
         }
 
         // Send a message to the manager that the module has started
         tx.send(ModuleMessage::Started {
             name: name.to_string(),
-            pid: child.as_ref().expect("Failed to get child PID").id(),
+            pid: child_pid,
             args: custom_args,
         })
         .expect("Failed to send Module Started message");
 
         // Wait for the child to exit
         let output = child
-            .expect("Failed to create child process")
             .wait_with_output()
             .expect("Failed to wait on child process");
+
+        // Clean up job handle on Windows
+        #[cfg(windows)]
+        if let Some(handle) = job_handle {
+            unsafe {
+                CloseHandle(handle);
+            }
+        }
 
         // Send the process output to the manager
         tx.send(ModuleMessage::Stopped {
@@ -444,6 +594,29 @@ fn start_notify_module_thread(
     tx: Sender<ModuleMessage>,
 ) {
     thread::spawn(move || {
+        // Create job object on Windows to ensure child dies with parent
+        #[cfg(windows)]
+        let job_handle = match create_job_object() {
+            Ok(handle) => Some(handle),
+            Err(e) => {
+                error!("Failed to create job object for {name}: {e}");
+                None
+            }
+        };
+
+        // Create pipe for Unix parent death detection
+        #[cfg(unix)]
+        let pipe_read_fd = match pipe() {
+            Ok((read_fd, _write_fd)) => {
+                // read_fd is read end, write_fd stays open in parent and auto-closes when parent dies
+                read_fd.as_raw_fd()
+            }
+            Err(e) => {
+                error!("Failed to create pipe for parent monitoring: {}", e);
+                -1 // Use -1 to indicate pipe creation failed
+            }
+        };
+
         // Start the child process with --output-only flag
         let mut command = Command::new(&path);
 
@@ -477,15 +650,59 @@ fn start_notify_module_thread(
                 let error_msg = e.to_string();
                 if error_msg.contains("No such option: --output-only") {
                     info!("aw-notify module doesn't support --output-only, falling back to default behavior");
+                    // Clean up job handle before fallback
+                    #[cfg(windows)]
+                    if let Some(handle) = job_handle {
+                        unsafe {
+                            CloseHandle(handle);
+                        }
+                    }
+                    #[cfg(unix)]
+                    if pipe_read_fd >= 0 {
+                        let _ = close(pipe_read_fd);
+                    }
                     // Fallback to generic module handler to avoid recursion
                     start_generic_module_thread(name, path, custom_args, tx);
                     return;
                 } else {
                     error!("Failed to start module {name}: {e}");
+                    #[cfg(windows)]
+                    if let Some(handle) = job_handle {
+                        unsafe {
+                            CloseHandle(handle);
+                        }
+                    }
+                    #[cfg(unix)]
+                    if pipe_read_fd >= 0 {
+                        let _ = close(pipe_read_fd);
+                    }
                     return;
                 }
             }
         };
+
+        let child_pid = child.id();
+
+        // On Windows, assign child to job object
+        #[cfg(windows)]
+        if let Some(handle) = job_handle {
+            use std::os::windows::io::AsRawHandle;
+            let child_handle = child.as_raw_handle() as HANDLE;
+            unsafe {
+                if AssignProcessToJobObject(handle, child_handle) == 0 {
+                    error!(
+                        "Failed to assign child process to job object: {:?}",
+                        std::io::Error::last_os_error()
+                    );
+                }
+            }
+        }
+
+        // On Unix, start parent process monitor with pipe
+        #[cfg(unix)]
+        if pipe_read_fd >= 0 {
+            monitor_parent_process(child_pid, pipe_read_fd);
+        }
 
         // Send a message to the manager that the module has started
         tx.send(ModuleMessage::Started {
@@ -535,6 +752,14 @@ fn start_notify_module_thread(
 
         // Wait for the child to exit
         let output = child.wait_with_output().expect("Failed to wait on child");
+
+        // Clean up job handle on Windows
+        #[cfg(windows)]
+        if let Some(handle) = job_handle {
+            unsafe {
+                CloseHandle(handle);
+            }
+        }
 
         // Send the process output to the manager
         tx.send(ModuleMessage::Stopped {

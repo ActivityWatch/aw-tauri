@@ -493,6 +493,7 @@ dependencies = [
  "fern 0.7.1",
  "glob",
  "lazy_static",
+ "libc",
  "log",
  "nix",
  "notify",
