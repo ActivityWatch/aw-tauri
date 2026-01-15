@@ -387,46 +387,71 @@ fn handle(rx: Receiver<ModuleMessage>, state: Arc<Mutex<ManagerState>>) {
                 } else {
                     error!("Module {name} exited with error status");
                     thread::spawn(move || {
-                        thread::sleep(Duration::from_secs(1));
-                        let state = &mut state_clone
-                            .lock()
-                            .expect("Failed to acquire manager_state lock");
-                        let restart_count =
-                            state.modules_restart_count.get(&name_clone).unwrap_or(&0);
+                        let (should_restart, restart_info) = {
+                            let state = &mut state_clone
+                                .lock()
+                                .expect("Failed to acquire manager_state lock");
+                            let restart_count =
+                                state.modules_restart_count.get(&name_clone).unwrap_or(&0);
 
-                        let pending_shutdown = state
-                            .modules_pending_shutdown
-                            .get(&name_clone)
-                            .unwrap_or(&false);
+                            let pending_shutdown = state
+                                .modules_pending_shutdown
+                                .get(&name_clone)
+                                .unwrap_or(&false);
 
-                        if *pending_shutdown {
-                            return;
-                        }
-                        if *restart_count < 3 {
-                            let new_count = *restart_count + 1;
-                            state
-                                .modules_restart_count
-                                .insert(name_clone.clone(), new_count);
-                            // Get the stored arguments for this module
-                            let stored_args =
-                                state.modules_args.get(&name_clone).cloned().flatten();
-                            state.start_module(&name_clone, stored_args.as_ref());
-                            let app = &*get_app_handle().lock().expect("Failed to get app handle");
+                            // If shutdown is pending, exit early
+                            if *pending_shutdown {
+                                return; // Exit the entire thread
+                            }
 
-                            app.dialog()
-                                .message(format!("{name_clone} crashed. Restarting..."))
-                                .kind(MessageDialogKind::Warning)
-                                .title("Warning")
-                                .show(|_| {});
-                            error!("Module {name_clone} crashed and is being restarted");
+                            if *restart_count < 3 {
+                                // Exponential backoff: 2^(restart_count + 1) seconds
+                                // restart_count 0 -> 2 seconds, 1 -> 4 seconds, 2 -> 8 seconds
+                                let delay_secs = 2u64.pow(*restart_count + 1);
+                                info!("Module {name_clone} will restart in {delay_secs} seconds (attempt {} of 3)", *restart_count + 1);
+                                (true, Some((delay_secs, *restart_count)))
+                            } else {
+                                (false, None)
+                            }
+                            // state is automatically dropped here when the block ends
+                        };
+
+                        if should_restart {
+                            if let Some((secs, restart_count)) = restart_info {
+                                // Show dialog BEFORE sleeping
+                                let app =
+                                    &*get_app_handle().lock().expect("Failed to get app handle");
+                                app.dialog()
+                                    .message(format!("{name_clone} crashed. Restarting..."))
+                                    .kind(MessageDialogKind::Warning)
+                                    .title("Warning")
+                                    .show(|_| {});
+                                error!("Module {name_clone} crashed and will be restarted");
+
+                                thread::sleep(Duration::from_secs(secs));
+
+                                let state = &mut state_clone
+                                    .lock()
+                                    .expect("Failed to acquire manager_state lock");
+
+                                state
+                                    .modules_restart_count
+                                    .insert(name_clone.clone(), restart_count + 1);
+                                // Get the stored arguments for this module
+                                let stored_args =
+                                    state.modules_args.get(&name_clone).cloned().flatten();
+                                state.start_module(&name_clone, stored_args.as_ref());
+                            }
                         } else {
-                            // Prevent further restarts
+                            // Restart limit reached
+                            let state = &mut state_clone
+                                .lock()
+                                .expect("Failed to acquire manager_state lock");
                             state
                                 .modules_pending_shutdown
                                 .insert(name_clone.clone(), true);
 
                             let app = &*get_app_handle().lock().expect("Failed to get app handle");
-
                             app.dialog()
                                 .message(format!(
                                     "{name_clone} keeps on crashing. Restart limit reached."
