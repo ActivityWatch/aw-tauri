@@ -825,6 +825,8 @@ fn send_notification(content: &str) {
 
 #[cfg(unix)]
 fn discover_modules() -> BTreeMap<String, PathBuf> {
+    use std::os::unix::fs::MetadataExt;
+
     let excluded = [
         "aw-tauri",
         "aw-client",
@@ -851,15 +853,22 @@ fn discover_modules() -> BTreeMap<String, PathBuf> {
 
     // Build a set of paths to search
     let mut found_modules = BTreeMap::new();
-    let mut visited_dirs = HashSet::new();
+    // Use (device, inode) pairs for cycle detection (works across filesystems)
+    let mut visited_inodes = HashSet::new();
 
     // Create a stack of directories to search, starting with PATH entries
     let mut dirs_to_search: Vec<PathBuf> = env::split_paths(&new_paths).collect();
 
     // Process directories in depth-first order
     while let Some(dir) = dirs_to_search.pop() {
-        if !visited_dirs.insert(dir.canonicalize().unwrap_or(dir.clone())) {
-            continue;
+        // Use (device, inode) tuple to detect cycles (works across different filesystems)
+        if let Ok(metadata) = fs::metadata(&dir) {
+            let id = (metadata.dev(), metadata.ino());
+            if !visited_inodes.insert(id) {
+                continue; // Already visited this directory
+            }
+        } else {
+            continue; // Can't access directory
         }
 
         // Look for aw-* executables in this directory
@@ -867,34 +876,37 @@ fn discover_modules() -> BTreeMap<String, PathBuf> {
             for entry in entries.filter_map(Result::ok) {
                 let path = entry.path();
 
-                // Skip if not a file or directory
-                if let Ok(metadata) = fs::metadata(&path) {
-                    let file_name = match path.file_name().and_then(|n| n.to_str()) {
-                        Some(name) => name.to_string(),
-                        None => continue,
-                    };
+                // Get metadata once and reuse (avoid duplicate fs::metadata call)
+                let metadata = match entry.metadata() {
+                    Ok(m) => m,
+                    Err(_) => continue,
+                };
 
-                    // Process only items starting with "aw-"
-                    if !file_name.starts_with("aw-") {
+                let file_name = match path.file_name().and_then(|n| n.to_str()) {
+                    Some(name) => name.to_string(),
+                    None => continue,
+                };
+
+                // Process only items starting with "aw-"
+                if !file_name.starts_with("aw-") {
+                    continue;
+                }
+
+                // If it's a directory starting with "aw-", add to search stack
+                if metadata.is_dir() {
+                    dirs_to_search.push(path);
+                }
+                // If it's an executable file
+                else if metadata.is_file() || metadata.file_type().is_symlink() {
+                    // Skip if has extension or is excluded
+                    if file_name.contains('.') || excluded.contains(&file_name.as_str()) {
                         continue;
                     }
 
-                    // If it's a directory starting with "aw-", add to search stack
-                    if metadata.is_dir() {
-                        dirs_to_search.push(path);
-                    }
-                    // If it's an executable file
-                    else if metadata.is_file() || metadata.is_symlink() {
-                        // Skip if has extension or is excluded
-                        if file_name.contains(".") || excluded.contains(&file_name.as_str()) {
-                            continue;
-                        }
-
-                        // Check if executable
-                        let is_executable = metadata.permissions().mode() & 0o111 != 0;
-                        if is_executable {
-                            found_modules.insert(file_name, path);
-                        }
+                    // Check if executable
+                    let is_executable = metadata.permissions().mode() & 0o111 != 0;
+                    if is_executable {
+                        found_modules.insert(file_name, path);
                     }
                 }
             }
