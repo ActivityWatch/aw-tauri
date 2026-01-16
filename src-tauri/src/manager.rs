@@ -418,14 +418,17 @@ fn handle(rx: Receiver<ModuleMessage>, state: Arc<Mutex<ManagerState>>) {
 
                         if should_restart {
                             if let Some((secs, restart_count)) = restart_info {
-                                // Show dialog BEFORE sleeping
-                                let app =
-                                    &*get_app_handle().lock().expect("Failed to get app handle");
-                                app.dialog()
-                                    .message(format!("{name_clone} crashed. Restarting..."))
-                                    .kind(MessageDialogKind::Warning)
-                                    .title("Warning")
-                                    .show(|_| {});
+                                {
+                                    // Show dialog BEFORE sleeping
+                                    let app = &*get_app_handle()
+                                        .lock()
+                                        .expect("Failed to get app handle");
+                                    app.dialog()
+                                        .message(format!("{name_clone} crashed. Restarting..."))
+                                        .kind(MessageDialogKind::Warning)
+                                        .title("Warning")
+                                        .show(|_| {});
+                                }
                                 error!("Module {name_clone} crashed and will be restarted");
 
                                 thread::sleep(Duration::from_secs(secs));
@@ -753,9 +756,8 @@ fn start_notify_module_thread(
                             notification.get("title").and_then(|t| t.as_str()),
                             notification.get("message").and_then(|m| m.as_str()),
                         ) {
-                            // Format notification: "title\nmessage"
-                            let content = format!("{}\n{}", title, message);
-                            send_notification(&content);
+                            // Send notification with actual title from JSON
+                            send_notification(title, message);
                             debug!(
                                 "Parsed JSON notification: title='{}', message length={}",
                                 title,
@@ -796,22 +798,23 @@ fn start_notify_module_thread(
     });
 }
 
-fn send_notification(content: &str) {
+fn send_notification(title: &str, message: &str) {
     // Get app handle and send notification
     if let Ok(app_handle_guard) = get_app_handle().lock() {
         let app_handle = &*app_handle_guard;
         let result = app_handle
             .notification()
             .builder()
-            .title("ActivityWatch")
-            .body(content)
+            .title(title)
+            .body(message)
             .show();
 
         match result {
             Ok(_) => {
                 trace!(
-                    "Sent notification: {}",
-                    content.lines().next().unwrap_or("")
+                    "Sent notification: title='{}', message preview='{}'",
+                    title,
+                    message.lines().next().unwrap_or("")
                 );
             }
             Err(e) => {
