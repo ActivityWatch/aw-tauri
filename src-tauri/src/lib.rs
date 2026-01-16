@@ -174,15 +174,31 @@ pub fn handle_first_run() {
 pub fn listen_for_lockfile() {
     thread::spawn(|| {
         let runtime_path = get_runtime_path();
-        let watcher = SpecificFileWatcher::new(&runtime_path, "single_instance.lock")
-            .expect("Failed to create file watcher");
         loop {
-            if watcher.wait_for_file().is_ok() {
-                remove_file(get_runtime_path().join("single_instance.lock"))
-                    .expect("Failed to remove lock file");
-                let app = &*get_app_handle().lock().expect("Failed to get app handle");
-                if let Some(window) = app.webview_windows().get("main") {
-                    window.show().expect("Failed to show main window");
+            let watcher = match SpecificFileWatcher::new(&runtime_path, "single_instance.lock") {
+                Ok(w) => w,
+                Err(e) => {
+                    warn!("Failed to create file watcher: {}. Retrying in 2s...", e);
+                    thread::sleep(Duration::from_secs(2));
+                    continue;
+                }
+            };
+
+            loop {
+                match watcher.wait_for_file() {
+                    Ok(()) => {
+                        remove_file(get_runtime_path().join("single_instance.lock"))
+                            .expect("Failed to remove lock file");
+                        let app = &*get_app_handle().lock().expect("Failed to get app handle");
+                        if let Some(window) = app.webview_windows().get("main") {
+                            window.show().expect("Failed to show main window");
+                        }
+                    }
+                    Err(e) => {
+                        warn!("File watcher exited: {}. Relaunching in 1s...", e);
+                        thread::sleep(Duration::from_secs(1));
+                        break;
+                    }
                 }
             }
         }
@@ -218,25 +234,20 @@ impl SpecificFileWatcher {
     }
 
     pub fn wait_for_file(&self) -> Result<(), Box<dyn std::error::Error>> {
-        loop {
-            // Check for events
-            if let Ok(result) = self.rx.try_recv() {
-                match result {
-                    Ok(event) => match event.kind {
-                        EventKind::Create(_) | EventKind::Modify(_) => {
-                            if event.paths.iter().any(|p| p == &self.target_file) {
-                                return Ok(());
-                            }
+        for result in self.rx.iter() {
+            match result {
+                Ok(event) => match event.kind {
+                    EventKind::Create(_) | EventKind::Modify(_) => {
+                        if event.paths.iter().any(|p| p == &self.target_file) {
+                            return Ok(());
                         }
-                        _ => {}
-                    },
-                    Err(e) => warn!("Watch error: {}", e),
-                }
+                    }
+                    _ => {}
+                },
+                Err(e) => warn!("Watch error: {}", e),
             }
-
-            // Avoid busy waiting
-            std::thread::sleep(Duration::from_millis(300));
         }
+        Err("Watcher channel closed".into())
     }
 }
 
