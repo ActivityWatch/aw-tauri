@@ -712,36 +712,37 @@ fn start_notify_module_thread(
         })
         .expect("Failed to send module started message");
 
-        // Read output continuously and parse notifications
+        // Read output continuously and parse notifications as JSON Lines
         let stdout = child.stdout.take().expect("Failed to get stdout");
         let reader = BufReader::new(stdout);
-
-        let mut in_notification = false;
-        let mut notification_content = Vec::new();
 
         for line in reader.lines() {
             match line {
                 Ok(line_content) => {
-                    // Check for notification boundaries (exactly 50 dashes)
-                    if line_content == "-".repeat(50) {
-                        if in_notification {
-                            // End of notification - send it
-                            if !notification_content.is_empty() {
-                                let content = notification_content.join("\n");
-                                send_notification(&content);
-                                notification_content.clear();
-                            }
-                            in_notification = false;
+                    // Try to parse as JSON notification
+                    if let Ok(notification) =
+                        serde_json::from_str::<serde_json::Value>(&line_content)
+                    {
+                        // Extract title and message from JSON
+                        if let (Some(title), Some(message)) = (
+                            notification.get("title").and_then(|t| t.as_str()),
+                            notification.get("message").and_then(|m| m.as_str()),
+                        ) {
+                            // Format notification: "title\nmessage"
+                            let content = format!("{}\n{}", title, message);
+                            send_notification(&content);
+                            debug!(
+                                "Parsed JSON notification: title='{}', message length={}",
+                                title,
+                                message.len()
+                            );
                         } else {
-                            // Start of notification
-                            in_notification = true;
+                            debug!("JSON notification missing title or message fields");
                         }
-                    } else if in_notification && !line_content.trim().is_empty() {
-                        // Collect notification content
-                        notification_content.push(line_content.clone());
+                    } else {
+                        // Not JSON - could be info logs or old format fallback
+                        debug!("aw-notify output (non-JSON): {}", line_content);
                     }
-                    // Debug log aw-notify output (won't show at Info level)
-                    debug!("aw-notify output: {}", line_content);
                 }
                 Err(e) => {
                     error!("Error reading aw-notify output: {}", e);
