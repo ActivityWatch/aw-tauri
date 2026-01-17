@@ -94,89 +94,13 @@ impl ManagerState {
         self.modules_args.insert(name.to_string(), args);
         self.modules_pending_shutdown.remove(name);
         debug!("Running modules: {:?}", self.modules_running);
-        self.update_tray_menu();
     }
     fn stopped_module(&mut self, name: &str) {
         info!("Stopped module: {name}");
         self.modules_running.insert(name.to_string(), false);
         self.modules_pid.remove(name);
-        self.update_tray_menu();
     }
-    fn update_tray_menu(&mut self) {
-        let (lock, cvar) = &*HANDLE_CONDVAR;
-        let mut state = lock.lock().expect("Failed to acquire manager_state lock");
 
-        debug!("Attempting to get app handle");
-        while !*state {
-            state = cvar
-                .wait(state)
-                .expect("Failed to wait on condition variable");
-        }
-        debug!("Condition variable set");
-        let app = &*get_app_handle().lock().expect("Failed to get app handle");
-        debug!("App handle acquired");
-
-        let open = MenuItem::with_id(app, "open", "Open Dashboard", true, None::<&str>)
-            .expect("failed to create open menu item");
-        let quit = MenuItem::with_id(app, "quit", "Quit ActivityWatch", true, None::<&str>)
-            .expect("failed to create quit menu item");
-
-        let mut modules_submenu_builder = SubmenuBuilder::new(app, "Modules");
-        for (module, running) in self.modules_running.iter() {
-            let label = module;
-            let module_menu =
-                CheckMenuItem::with_id(app, module, label, true, *running, None::<&str>)
-                    .expect("Failed to create module menu item");
-            modules_submenu_builder = modules_submenu_builder.item(&module_menu);
-        }
-
-        for module_name in self.modules_discovered.keys() {
-            if !self.modules_running.contains_key(module_name) {
-                let module_menu =
-                    MenuItem::with_id(app, module_name, module_name, true, None::<&str>)
-                        .expect("Failed to create module menu item");
-                modules_submenu_builder = modules_submenu_builder.item(&module_menu);
-            }
-        }
-
-        let module_submenu = modules_submenu_builder
-            .build()
-            .expect("Failed to create module submenu");
-        let config_folder = MenuItem::with_id(
-            app,
-            "config_folder",
-            "Open config folder",
-            true,
-            None::<&str>,
-        )
-        .expect("Failed to create config folder menu item");
-
-        let log_folder =
-            MenuItem::with_id(app, "log_folder", "Open log folder", true, None::<&str>)
-                .expect("Failed to create log folder menu item");
-        let separator = PredefinedMenuItem::separator(app).expect("Failed to create separator");
-        let menu = Menu::with_items(
-            app,
-            &[
-                &open,
-                &separator,
-                &module_submenu,
-                &separator,
-                &config_folder,
-                &log_folder,
-                &separator,
-                &quit,
-            ],
-        )
-        .expect("Failed to create tray menu");
-
-        let tray_id = get_tray_id();
-        app.tray_by_id(tray_id)
-            .expect("Failed to get tray by id")
-            .set_menu(Some(menu))
-            .expect("Failed to set tray menu");
-        trace!("set tray menu");
-    }
     pub fn start_module(&self, name: &str, args: Option<&Vec<String>>) {
         if !self.is_module_running(name) {
             if let Some(path) = self.modules_discovered.get(name) {
@@ -218,6 +142,82 @@ impl ManagerState {
     fn is_module_running(&self, name: &str) -> bool {
         *self.modules_running.get(name).unwrap_or(&false)
     }
+}
+
+fn update_tray_menu(
+    modules_running: &BTreeMap<String, bool>,
+    modules_discovered: &BTreeMap<String, PathBuf>,
+) {
+    let (lock, cvar) = &*HANDLE_CONDVAR;
+    let mut state = lock.lock().expect("Failed to acquire manager_state lock");
+
+    debug!("Attempting to get app handle");
+    while !*state {
+        state = cvar
+            .wait(state)
+            .expect("Failed to wait on condition variable");
+    }
+    debug!("Condition variable set");
+    let app = &*get_app_handle().lock().expect("Failed to get app handle");
+    debug!("App handle acquired");
+
+    let open = MenuItem::with_id(app, "open", "Open Dashboard", true, None::<&str>)
+        .expect("failed to create open menu item");
+    let quit = MenuItem::with_id(app, "quit", "Quit ActivityWatch", true, None::<&str>)
+        .expect("failed to create quit menu item");
+
+    let mut modules_submenu_builder = SubmenuBuilder::new(app, "Modules");
+    for (module, running) in modules_running.iter() {
+        let label = module;
+        let module_menu = CheckMenuItem::with_id(app, module, label, true, *running, None::<&str>)
+            .expect("Failed to create module menu item");
+        modules_submenu_builder = modules_submenu_builder.item(&module_menu);
+    }
+
+    for module_name in modules_discovered.keys() {
+        if !modules_running.contains_key(module_name) {
+            let module_menu = MenuItem::with_id(app, module_name, module_name, true, None::<&str>)
+                .expect("Failed to create module menu item");
+            modules_submenu_builder = modules_submenu_builder.item(&module_menu);
+        }
+    }
+
+    let module_submenu = modules_submenu_builder
+        .build()
+        .expect("Failed to create module submenu");
+    let config_folder = MenuItem::with_id(
+        app,
+        "config_folder",
+        "Open config folder",
+        true,
+        None::<&str>,
+    )
+    .expect("Failed to create config folder menu item");
+
+    let log_folder = MenuItem::with_id(app, "log_folder", "Open log folder", true, None::<&str>)
+        .expect("Failed to create log folder menu item");
+    let separator = PredefinedMenuItem::separator(app).expect("Failed to create separator");
+    let menu = Menu::with_items(
+        app,
+        &[
+            &open,
+            &separator,
+            &module_submenu,
+            &separator,
+            &config_folder,
+            &log_folder,
+            &separator,
+            &quit,
+        ],
+    )
+    .expect("Failed to create tray menu");
+
+    let tray_id = get_tray_id();
+    app.tray_by_id(tray_id)
+        .expect("Failed to get tray by id")
+        .set_menu(Some(menu))
+        .expect("Failed to set tray menu");
+    trace!("set tray menu");
 }
 
 #[cfg(unix)]
@@ -374,110 +374,134 @@ fn handle(rx: Receiver<ModuleMessage>, state: Arc<Mutex<ManagerState>>) {
     loop {
         let msg = rx.recv().expect("Failed to receive Module message");
         let state_clone = Arc::clone(&state);
-        let state = &mut state.lock().expect("Failed to acquire manager_state lock");
-        match msg {
-            ModuleMessage::Started { name, pid, args } => {
-                state.started_module(&name, pid, args);
-            }
-            ModuleMessage::Stopped { name, output } => {
-                state.stopped_module(&name);
-                let name_clone = name.clone();
-                if output.status.success() {
-                    info!("Module {name} exited successfully");
-                } else {
-                    error!("Module {name} exited with error status");
-                    thread::spawn(move || {
-                        let (should_restart, restart_info) = {
-                            let state = &mut state_clone
-                                .lock()
-                                .expect("Failed to acquire manager_state lock");
-                            let restart_count =
-                                state.modules_restart_count.get(&name_clone).unwrap_or(&0);
 
-                            let pending_shutdown = state
-                                .modules_pending_shutdown
-                                .get(&name_clone)
-                                .unwrap_or(&false);
-
-                            // If shutdown is pending, exit early
-                            if *pending_shutdown {
-                                return; // Exit the entire thread
-                            }
-
-                            if *restart_count < 3 {
-                                // Exponential backoff: 2^(restart_count + 1) seconds
-                                // restart_count 0 -> 2 seconds, 1 -> 4 seconds, 2 -> 8 seconds
-                                let delay_secs = 2u64.pow(*restart_count + 1);
-                                info!("Module {name_clone} will restart in {delay_secs} seconds (attempt {} of 3)", *restart_count + 1);
-                                (true, Some((delay_secs, *restart_count)))
-                            } else {
-                                (false, None)
-                            }
-                            // state is automatically dropped here when the block ends
-                        };
-
-                        if should_restart {
-                            if let Some((secs, restart_count)) = restart_info {
-                                {
-                                    // Show dialog BEFORE sleeping
-                                    let app = &*get_app_handle()
-                                        .lock()
-                                        .expect("Failed to get app handle");
-                                    app.dialog()
-                                        .message(format!("{name_clone} crashed. Restarting..."))
-                                        .kind(MessageDialogKind::Warning)
-                                        .title("Warning")
-                                        .show(|_| {});
-                                }
-                                error!("Module {name_clone} crashed and will be restarted");
-
-                                thread::sleep(Duration::from_secs(secs));
-
-                                let state = &mut state_clone
+        let (modules_running, modules_discovered) = {
+            let mut state_guard = state.lock().expect("Failed to acquire manager_state lock");
+            match msg {
+                ModuleMessage::Started { name, pid, args } => {
+                    state_guard.started_module(&name, pid, args);
+                    (
+                        state_guard.modules_running.clone(),
+                        state_guard.modules_discovered.clone(),
+                    )
+                }
+                ModuleMessage::Stopped { name, output } => {
+                    state_guard.stopped_module(&name);
+                    let data = (
+                        state_guard.modules_running.clone(),
+                        state_guard.modules_discovered.clone(),
+                    );
+                    let name_clone = name.clone();
+                    if output.status.success() {
+                        info!("Module {name} exited successfully");
+                    } else {
+                        error!("Module {name} exited with error status");
+                        thread::spawn(move || {
+                            let (should_restart, restart_info) = {
+                                let state_guard = &mut state_clone
                                     .lock()
                                     .expect("Failed to acquire manager_state lock");
-
-                                state
+                                let restart_count = state_guard
                                     .modules_restart_count
-                                    .insert(name_clone.clone(), restart_count + 1);
-                                // Get the stored arguments for this module
-                                let stored_args =
-                                    state.modules_args.get(&name_clone).cloned().flatten();
-                                state.start_module(&name_clone, stored_args.as_ref());
+                                    .get(&name_clone)
+                                    .unwrap_or(&0);
+
+                                let pending_shutdown = state_guard
+                                    .modules_pending_shutdown
+                                    .get(&name_clone)
+                                    .unwrap_or(&false);
+
+                                // If shutdown is pending, exit early
+                                if *pending_shutdown {
+                                    return; // Exit the entire thread
+                                }
+
+                                if *restart_count < 3 {
+                                    // Exponential backoff: 2^(restart_count + 1) seconds
+                                    // restart_count 0 -> 2 seconds, 1 -> 4 seconds, 2 -> 8 seconds
+                                    let delay_secs = 2u64.pow(*restart_count + 1);
+                                    info!(
+                                        "Module {name_clone} will restart in {delay_secs} seconds (attempt {} of 3)",
+                                        *restart_count + 1
+                                    );
+                                    (true, Some((delay_secs, *restart_count)))
+                                } else {
+                                    (false, None)
+                                }
+                            };
+
+                            if should_restart {
+                                if let Some((secs, restart_count)) = restart_info {
+                                    {
+                                        // Show dialog BEFORE sleeping
+                                        let app = &*get_app_handle()
+                                            .lock()
+                                            .expect("Failed to get app handle");
+                                        app.dialog()
+                                            .message(format!("{name_clone} crashed. Restarting..."))
+                                            .kind(MessageDialogKind::Warning)
+                                            .title("Warning")
+                                            .show(|_| {});
+                                    }
+                                    error!("Module {name_clone} crashed and will be restarted");
+
+                                    thread::sleep(Duration::from_secs(secs));
+
+                                    let state_guard = &mut state_clone
+                                        .lock()
+                                        .expect("Failed to acquire manager_state lock");
+
+                                    state_guard
+                                        .modules_restart_count
+                                        .insert(name_clone.clone(), restart_count + 1);
+                                    // Get the stored arguments for this module
+                                    let stored_args = state_guard
+                                        .modules_args
+                                        .get(&name_clone)
+                                        .cloned()
+                                        .flatten();
+                                    state_guard.start_module(&name_clone, stored_args.as_ref());
+                                }
+                            } else {
+                                // Restart limit reached
+                                let state_guard = &mut state_clone
+                                    .lock()
+                                    .expect("Failed to acquire manager_state lock");
+                                state_guard
+                                    .modules_pending_shutdown
+                                    .insert(name_clone.clone(), true);
+
+                                let app =
+                                    &*get_app_handle().lock().expect("Failed to get app handle");
+                                app.dialog()
+                                    .message(format!(
+                                        "{name_clone} keeps on crashing. Restart limit reached."
+                                    ))
+                                    .kind(MessageDialogKind::Warning)
+                                    .title("Warning")
+                                    .show(|_| {});
+                                error!("Module {name_clone} exceeded crash restart limit");
                             }
-                        } else {
-                            // Restart limit reached
-                            let state = &mut state_clone
-                                .lock()
-                                .expect("Failed to acquire manager_state lock");
-                            state
-                                .modules_pending_shutdown
-                                .insert(name_clone.clone(), true);
+                        });
 
-                            let app = &*get_app_handle().lock().expect("Failed to get app handle");
-                            app.dialog()
-                                .message(format!(
-                                    "{name_clone} keeps on crashing. Restart limit reached."
-                                ))
-                                .kind(MessageDialogKind::Warning)
-                                .title("Warning")
-                                .show(|_| {});
-                            error!("Module {name_clone} exceeded crash restart limit");
-                        }
-                    });
-
-                    debug!(
-                        "Module {name} stdout: {}",
-                        String::from_utf8_lossy(&output.stdout)
-                    );
-                    error!(
-                        "Module {name} stderr: {}",
-                        String::from_utf8_lossy(&output.stderr)
-                    );
+                        debug!(
+                            "Module {name} stdout: {}",
+                            String::from_utf8_lossy(&output.stdout)
+                        );
+                        error!(
+                            "Module {name} stderr: {}",
+                            String::from_utf8_lossy(&output.stderr)
+                        );
+                    }
+                    data
                 }
+                ModuleMessage::Init {} => (
+                    state_guard.modules_running.clone(),
+                    state_guard.modules_discovered.clone(),
+                ),
             }
-            ModuleMessage::Init {} => state.update_tray_menu(),
-        }
+        };
+        update_tray_menu(&modules_running, &modules_discovered);
     }
 }
 
