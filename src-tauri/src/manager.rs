@@ -740,40 +740,38 @@ fn start_notify_module_thread(
         })
         .expect("Failed to send module started message");
 
-        // Read output continuously and parse notifications as JSON Lines
         let stdout = child.stdout.take().expect("Failed to get stdout");
         let reader = BufReader::new(stdout);
 
         for line in reader.lines() {
             match line {
-                Ok(line_content) => {
-                    // Try to parse as JSON notification
-                    if let Ok(notification) =
-                        serde_json::from_str::<serde_json::Value>(&line_content)
-                    {
-                        // Extract title and message from JSON
-                        if let (Some(title), Some(message)) = (
-                            notification.get("title").and_then(|t| t.as_str()),
-                            notification.get("message").and_then(|m| m.as_str()),
-                        ) {
-                            // Send notification with actual title from JSON
-                            send_notification(title, message);
-                            debug!(
-                                "Parsed JSON notification: title='{}', message length={}",
-                                title,
-                                message.len()
-                            );
+                Ok(line_str) => {
+                    info!("aw-notify output: {}", line_str);
+                    if line_str.starts_with("{") {
+                        if let Ok(notification) =
+                            serde_json::from_str::<serde_json::Value>(&line_str)
+                        {
+                            info!("aw-notify notification: {}", notification);
+                            if let (Some(title), Some(message)) = (
+                                notification.get("title").and_then(|t| t.as_str()),
+                                notification.get("message").and_then(|m| m.as_str()),
+                            ) {
+                                send_notification(title, message);
+                                info!(
+                                    "Parsed JSON notification: title='{}', message length={}",
+                                    title,
+                                    message.len()
+                                );
+                            } else {
+                                debug!("JSON notification missing title or message fields");
+                            }
                         } else {
-                            debug!("JSON notification missing title or message fields");
+                            debug!("Failed to parse JSON line: {}", line_str);
                         }
-                    } else {
-                        // Not JSON - could be info logs or old format fallback
-                        debug!("aw-notify output (non-JSON): {}", line_content);
                     }
                 }
                 Err(e) => {
-                    error!("Error reading aw-notify output: {}", e);
-                    break;
+                    error!("Failed to read line from aw-notify: {}", e);
                 }
             }
         }
