@@ -205,6 +205,32 @@ pub fn listen_for_lockfile() {
     });
 }
 
+pub fn listen_for_url_changes() {
+    thread::spawn(move || {
+        let app = &*get_app_handle().lock().expect("failed to get app handle");
+        let mut main_window = app.get_webview_window("main").unwrap();
+        let url = main_window
+            .url()
+            .expect("Failed to get URL from main window");
+        loop {
+            let new_url = main_window.url().unwrap();
+            if new_url != url {
+                if new_url.host_str() != Some("localhost") {
+                    // Open the url in the default browser
+                    app.opener()
+                        .open_url(new_url, None::<&str>)
+                        .expect("Failed to open url");
+                    // navigate back to the previous url
+                    main_window
+                        .navigate(url.clone())
+                        .expect("error navigating main window");
+                }
+            }
+            std::thread::sleep(Duration::from_secs(1));
+        }
+    });
+}
+
 pub struct SpecificFileWatcher {
     #[allow(dead_code)]
     watcher: RecommendedWatcher,
@@ -581,6 +607,7 @@ pub fn run() {
 
             handle_first_run();
             listen_for_lockfile();
+            listen_for_url_changes();
             Ok(())
         })
         .on_window_event(|window, event| {
