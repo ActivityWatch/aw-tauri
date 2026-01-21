@@ -21,6 +21,9 @@ tauri-build = { version = "2.0.5", features = [] }
 
 [dependencies]
 shell-words = "1.1.0"
+urlencoding = "2.1"
+rocket = "0.5"
+tokio = { version = "1", features = ["full"] }
 tauri = { version = "2.2.2", features = ["tray-icon"] }
 tauri-plugin-shell = "2.2.0"
 tauri-plugin-dialog = "2.2.0"
@@ -42,7 +45,6 @@ tauri-plugin-opener = "2"
 glob = "0.3.1"
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.29.0", features = ["process", "signal"] }
-libc = "0.2"
 [target.'cfg(windows)'.dependencies]
 winapi = { version = "0.3.9", features = ["winuser", "jobapi2", "handleapi", "processthreadsapi", "winnt"] }
 
