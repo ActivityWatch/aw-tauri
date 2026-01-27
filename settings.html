@@ -1,0 +1,472 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ActivityWatch Settings</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            background: #f5f5f5;
+            padding: 20px;
+            line-height: 1.6;
+        }
+
+        .container {
+            max-width: 800px;
+            margin: 0 auto;
+            background: white;
+            padding: 30px;
+            border-radius: 8px;
+            box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
+        }
+
+        h1 {
+            color: #333;
+            margin-bottom: 30px;
+            font-size: 24px;
+        }
+
+        .section {
+            margin-bottom: 30px;
+            padding-bottom: 30px;
+            border-bottom: 1px solid #eee;
+        }
+
+        .section:last-child {
+            border-bottom: none;
+        }
+
+        h2 {
+            color: #555;
+            margin-bottom: 15px;
+            font-size: 18px;
+        }
+
+        .form-group {
+            margin-bottom: 20px;
+        }
+
+        label {
+            display: block;
+            margin-bottom: 8px;
+            color: #666;
+            font-weight: 500;
+        }
+
+        input[type="number"],
+        input[type="text"] {
+            width: 100%;
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            font-size: 14px;
+        }
+
+        input[type="checkbox"] {
+            width: 18px;
+            height: 18px;
+            margin-right: 8px;
+            cursor: pointer;
+        }
+
+        .checkbox-group {
+            display: flex;
+            align-items: center;
+            margin-bottom: 10px;
+        }
+
+        .checkbox-group label {
+            margin-bottom: 0;
+            cursor: pointer;
+        }
+
+        button {
+            background: #007bff;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 14px;
+            transition: background 0.2s;
+        }
+
+        button:hover {
+            background: #0056b3;
+        }
+
+        button.secondary {
+            background: #6c757d;
+        }
+
+        button.secondary:hover {
+            background: #545b62;
+        }
+
+        button.danger {
+            background: #dc3545;
+        }
+
+        button.danger:hover {
+            background: #c82333;
+        }
+
+        .path-list {
+            list-style: none;
+            margin-top: 10px;
+        }
+
+        .path-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 10px;
+            background: #f8f9fa;
+            margin-bottom: 8px;
+            border-radius: 4px;
+        }
+
+        .path-item code {
+            flex: 1;
+            color: #333;
+            font-size: 13px;
+        }
+
+        .path-item button {
+            padding: 5px 10px;
+            font-size: 12px;
+            margin-left: 10px;
+        }
+
+        .module-list {
+            list-style: none;
+            margin-top: 10px;
+        }
+
+        .module-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 10px;
+            background: #f8f9fa;
+            margin-bottom: 8px;
+            border-radius: 4px;
+        }
+
+        .module-info {
+            flex: 1;
+        }
+
+        .module-name {
+            font-weight: 500;
+            color: #333;
+        }
+
+        .module-args {
+            color: #666;
+            font-size: 12px;
+            margin-top: 2px;
+        }
+
+        .button-group {
+            display: flex;
+            gap: 10px;
+            margin-top: 20px;
+        }
+
+        .success-message {
+            background: #d4edda;
+            color: #155724;
+            padding: 12px;
+            border-radius: 4px;
+            margin-bottom: 20px;
+            display: none;
+        }
+
+        .error-message {
+            background: #f8d7da;
+            color: #721c24;
+            padding: 12px;
+            border-radius: 4px;
+            margin-bottom: 20px;
+            display: none;
+        }
+
+        .help-text {
+            font-size: 13px;
+            color: #666;
+            margin-top: 5px;
+        }
+    </style>
+</head>
+
+<body>
+    <div class="container">
+        <h1>ActivityWatch Settings</h1>
+
+        <div id="successMessage" class="success-message"></div>
+        <div id="errorMessage" class="error-message"></div>
+
+        <div class="section">
+            <h2>Server</h2>
+            <div class="form-group">
+                <label for="port">Port</label>
+                <input type="number" id="port" min="1" max="65535" value="5600">
+                <div class="help-text">The port on which the ActivityWatch server will run (default: 5600)</div>
+            </div>
+        </div>
+
+        <div class="section">
+            <h2>Discovery Paths</h2>
+            <p class="help-text">Directories where ActivityWatch will search for watcher modules</p>
+            <ul id="pathList" class="path-list"></ul>
+            <button id="addPathBtn" class="secondary">Add Directory</button>
+        </div>
+
+        <div class="section">
+            <h2>Autostart</h2>
+            <div class="checkbox-group">
+                <input type="checkbox" id="autostartEnabled">
+                <label for="autostartEnabled">Launch ActivityWatch on system startup</label>
+            </div>
+            <div class="checkbox-group">
+                <input type="checkbox" id="autostartMinimized">
+                <label for="autostartMinimized">Start minimized (without showing the dashboard)</label>
+            </div>
+        </div>
+
+        <div class="section">
+            <h2>Autostart Modules</h2>
+            <p class="help-text">Modules that will automatically start when ActivityWatch launches</p>
+            <ul id="moduleList" class="module-list"></ul>
+            <div class="form-group" style="margin-top: 15px;">
+                <label for="newModuleName">Add Module</label>
+                <input type="text" id="newModuleName" placeholder="e.g., aw-watcher-web">
+                <div style="margin-top: 8px;">
+                    <label for="newModuleArgs">Arguments (optional)</label>
+                    <input type="text" id="newModuleArgs" placeholder="e.g., --port 8080">
+                </div>
+                <button id="addModuleBtn" class="secondary" style="margin-top: 10px;">Add Module</button>
+            </div>
+        </div>
+
+        <div class="button-group">
+            <button id="saveBtn">Save Settings</button>
+            <button id="cancelBtn" class="secondary">Cancel</button>
+        </div>
+    </div>
+
+    <script>
+        const isTauri = !!(window.__TAURI__ && window.__TAURI__.core);
+        const { invoke } = isTauri ? window.__TAURI__.core : { invoke: null };
+
+        // API Abstraction
+        const api = {
+            async getConfig() {
+                if (isTauri) {
+                    return await invoke('get_config_data');
+                } else {
+                    const response = await fetch('/api/config');
+                    if (!response.ok) throw new Error('Failed to fetch config');
+                    return await response.json();
+                }
+            },
+            async updateConfig(newConfig) {
+                if (isTauri) {
+                    return await invoke('update_config', { newConfig });
+                } else {
+                    const response = await fetch('/api/config', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(newConfig)
+                    });
+                    if (!response.ok) throw new Error('Failed to update config');
+                    return;
+                }
+            },
+            async selectDirectory() {
+                if (isTauri) {
+                    return await invoke('select_directory');
+                } else {
+                    const response = await fetch('/api/select_directory', { method: 'POST' });
+                    if (!response.ok) throw new Error('Failed to select directory');
+                    return await response.json();
+                }
+            },
+            close() {
+                if (isTauri) {
+                    window.__TAURI__.window.getCurrent().close();
+                } else {
+                    showError('Cannot close window in browser mode.');
+                }
+            }
+        };
+
+        let currentConfig = null;
+
+        async function loadConfig() {
+            try {
+                currentConfig = await api.getConfig();
+
+                // Populate form
+                document.getElementById('port').value = currentConfig.port;
+                document.getElementById('autostartEnabled').checked = currentConfig.autostart.enabled;
+                document.getElementById('autostartMinimized').checked = currentConfig.autostart.minimized;
+
+                // Populate paths
+                renderPaths();
+
+                // Populate modules
+                renderModules();
+            } catch (error) {
+                showError('Failed to load configuration: ' + error);
+            }
+        }
+
+        function renderPaths() {
+            const pathList = document.getElementById('pathList');
+            pathList.innerHTML = '';
+
+            if (currentConfig.discovery_paths) {
+                currentConfig.discovery_paths.forEach((path, index) => {
+                    const li = document.createElement('li');
+                    li.className = 'path-item';
+                    li.innerHTML = `
+                        <code>${path}</code>
+                        <button class="danger" onclick="removePath(${index})">Remove</button>
+                    `;
+                    pathList.appendChild(li);
+                });
+            }
+        }
+
+        function renderModules() {
+            const moduleList = document.getElementById('moduleList');
+            moduleList.innerHTML = '';
+
+            if (currentConfig.autostart && currentConfig.autostart.modules) {
+                currentConfig.autostart.modules.forEach((module, index) => {
+                    const li = document.createElement('li');
+                    li.className = 'module-item';
+
+                    const moduleName = typeof module === 'string' ? module : module.name;
+                    const moduleArgs = typeof module === 'string' ? '' : (module.args || '');
+
+                    li.innerHTML = `
+                        <div class="module-info">
+                            <div class="module-name">${moduleName}</div>
+                            ${moduleArgs ? `<div class="module-args">Args: ${moduleArgs}</div>` : ''}
+                        </div>
+                        <button class="danger" onclick="removeModule(${index})">Remove</button>
+                    `;
+                    moduleList.appendChild(li);
+                });
+            }
+        }
+
+        async function addPath() {
+            try {
+                const path = await api.selectDirectory();
+                if (path) {
+                    currentConfig.discovery_paths.push(path);
+                    renderPaths();
+                }
+            } catch (error) {
+                showError('Failed to select directory: ' + error);
+            }
+        }
+
+        function removePath(index) {
+            currentConfig.discovery_paths.splice(index, 1);
+            renderPaths();
+        }
+
+        function addModule() {
+            const name = document.getElementById('newModuleName').value.trim();
+            const args = document.getElementById('newModuleArgs').value.trim();
+
+            if (!name) {
+                showError('Please enter a module name');
+                return;
+            }
+
+            const module = args ? { name, args } : name;
+            currentConfig.autostart.modules.push(module);
+
+            document.getElementById('newModuleName').value = '';
+            document.getElementById('newModuleArgs').value = '';
+
+            renderModules();
+        }
+
+        function removeModule(index) {
+            currentConfig.autostart.modules.splice(index, 1);
+            renderModules();
+        }
+
+        async function saveConfig() {
+            try {
+                // Update config from form
+                currentConfig.port = parseInt(document.getElementById('port').value);
+                currentConfig.autostart.enabled = document.getElementById('autostartEnabled').checked;
+                currentConfig.autostart.minimized = document.getElementById('autostartMinimized').checked;
+
+                // Save config
+                await api.updateConfig(currentConfig);
+
+                showSuccess('Settings saved successfully! Restart ActivityWatch for changes to take full effect.');
+            } catch (error) {
+                showError('Failed to save settings: ' + error);
+            }
+        }
+
+        function showSuccess(message) {
+            const el = document.getElementById('successMessage');
+            el.textContent = message;
+            el.style.display = 'block';
+            document.getElementById('errorMessage').style.display = 'none';
+
+            setTimeout(() => {
+                el.style.display = 'none';
+            }, 5000);
+        }
+
+        function showError(message) {
+            const el = document.getElementById('errorMessage');
+            el.textContent = message;
+            el.style.display = 'block';
+            document.getElementById('successMessage').style.display = 'none';
+        }
+
+        function closeWindow() {
+            api.close();
+        }
+
+        // Event listeners
+        document.getElementById('addPathBtn').addEventListener('click', addPath);
+        document.getElementById('addModuleBtn').addEventListener('click', addModule);
+        document.getElementById('saveBtn').addEventListener('click', saveConfig);
+        document.getElementById('cancelBtn').addEventListener('click', closeWindow);
+
+        // Allow adding module with Enter key
+        document.getElementById('newModuleName').addEventListener('keypress', (e) => {
+            if (e.key === 'Enter') addModule();
+        });
+        document.getElementById('newModuleArgs').addEventListener('keypress', (e) => {
+            if (e.key === 'Enter') addModule();
+        });
+
+        // Load config on page load
+        loadConfig();
+    </script>
+</body>
+
+</html>

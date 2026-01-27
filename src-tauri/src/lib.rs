@@ -1,6 +1,12 @@
 use aw_server::endpoints::build_rocket;
 use lazy_static::lazy_static;
 use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
+use rocket::{
+    fairing::{Fairing, Info, Kind},
+    http::{Header, Status},
+    serde::json::Json,
+    Request, Response, State,
+};
 use serde::{Deserialize, Serialize};
 use std::env;
 use std::fs::{create_dir_all, read_to_string, remove_file, write, OpenOptions};
@@ -279,14 +285,14 @@ impl ModuleEntry {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AutostartConfig {
     pub enabled: bool,
     pub minimized: bool,
     pub modules: Vec<ModuleEntry>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UserConfig {
     pub port: u16,
     pub discovery_paths: Vec<PathBuf>,
@@ -380,7 +386,219 @@ pub(crate) fn get_config() -> &'static UserConfig {
     })
 }
 
+// Config management commands
+#[tauri::command]
+fn get_config_data() -> UserConfig {
+    get_config().clone()
+}
+
+#[tauri::command]
+fn update_config(new_config: UserConfig, app: tauri::AppHandle) -> Result<(), String> {
+    let config_path = get_config_path();
+
+    // Write the new config
+    log::info!("Writing config to {:?}", config_path);
+    write_formatted_config(&new_config, &config_path)
+        .map_err(|e| format!("Failed to write config: {}", e))?;
+
+    // Update autostart based on new config
+    let autostart_manager = app.autolaunch();
+    match new_config.autostart.enabled {
+        true => {
+            if !autostart_manager
+                .is_enabled()
+                .map_err(|e| format!("Failed to get autostart state: {}", e))?
+            {
+                autostart_manager
+                    .enable()
+                    .map_err(|e| format!("Failed to enable autostart: {}", e))?;
+                info!("Autostart enabled");
+            }
+        }
+        false => {
+            autostart_manager
+                .disable()
+                .map_err(|e| format!("Failed to disable autostart: {}", e))?;
+            info!("Autostart disabled");
+        }
+    }
+
+    Ok(())
+}
+
+#[tauri::command]
+async fn select_directory() -> Result<Option<String>, String> {
+    use tauri_plugin_dialog::DialogExt;
+
+    let app = &*get_app_handle().lock().expect("Failed to get app handle");
+
+    let (tx, rx) = std::sync::mpsc::channel();
+
+    app.dialog().file().pick_folder(move |folder_path| {
+        tx.send(folder_path.map(|p| p.to_string())).ok();
+    });
+
+    rx.recv()
+        .map_err(|e| format!("Failed to receive folder selection: {}", e))
+}
+
+#[tauri::command]
+fn open_settings_window(app: tauri::AppHandle) -> Result<(), String> {
+    use tauri::Manager;
+
+    // Check if settings window already exists
+    if let Some(window) = app.get_webview_window("settings") {
+        window
+            .show()
+            .map_err(|e| format!("Failed to show settings window: {}", e))?;
+        window
+            .set_focus()
+            .map_err(|e| format!("Failed to focus settings window: {}", e))?;
+        return Ok(());
+    }
+
+    // Read the settings HTML file and encode as data URL
+    let settings_html = include_str!("../../settings.html");
+    let data_url = format!(
+        "data:text/html;charset=utf-8,{}",
+        urlencoding::encode(settings_html)
+    );
+
+    // Create new settings window with embedded HTML
+    tauri::WebviewWindowBuilder::new(
+        &app,
+        "settings",
+        tauri::WebviewUrl::External(
+            data_url
+                .parse()
+                .map_err(|e| format!("Failed to parse URL: {}", e))?,
+        ),
+    )
+    .title("ActivityWatch Settings")
+    .inner_size(600.0, 700.0)
+    .resizable(true)
+    .build()
+    .map_err(|e| format!("Failed to create settings window: {}", e))?;
+
+    Ok(())
+}
+
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
+
+struct SettingsServerState {
+    app: AppHandle,
+}
+
+#[rocket::get("/")]
+fn index() -> rocket::response::content::RawHtml<&'static str> {
+    rocket::response::content::RawHtml(include_str!("../../settings.html"))
+}
+
+#[rocket::get("/settings.html")]
+fn settings_html() -> rocket::response::content::RawHtml<&'static str> {
+    index()
+}
+
+#[rocket::get("/api/config")]
+fn get_config_api() -> Json<UserConfig> {
+    Json(get_config().clone())
+}
+
+#[rocket::post("/api/config", data = "<config>")]
+fn update_config_api(
+    config: Json<UserConfig>,
+    state: &State<SettingsServerState>,
+) -> Result<(), (Status, String)> {
+    log::info!("Updating config via API");
+    match update_config(config.into_inner(), state.app.clone()) {
+        Ok(_) => Ok(()),
+        Err(e) => {
+            log::error!("Failed to update config: {}", e);
+            Err((Status::InternalServerError, e))
+        }
+    }
+}
+
+#[rocket::post("/api/select_directory")]
+async fn select_directory_api(
+    _state: &State<SettingsServerState>,
+) -> Result<Json<Option<String>>, String> {
+    let app_handle_mutex = get_app_handle();
+    let app_locked = app_handle_mutex.lock().expect("Failed to get app handle");
+
+    let (tx, rx) = std::sync::mpsc::channel();
+
+    app_locked.dialog().file().pick_folder(move |folder_path| {
+        tx.send(folder_path.map(|p| p.to_string())).ok();
+    });
+
+    // Wait for the response (blocking the rocket thread)
+    match rx.recv() {
+        Ok(res) => Ok(Json(res)),
+        Err(e) => Err(format!("Failed to receive folder selection: {}", e)),
+    }
+}
+
+pub struct CORS;
+
+#[rocket::async_trait]
+impl Fairing for CORS {
+    fn info(&self) -> Info {
+        Info {
+            name: "Add CORS headers to responses",
+            kind: Kind::Response,
+        }
+    }
+
+    async fn on_response<'r>(&self, _request: &'r Request<'_>, response: &mut Response<'r>) {
+        response.set_header(Header::new("Access-Control-Allow-Origin", "*"));
+        response.set_header(Header::new(
+            "Access-Control-Allow-Methods",
+            "POST, GET, PATCH, OPTIONS",
+        ));
+        response.set_header(Header::new("Access-Control-Allow-Headers", "*"));
+        response.set_header(Header::new("Access-Control-Allow-Credentials", "true"));
+    }
+}
+
+#[rocket::options("/<_..>")]
+fn all_options() {
+    /* Intentionally left empty */
+}
+
+fn start_settings_server(app: AppHandle) {
+    thread::spawn(move || {
+        let config = rocket::Config {
+            port: 5601,
+            address: "127.0.0.1".parse().unwrap(),
+            ..rocket::Config::default()
+        };
+
+        let rocket = rocket::custom(config)
+            .manage(SettingsServerState { app })
+            .mount(
+                "/",
+                rocket::routes![
+                    index,
+                    settings_html,
+                    get_config_api,
+                    update_config_api,
+                    select_directory_api,
+                    all_options
+                ],
+            )
+            .attach(CORS);
+
+        // Create a new runtime for Rocket
+        let rt = tokio::runtime::Runtime::new().expect("Failed to create Rocket runtime");
+        rt.block_on(async {
+            if let Err(e) = rocket.launch().await {
+                log::error!("Rocket server failed: {}", e);
+            }
+        });
+    });
+}
+
 #[tauri::command]
 fn greet(name: &str) -> String {
     format!("Hello, {}! You've been greeted from Rust!", name)
@@ -507,13 +725,18 @@ pub fn run() {
                     .expect("Error navigating main window");
                 let manager_state = manager::start_manager();
 
+                // Start settings server
+                start_settings_server(app.handle().clone());
+
                 let open = MenuItem::with_id(app, "open", "Open Dashboard", true, None::<&str>)
                     .expect("Failed to create open menu item");
+                let settings = MenuItem::with_id(app, "settings", "Settings", true, None::<&str>)
+                    .expect("Failed to create settings menu item");
                 let quit = MenuItem::with_id(app, "quit", "Quit ActivityWatch", true, None::<&str>)
                     .expect("Failed to create quit menu item");
 
-                let menu =
-                    Menu::with_items(app, &[&open, &quit]).expect("Failed to create tray menu");
+                let menu = Menu::with_items(app, &[&open, &settings, &quit])
+                    .expect("Failed to create tray menu");
 
                 #[cfg(not(target_os = "windows"))]
                 let tray_builder = TrayIconBuilder::new()
@@ -545,6 +768,11 @@ pub fn run() {
                         let window = windows.get("main").expect("Main window not found");
                         window.show().expect("Failed to show window");
                         window.set_focus().expect("Failed to focus window");
+                    } else if event.id().0 == "settings" {
+                        trace!("settings clicked!");
+                        if let Err(e) = open_settings_window(app.clone()) {
+                            warn!("Failed to open settings window: {}", e);
+                        }
                     } else if event.id().0 == "quit" {
                         trace!("quit clicked!");
                         let mut state = manager_state
@@ -590,7 +818,13 @@ pub fn run() {
             };
         })
         .plugin(tauri_plugin_shell::init())
-        .invoke_handler(tauri::generate_handler![greet])
+        .invoke_handler(tauri::generate_handler![
+            greet,
+            get_config_data,
+            update_config,
+            select_directory,
+            open_settings_window
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
