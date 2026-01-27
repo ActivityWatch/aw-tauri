@@ -540,15 +540,14 @@ fn start_generic_module_thread(
 
         // Create pipe for Unix parent death detection
         #[cfg(unix)]
-        let pipe_read_fd = match pipe() {
-            Ok((read_fd, _write_fd)) => {
+        let (pipe_read_fd, _pipe_write_keeper) = match pipe() {
+            Ok((read_fd, write_fd)) => {
                 // read_fd is read end, write_fd stays open in parent and auto-closes when parent dies
-                use std::os::unix::io::AsRawFd;
-                read_fd.as_raw_fd()
+                (read_fd.as_raw_fd(), Some(std::fs::File::from(write_fd)))
             }
             Err(e) => {
                 error!("Failed to create pipe for parent monitoring: {}", e);
-                -1 // Use -1 to indicate pipe creation failed
+                (-1, None)
             }
         };
 
@@ -657,15 +656,16 @@ fn start_notify_module_thread(
         };
 
         // Create pipe for Unix parent death detection
+        // Create pipe for Unix parent death detection
         #[cfg(unix)]
-        let pipe_read_fd = match pipe() {
-            Ok((read_fd, _write_fd)) => {
+        let (pipe_read_fd, _pipe_write_keeper) = match pipe() {
+            Ok((read_fd, write_fd)) => {
                 // read_fd is read end, write_fd stays open in parent and auto-closes when parent dies
-                read_fd.as_raw_fd()
+                (read_fd.as_raw_fd(), Some(std::fs::File::from(write_fd)))
             }
             Err(e) => {
                 error!("Failed to create pipe for parent monitoring: {}", e);
-                -1 // Use -1 to indicate pipe creation failed
+                (-1, None)
             }
         };
 
@@ -802,6 +802,31 @@ fn start_notify_module_thread(
 
         // Wait for the child to exit
         let output = child.wait_with_output().expect("Failed to wait on child");
+
+        // Check if the process failed due to unsupported --output-only flag
+        // Exit code 2 is commonly used by clap/click for argument errors
+        if output.status.code() == Some(2) {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            if stderr.contains("No such option: --output-only") {
+                info!("aw-notify module doesn't support --output-only, falling back to default behavior");
+
+                // Clean up job handle before fallback
+                #[cfg(windows)]
+                if let Some(handle) = job_handle {
+                    unsafe {
+                        CloseHandle(handle);
+                    }
+                }
+                #[cfg(unix)]
+                if pipe_read_fd >= 0 {
+                    let _ = close(pipe_read_fd);
+                }
+
+                // Fallback to generic module handler
+                start_generic_module_thread(name, path, custom_args, tx);
+                return;
+            }
+        }
 
         // Clean up job handle on Windows
         #[cfg(windows)]
