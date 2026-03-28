@@ -13,7 +13,7 @@ use {
     nix::sys::signal::{self, Signal},
     nix::unistd::{close, pipe, read, Pid},
     std::os::unix::fs::PermissionsExt,
-    std::os::unix::io::AsRawFd,
+    std::os::unix::io::IntoRawFd,
 };
 #[cfg(windows)]
 use {
@@ -543,7 +543,7 @@ fn start_generic_module_thread(
         let (pipe_read_fd, _pipe_write_keeper) = match pipe() {
             Ok((read_fd, write_fd)) => {
                 // read_fd is read end, write_fd stays open in parent and auto-closes when parent dies
-                (read_fd.as_raw_fd(), Some(std::fs::File::from(write_fd)))
+                (read_fd.into_raw_fd(), Some(std::fs::File::from(write_fd)))
             }
             Err(e) => {
                 error!("Failed to create pipe for parent monitoring: {}", e);
@@ -661,7 +661,7 @@ fn start_notify_module_thread(
         let (pipe_read_fd, _pipe_write_keeper) = match pipe() {
             Ok((read_fd, write_fd)) => {
                 // read_fd is read end, write_fd stays open in parent and auto-closes when parent dies
-                (read_fd.as_raw_fd(), Some(std::fs::File::from(write_fd)))
+                (read_fd.into_raw_fd(), Some(std::fs::File::from(write_fd)))
             }
             Err(e) => {
                 error!("Failed to create pipe for parent monitoring: {}", e);
