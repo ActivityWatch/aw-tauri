@@ -207,6 +207,7 @@ pub fn listen_for_lockfile() {
             loop {
                 match watcher.wait_for_file() {
                     Ok(()) => {
+                        log::info!("Lock file detected");
                         remove_file(get_runtime_path().join("single_instance.lock"))
                             .expect("Failed to remove lock file");
                         let app = &*get_app_handle().lock().expect("Failed to get app handle");
