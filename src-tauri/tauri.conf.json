@@ -18,13 +18,6 @@
       "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.ico"
-    ],
-    "resources": {
-      "../../dist/activitywatch/aw-server-rust": "modules/aw-server-rust",
-      "../../dist/activitywatch/aw-watcher-afk": "modules/aw-watcher-afk",
-      "../../dist/activitywatch/aw-watcher-window": "modules/aw-watcher-window",
-      "../../dist/activitywatch/aw-watcher-input": "modules/aw-watcher-input",
-      "../../dist/activitywatch/aw-notify": "modules/aw-notify"
-    }
+    ]
   }
 }
