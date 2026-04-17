@@ -42,7 +42,7 @@ use tauri::{
     menu::{Menu, MenuItem},
     tray::{TrayIconBuilder, TrayIconId},
     webview::WebviewWindowBuilder,
-    AppHandle, Manager,
+    AppHandle, Manager, Url,
 };
 
 pub struct AppHandleWrapper(Mutex<AppHandle>);
@@ -189,6 +189,17 @@ pub fn handle_first_run() {
             }
         });
     }
+}
+
+fn build_dashboard_url(port: u16, api_key: Option<&str>) -> Url {
+    let mut url =
+        Url::parse(&format!("http://localhost:{port}/")).expect("Failed to parse localhost url");
+
+    if let Some(api_key) = api_key.filter(|key| !key.is_empty()) {
+        url.query_pairs_mut().append_pair("token", api_key);
+    }
+
+    url
 }
 
 pub fn listen_for_lockfile() {
@@ -538,22 +549,31 @@ pub fn run() {
                 if testing {
                     info!("Running in testing mode (port {})", port);
                 }
+                let dashboard_api_key = aw_config
+                    .auth
+                    .api_key
+                    .as_deref()
+                    .filter(|key| !key.is_empty());
+                if dashboard_api_key.is_some() {
+                    info!("Bootstrapping aw-webui API token into dashboard URL");
+                }
+                let dashboard_url = build_dashboard_url(port, dashboard_api_key);
                 tauri::async_runtime::spawn(build_rocket(server_state, aw_config).launch());
-                let url = format!("http://localhost:{}/", port)
-                    .parse()
-                    .expect("Failed to parse localhost url");
                 // Create main window programmatically to attach initialization script.
                 // The script intercepts clicks on external links and opens them in the system
                 // browser via the open_external Tauri command. This approach works reliably for
                 // SPA-generated links where on_navigation (which only fires for top-level
                 // webview navigations) would miss JS-driven internal route changes.
-                let _main_window =
-                    WebviewWindowBuilder::new(app, "main", tauri::WebviewUrl::External(url))
-                        .title("aw-tauri")
-                        .inner_size(800.0, 600.0)
-                        .visible(false)
-                        .initialization_script(
-                            r#"
+                let _main_window = WebviewWindowBuilder::new(
+                    app,
+                    "main",
+                    tauri::WebviewUrl::External(dashboard_url),
+                )
+                .title("aw-tauri")
+                .inner_size(800.0, 600.0)
+                .visible(false)
+                .initialization_script(
+                    r#"
                     document.addEventListener('click', function(e) {
                         var el = e.target;
                         while (el && el.tagName !== 'A') { el = el.parentElement; }
@@ -564,9 +584,9 @@ pub fn run() {
                         }
                     }, true);
                     "#,
-                        )
-                        .build()
-                        .expect("Failed to create main window");
+                )
+                .build()
+                .expect("Failed to create main window");
                 let manager_state = manager::start_manager();
 
                 let open = MenuItem::with_id(app, "open", "Open Dashboard", true, None::<&str>)
@@ -655,4 +675,33 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![greet, open_external])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::build_dashboard_url;
+
+    #[test]
+    fn build_dashboard_url_omits_token_when_auth_disabled() {
+        assert_eq!(
+            build_dashboard_url(5600, None).as_str(),
+            "http://localhost:5600/"
+        );
+    }
+
+    #[test]
+    fn build_dashboard_url_ignores_empty_api_keys() {
+        assert_eq!(
+            build_dashboard_url(5600, Some("")).as_str(),
+            "http://localhost:5600/"
+        );
+    }
+
+    #[test]
+    fn build_dashboard_url_appends_encoded_token() {
+        assert_eq!(
+            build_dashboard_url(5600, Some("secret+ /?=&")).as_str(),
+            "http://localhost:5600/?token=secret%2B+%2F%3F%3D%26"
+        );
+    }
 }
