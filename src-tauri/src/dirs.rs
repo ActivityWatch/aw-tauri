@@ -186,12 +186,24 @@ pub fn get_discovery_paths() -> Vec<PathBuf> {
         if let Ok(home_dir) = std::env::var("HOME") {
             discovery_paths.push(PathBuf::from(home_dir).join("aw-modules"));
         }
-        discovery_paths.push(PathBuf::from(
-            "/Applications/ActivityWatch.app/Contents/MacOS",
-        ));
-        discovery_paths.push(PathBuf::from(
-            "/Applications/ActivityWatch.app/Contents/Resources",
-        ));
+        // Detect if running inside a .app bundle dynamically via the executable path.
+        // This replaces the previous hardcoded /Applications/ActivityWatch.app paths,
+        // which broke for non-standard install locations (e.g. ~/Downloads, CI artifacts).
+        //
+        // Structure: Contents/MacOS/aw-tauri -> go up two levels -> Contents/Resources
+        if let Ok(exe_path) = std::env::current_exe() {
+            if let Some(contents_dir) = exe_path.parent().and_then(|p| p.parent()) {
+                let resources_dir = contents_dir.join("Resources");
+                if resources_dir.exists() {
+                    // Running inside a macOS .app bundle.
+                    // Modules bundled via tauri.conf.json `bundle.resources` land in Resources/modules/.
+                    discovery_paths.push(resources_dir.join("modules"));
+                    // Also include Resources/ directly for compatibility with modules placed
+                    // at the root (e.g. legacy build_app_tauri.sh layout).
+                    discovery_paths.push(resources_dir.clone());
+                }
+            }
+        }
     }
 
     #[cfg(target_os = "android")]
