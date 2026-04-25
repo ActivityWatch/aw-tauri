@@ -19,10 +19,11 @@ lazy_static! {
 
 #[cfg(not(target_os = "android"))]
 pub fn get_config_dir() -> Result<PathBuf, ()> {
-    let mut dir = dirs::config_dir().ok_or(())?;
-    dir.push("activitywatch");
-    dir.push("aw-tauri");
-    fs::create_dir_all(dir.clone()).expect("Unable to create config dir");
+    let dir = dirs::config_dir()
+        .ok_or(())?
+        .join("activitywatch")
+        .join("aw-tauri");
+    fs::create_dir_all(&dir).expect("Unable to create config dir");
     Ok(dir)
 }
 
@@ -33,37 +34,43 @@ pub fn get_config_dir() -> Result<PathBuf, ()> {
 
 #[cfg(not(target_os = "android"))]
 pub fn get_data_dir() -> Result<PathBuf, ()> {
-    let mut dir = dirs::data_dir().ok_or(())?;
-    dir.push("activitywatch");
-    dir.push("aw-tauri");
-    fs::create_dir_all(dir.clone()).expect("Unable to create data dir");
+    let dir = dirs::data_dir()
+        .ok_or(())?
+        .join("activitywatch")
+        .join("aw-tauri");
+    fs::create_dir_all(&dir).expect("Unable to create data dir");
     Ok(dir)
 }
 
 #[cfg(target_os = "android")]
 pub fn get_data_dir() -> Result<PathBuf, ()> {
-    Ok(ANDROID_DATA_DIR.lock()..expect("Unable to create data dir").to_path_buf())
+    Ok(ANDROID_DATA_DIR
+        .lock()
+        .expect("Unable to create data dir")
+        .to_path_buf())
 }
 
 #[cfg(all(not(target_os = "android"), target_os = "linux"))]
 pub fn get_log_dir() -> Result<PathBuf, ()> {
     // Linux uses cache dir for logs
-    let mut dir = dirs::cache_dir().ok_or(())?;
-    dir.push("activitywatch");
-    dir.push("aw-tauri");
-    dir.push("log");
-    fs::create_dir_all(dir.clone()).expect("Unable to create log dir");
+    let dir = dirs::cache_dir()
+        .ok_or(())?
+        .join("activitywatch")
+        .join("aw-tauri")
+        .join("log");
+    fs::create_dir_all(&dir).expect("Unable to create log dir");
     Ok(dir)
 }
 
 #[cfg(target_os = "windows")]
 pub fn get_log_dir() -> Result<PathBuf, ()> {
     // Windows: %LOCALAPPDATA%\activitywatch\Logs\aw-tauri
-    let mut dir = dirs::data_local_dir().ok_or(())?;
-    dir.push("activitywatch");
-    dir.push("Logs");
-    dir.push("aw-tauri");
-    fs::create_dir_all(dir.clone()).expect("Unable to create log dir");
+    let dir = dirs::data_local_dir()
+        .ok_or(())?
+        .join("activitywatch")
+        .join("Logs")
+        .join("aw-tauri");
+    fs::create_dir_all(&dir).expect("Unable to create log dir");
     Ok(dir)
 }
 
@@ -74,12 +81,13 @@ pub fn get_log_dir() -> Result<PathBuf, ()> {
 ))]
 pub fn get_log_dir() -> Result<PathBuf, ()> {
     // macOS: ~/Library/Logs/activitywatch/aw-tauri
-    let mut dir = dirs::home_dir().ok_or(())?;
-    dir.push("Library");
-    dir.push("Logs");
-    dir.push("activitywatch");
-    dir.push("aw-tauri");
-    fs::create_dir_all(dir.clone()).expect("Unable to create log dir");
+    let dir = dirs::home_dir()
+        .ok_or(())?
+        .join("Library")
+        .join("Logs")
+        .join("activitywatch")
+        .join("aw-tauri");
+    fs::create_dir_all(&dir).expect("Unable to create log dir");
     Ok(dir)
 }
 
@@ -89,33 +97,34 @@ pub fn get_log_dir() -> Result<PathBuf, ()> {
 }
 
 pub fn get_config_path() -> PathBuf {
-    let mut path = get_config_dir().expect("Failed to get config dir");
-    path.push("config.toml");
-    path
+    get_config_dir()
+        .expect("Failed to get config dir")
+        .join("config.toml")
 }
 
 pub fn get_log_path() -> PathBuf {
-    let mut path = get_log_dir().expect("Failed to get log dir");
-    path.push("aw-tauri.log");
-    path
+    get_log_dir()
+        .expect("Failed to get log dir")
+        .join("aw-tauri.log")
 }
 
 #[cfg(target_os = "linux")]
 pub fn get_runtime_dir() -> PathBuf {
     // Linux: use XDG_RUNTIME_DIR or fallback to cache dir
     if let Ok(runtime_dir) = std::env::var("XDG_RUNTIME_DIR") {
-        let mut dir = PathBuf::from(runtime_dir);
-        dir.push("activitywatch");
-        dir.push("aw-tauri");
-        if let Ok(_) = fs::create_dir_all(dir.clone()) {
+        let dir = PathBuf::from(runtime_dir)
+            .join("activitywatch")
+            .join("aw-tauri");
+        if let Ok(_) = fs::create_dir_all(&dir) {
             return dir;
         }
     }
     // Fallback to cache dir
-    let mut dir = dirs::cache_dir().unwrap_or_else(|| PathBuf::from("/tmp"));
-    dir.push("activitywatch");
-    dir.push("aw-tauri");
-    let _ = fs::create_dir_all(dir.clone());
+    let dir = dirs::cache_dir()
+        .unwrap_or_else(|| PathBuf::from("/tmp"))
+        .join("activitywatch")
+        .join("aw-tauri");
+    let _ = fs::create_dir_all(&dir);
     dir
 }
 
