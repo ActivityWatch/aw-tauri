@@ -90,3 +90,50 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           args: ${{ matrix.args }}
+
+      - name: Upload Linux artifacts (AppImage)
+        if: startsWith(matrix.platform, 'ubuntu')
+        uses: actions/upload-artifact@v4
+        with:
+          name: aw-tauri-linux-${{ matrix.platform }}-appimage
+          path: src-tauri/target/release/bundle/appimage/*.AppImage
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Upload Linux artifacts (deb)
+        if: startsWith(matrix.platform, 'ubuntu')
+        uses: actions/upload-artifact@v4
+        with:
+          name: aw-tauri-linux-${{ matrix.platform }}-deb
+          path: src-tauri/target/release/bundle/deb/*.deb
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Upload macOS artifacts
+        if: matrix.platform == 'macos-latest'
+        uses: actions/upload-artifact@v4
+        with:
+          name: aw-tauri-macos
+          path: src-tauri/target/release/bundle/dmg/*.dmg
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Upload Windows artifacts
+        if: matrix.platform == 'windows-latest'
+        uses: actions/upload-artifact@v4
+        with:
+          name: aw-tauri-windows-${{ matrix.platform }}
+          path: |
+            src-tauri/target/release/bundle/msi/*.msi
+            src-tauri/target/release/bundle/nsis/*.exe
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Upload Windows ARM64 artifacts
+        if: matrix.platform == 'windows-11-arm'
+        uses: actions/upload-artifact@v4
+        with:
+          name: aw-tauri-windows-${{ matrix.platform }}
+          path: src-tauri/target/aarch64-pc-windows-msvc/release/bundle/msi/*.msi
+          if-no-files-found: warn
+          retention-days: 14

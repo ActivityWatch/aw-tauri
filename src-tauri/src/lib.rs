@@ -577,7 +577,7 @@ pub fn run() {
                     document.addEventListener('click', function(e) {
                         var el = e.target;
                         while (el && el.tagName !== 'A') { el = el.parentElement; }
-                        if (el && el.href && !/^(http:\/\/localhost|tauri:|about:)/.test(el.href)) {
+                        if (el && el.href && !/^(https?:\/\/(localhost|127\.0\.0\.1)|tauri:|about:)/.test(el.href)) {
                             e.preventDefault();
                             e.stopPropagation();
                             window.__TAURI_INTERNALS__.invoke('open_external', { url: el.href });
