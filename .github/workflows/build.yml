@@ -93,7 +93,7 @@ jobs:
 
       - name: Upload Linux artifacts (AppImage)
         if: startsWith(matrix.platform, 'ubuntu')
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: aw-tauri-linux-${{ matrix.platform }}-appimage
           path: src-tauri/target/release/bundle/appimage/*.AppImage
@@ -102,7 +102,7 @@ jobs:
 
       - name: Upload Linux artifacts (deb)
         if: startsWith(matrix.platform, 'ubuntu')
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: aw-tauri-linux-${{ matrix.platform }}-deb
           path: src-tauri/target/release/bundle/deb/*.deb
@@ -111,7 +111,7 @@ jobs:
 
       - name: Upload macOS artifacts
         if: matrix.platform == 'macos-latest'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: aw-tauri-macos
           path: src-tauri/target/release/bundle/dmg/*.dmg
@@ -120,7 +120,7 @@ jobs:
 
       - name: Upload Windows artifacts
         if: matrix.platform == 'windows-latest'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: aw-tauri-windows-${{ matrix.platform }}
           path: |
@@ -131,7 +131,7 @@ jobs:
 
       - name: Upload Windows ARM64 artifacts
         if: matrix.platform == 'windows-11-arm'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: aw-tauri-windows-${{ matrix.platform }}
           path: src-tauri/target/aarch64-pc-windows-msvc/release/bundle/msi/*.msi
