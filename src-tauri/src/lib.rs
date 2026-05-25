@@ -17,6 +17,7 @@ use tauri_plugin_autostart::{MacosLauncher, ManagerExt};
 use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
 use tauri_plugin_notification::NotificationExt;
 use tauri_plugin_opener::OpenerExt;
+use tauri_plugin_updater::UpdaterExt;
 
 mod dirs;
 mod logging;
@@ -681,6 +682,7 @@ pub fn run() {
     }
 
     tauri::Builder::default()
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_dialog::init())
@@ -904,6 +906,48 @@ pub fn run() {
 
             handle_first_run();
             listen_for_lockfile();
+
+            // Check for updates in the background
+            let handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                match handle.updater() {
+                    Ok(updater) => match updater.check().await {
+                        Ok(Some(update)) => {
+                            let app_handle = handle.clone();
+                            let body = format!(
+                                "Version {} is available. Install now?\n\nRelease notes:\n{}",
+                                update.version,
+                                update
+                                    .body
+                                    .as_deref()
+                                    .unwrap_or("No release notes available.")
+                            );
+                            app_handle
+                                .dialog()
+                                .message(body)
+                                .title("Update Available")
+                                .show(move |confirmed| {
+                                    if confirmed {
+                                        let handle2 = handle.clone();
+                                        tauri::async_runtime::spawn(async move {
+                                            if let Err(e) =
+                                                update.download_and_install(|_, _| {}, || {}).await
+                                            {
+                                                warn!("Failed to install update: {}", e);
+                                            } else {
+                                                handle2.restart();
+                                            }
+                                        });
+                                    }
+                                });
+                        }
+                        Ok(None) => info!("App is up to date."),
+                        Err(e) => warn!("Failed to check for updates: {}", e),
+                    },
+                    Err(e) => warn!("Failed to get updater: {}", e),
+                }
+            });
+
             Ok(())
         })
         .on_window_event(|window, event| {
