@@ -1,6 +1,6 @@
 [package]
 name = "aw-tauri"
-version = "0.1.3"
+version = "0.0.1"
 description = "ActivityWatch UI built with Tauri"
 authors = ["Erik Bjäreholt <erik@bjareho.lt>", "Brian Vuku <brayo@brayo.dev>"]
 license = "MPL-2.0"
