@@ -1,3 +1,5 @@
+.PHONY: build dev prebuild precommit format check package
+
 ifeq ($(shell uname -m), arm64)
 	ARCH := _arm64
 else
