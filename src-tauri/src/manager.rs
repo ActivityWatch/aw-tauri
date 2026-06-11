@@ -579,7 +579,44 @@ fn handle(
                 ModuleMessage::Stopped { name, output } => {
                     state_guard.stopped_module(&name);
                     let name_clone = name.clone();
-                    if output.status.success() {
+                    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+
+                    // Check stderr for config errors before deciding how to handle the exit.
+                    // Restarting won't fix a bad config, so we show a specific dialog and stop.
+                    let is_intentional_stop = *state_guard
+                        .modules_pending_shutdown
+                        .get(&name)
+                        .unwrap_or(&false);
+                    let config_error_msg = if !is_intentional_stop {
+                        stderr
+                            .lines()
+                            .find(|l| {
+                                l.contains("Malformed config")
+                                    || l.contains("Invalid working_hours_schedule")
+                                    || l.contains("Failed to parse config")
+                            })
+                            .map(|l| l.to_owned())
+                    } else {
+                        None
+                    };
+
+                    if let Some(err_msg) = config_error_msg {
+                        error!("Module {name} exited due to a configuration error: {err_msg}");
+                        state_guard
+                            .modules_pending_shutdown
+                            .insert(name.clone(), true);
+                        let name_for_dialog = name_clone.clone();
+                        thread::spawn(move || {
+                            let app = &*get_app_handle().lock().expect("Failed to get app handle");
+                            app.dialog()
+                                .message(format!(
+                                    "{name_for_dialog} failed to start due to a configuration error:\n\n{err_msg}\n\nPlease fix the configuration file and restart the module."
+                                ))
+                                .kind(MessageDialogKind::Error)
+                                .title("Configuration Error")
+                                .show(|_| {});
+                        });
+                    } else if output.status.success() {
                         info!("Module {name} exited successfully");
                     } else {
                         // Restart path logs up to 3 attempt lines; keep this at debug to avoid spam.
@@ -656,15 +693,14 @@ fn handle(
                                 );
                             }
                         });
+                    }
 
-                        debug!(
-                            "Module {name} stdout: {}",
-                            String::from_utf8_lossy(&output.stdout)
-                        );
-                        error!(
-                            "Module {name} stderr: {}",
-                            String::from_utf8_lossy(&output.stderr)
-                        );
+                    debug!(
+                        "Module {name} stdout: {}",
+                        String::from_utf8_lossy(&output.stdout)
+                    );
+                    if !stderr.is_empty() {
+                        error!("Module {name} stderr: {}", stderr);
                     }
                 }
                 ModuleMessage::Init {} => {}
