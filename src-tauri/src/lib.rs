@@ -177,7 +177,11 @@ fn write_formatted_config(config: &UserConfig, path: &Path) -> Result<(), std::i
         output.truncate(output.len() - 2); // Remove last comma and newline
         output.push('\n'); // Add back just the newline
     }
-    output.push_str("]\n");
+    output.push_str("]\n\n");
+
+    // Add updates section
+    output.push_str("[updates]\n");
+    output.push_str(&format!("enabled = {}\n", config.updates.enabled));
 
     // Add module_args section, for modules that aren't autostarted but still need args
     // when launched manually (e.g. from the tray menu) or restarted after a crash
@@ -362,6 +366,17 @@ pub struct AutostartConfig {
     pub modules: Vec<ModuleEntry>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpdatesConfig {
+    pub enabled: bool,
+}
+
+impl Default for UpdatesConfig {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct UserConfig {
     pub port: u16,
@@ -370,6 +385,8 @@ pub struct UserConfig {
     /// Default args by module name, applied even if the module isn't autostarted.
     #[serde(default)]
     pub module_args: BTreeMap<String, String>,
+    #[serde(default)]
+    pub updates: UpdatesConfig,
 }
 
 impl Default for UserConfig {
@@ -414,6 +431,7 @@ impl Default for UserConfig {
                 modules,
             },
             module_args: BTreeMap::new(),
+            updates: UpdatesConfig { enabled: true },
         }
     }
 }
@@ -647,6 +665,44 @@ fn open_external(url: String, app: tauri::AppHandle) {
     info!("Opening external URL in browser: {}", url);
     if let Err(e) = app.opener().open_url(&url, None::<&str>) {
         warn!("Failed to open URL in browser: {}", e);
+    }
+}
+
+/// Downloads and installs an update, logging progress in 10% increments
+/// (rather than on every chunk) to avoid flooding the log file, then
+/// restarts the app on success.
+async fn download_and_install_update(handle: AppHandle, update: tauri_plugin_updater::Update) {
+    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+
+    let downloaded = AtomicUsize::new(0);
+    let last_logged_percent = AtomicU64::new(u64::MAX);
+    let update_version = update.version.clone();
+    if let Err(e) = update
+        .download_and_install(
+            move |chunk_length, total_length| {
+                let current = downloaded.fetch_add(chunk_length, Ordering::Relaxed) + chunk_length;
+                if let Some(total) = total_length {
+                    let percent = (current as f64 / total as f64) * 100.0;
+                    let bucket = (percent as u64).min(100) / 10 * 10;
+                    let last = last_logged_percent.swap(bucket, Ordering::Relaxed);
+                    if last == u64::MAX || bucket > last {
+                        info!("Update progress: {}/{} bytes ({}%)", current, total, bucket);
+                    }
+                }
+            },
+            move || {
+                info!(
+                    "Update download finished. Installing update v{}...",
+                    update_version
+                );
+            },
+        )
+        .await
+    {
+        warn!("Failed to install update: {}", e);
+    } else {
+        info!("Update installed. Restarting...");
+        handle.restart();
     }
 }
 
@@ -910,36 +966,57 @@ pub fn run() {
             // Check for updates in the background
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
+                info!("Checking for updates...");
+                info!("Autoupdate configuration: enabled = {}", get_config().updates.enabled);
                 match handle.updater() {
                     Ok(updater) => match updater.check().await {
                         Ok(Some(update)) => {
-                            let app_handle = handle.clone();
-                            let body = format!(
-                                "Version {} is available. Install now?\n\nRelease notes:\n{}",
-                                update.version,
-                                update
-                                    .body
-                                    .as_deref()
-                                    .unwrap_or("No release notes available.")
-                            );
-                            app_handle
-                                .dialog()
-                                .message(body)
-                                .title("Update Available")
-                                .show(move |confirmed| {
-                                    if confirmed {
-                                        let handle2 = handle.clone();
-                                        tauri::async_runtime::spawn(async move {
-                                            if let Err(e) =
-                                                update.download_and_install(|_, _| {}, || {}).await
-                                            {
-                                                warn!("Failed to install update: {}", e);
-                                            } else {
-                                                handle2.restart();
-                                            }
-                                        });
-                                    }
-                                });
+                            let auto_update = get_config().updates.enabled;
+                            if auto_update {
+                                info!("Update available: {}. Downloading and installing automatically...", update.version);
+                                let handle2 = handle.clone();
+                                info!("Sending update notification for v{}...", update.version);
+                                match handle2
+                                    .notification()
+                                    .builder()
+                                    .title("ActivityWatch Update")
+                                    .body(format!("Downloading and installing update v{}...", update.version))
+                                    .show()
+                                {
+                                    Ok(_) => info!("Update notification sent."),
+                                    Err(e) => warn!("Failed to send update notification: {}", e),
+                                }
+                                tauri::async_runtime::spawn(download_and_install_update(
+                                    handle2, update,
+                                ));
+                            } else {
+                                info!("Update available: {}. Prompting user via dialog...", update.version);
+                                let app_handle = handle.clone();
+                                let body = format!(
+                                    "Version {} is available. Install now?\n\nRelease notes:\n{}",
+                                    update.version,
+                                    update
+                                        .body
+                                        .as_deref()
+                                        .unwrap_or("No release notes available.")
+                                );
+                                app_handle
+                                    .dialog()
+                                    .message(body)
+                                    .title("Update Available")
+                                    .show(move |confirmed| {
+                                        if confirmed {
+                                            info!("User accepted update to v{}. Starting download...", update.version);
+                                            let handle2 = handle.clone();
+                                            let update2 = update.clone();
+                                            tauri::async_runtime::spawn(download_and_install_update(
+                                                handle2, update2,
+                                            ));
+                                        } else {
+                                            info!("User declined the update to v{}.", update.version);
+                                        }
+                                    });
+                            }
                         }
                         Ok(None) => info!("App is up to date."),
                         Err(e) => warn!("Failed to check for updates: {}", e),
@@ -988,5 +1065,23 @@ mod tests {
             build_dashboard_url(5600, Some("secret+ /?=&")).as_str(),
             "http://localhost:5600/?token=secret%2B+%2F%3F%3D%26"
         );
+    }
+
+    #[test]
+    fn test_user_config_parsing() {
+        use super::UserConfig;
+
+        let toml_str = r#"
+            port = 5600
+            discovery_paths = []
+            [autostart]
+            enabled = true
+            minimized = false
+            modules = []
+            [updates]
+            enabled = true
+        "#;
+        let config: UserConfig = toml::from_str(toml_str).unwrap();
+        assert!(config.updates.enabled);
     }
 }
