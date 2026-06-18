@@ -5,6 +5,7 @@ use aw_server::{
 use lazy_static::lazy_static;
 use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::env;
 use std::fs::{create_dir_all, read_to_string, remove_file, write, OpenOptions};
 use std::net::{SocketAddr, TcpListener};
@@ -167,6 +168,15 @@ fn write_formatted_config(config: &UserConfig, path: &Path) -> Result<(), std::i
     }
     output.push_str("]\n");
 
+    // Add module_args section, for modules that aren't autostarted but still need args
+    // when launched manually (e.g. from the tray menu) or restarted after a crash
+    if !config.module_args.is_empty() {
+        output.push_str("\n[module_args]\n");
+        for (name, args) in &config.module_args {
+            output.push_str(&format!("\"{}\" = \"{}\"\n", name, args));
+        }
+    }
+
     write(path, output)
 }
 
@@ -288,10 +298,10 @@ impl SpecificFileWatcher {
         for result in self.rx.iter() {
             match result {
                 Ok(event) => match event.kind {
-                    EventKind::Create(_) | EventKind::Modify(_) => {
-                        if event.paths.iter().any(|p| p == &self.target_file) {
-                            return Ok(());
-                        }
+                    EventKind::Create(_) | EventKind::Modify(_)
+                        if event.paths.iter().any(|p| p == &self.target_file) =>
+                    {
+                        return Ok(());
                     }
                     _ => {}
                 },
@@ -342,6 +352,9 @@ pub struct UserConfig {
     pub port: u16,
     pub discovery_paths: Vec<PathBuf>,
     pub autostart: AutostartConfig,
+    /// Default args by module name, applied even if the module isn't autostarted.
+    #[serde(default)]
+    pub module_args: BTreeMap<String, String>,
 }
 
 impl Default for UserConfig {
@@ -385,6 +398,7 @@ impl Default for UserConfig {
                 minimized: true,
                 modules,
             },
+            module_args: BTreeMap::new(),
         }
     }
 }

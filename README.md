@@ -76,6 +76,9 @@ modules = [
   "aw-watcher-window",
   { name = "aw-sync", args = "daemon" },
 ]
+
+[module_args]
+"aw-sync" = "daemon"
 ```
 
 **Key settings:**
@@ -84,6 +87,7 @@ modules = [
 - `autostart.enabled` — Register for OS autostart on login
 - `autostart.minimized` — Start minimized to tray (if `false`, opens dashboard on launch)
 - `autostart.modules` — Modules to start automatically. Each entry can be a string (`"aw-watcher-afk"`) or an object with args (`{ name = "aw-sync", args = "daemon" }`)
+- `module_args` — Default args by module name, used when a module is launched from the tray menu or restarted after a crash. Lets you set args for a module without adding it to `autostart.modules`. If a module appears in both, the inline args on its `autostart.modules` entry take precedence.
 
 **Note:** On Linux with Wayland, the default modules are `aw-awatcher` instead of `aw-watcher-afk` + `aw-watcher-window` (auto-detected via `XDG_SESSION_TYPE` / `WAYLAND_DISPLAY`).
 

@@ -101,7 +101,7 @@ impl ManagerState {
             modules_pid: HashMap::new(),
             modules_restart_count: HashMap::new(),
             modules_pending_shutdown: HashMap::new(),
-            modules_args: HashMap::new(),
+            modules_args: configured_modules_args(),
             modules_menu_set: false,
         }
     }
@@ -122,10 +122,15 @@ impl ManagerState {
     pub fn start_module(&self, name: &str, args: Option<&Vec<String>>) {
         if !self.is_module_running(name) {
             if let Some(path) = self.modules_discovered.get(name) {
+                // Fall back to the last known (or configured) args for this module, so manual
+                // tray restarts and post-crash restarts don't silently drop them (#131).
+                let effective_args = args
+                    .cloned()
+                    .or_else(|| self.modules_args.get(name).cloned().flatten());
                 start_module_thread(
                     name.to_string(),
                     path.clone(),
-                    args.cloned(),
+                    effective_args,
                     self.server_port,
                     self.tx.clone(),
                 );
@@ -362,6 +367,37 @@ fn monitor_parent_process(child_pid: u32, read_fd: i32) {
     });
 }
 
+// Builds the baseline args used whenever a module is started without explicit args (manual
+// tray click, or restart after a crash), sourced from both `module_args` and `autostart.modules`
+// entries, so modules don't need to be autostarted to get default args (#131). Where a module
+// appears in both, the inline args on its `autostart.modules` entry win, since they're the more
+// specific setting.
+fn configured_modules_args() -> HashMap<String, Option<Vec<String>>> {
+    let config = get_config();
+    let mut modules_args = HashMap::new();
+
+    for (name, args_str) in config.module_args.iter() {
+        if !args_str.is_empty() {
+            modules_args.insert(
+                name.clone(),
+                Some(shell_words::split(args_str).unwrap_or_default()),
+            );
+        }
+    }
+
+    for module_entry in config.autostart.modules.iter() {
+        let args_str = module_entry.args();
+        if !args_str.is_empty() {
+            modules_args.insert(
+                module_entry.name().to_string(),
+                Some(shell_words::split(args_str).unwrap_or_default()),
+            );
+        }
+    }
+
+    modules_args
+}
+
 pub fn start_manager() -> Arc<Mutex<ManagerState>> {
     start_manager_inner(get_config().port, None)
 }
@@ -384,22 +420,14 @@ fn start_manager_inner(
     let (tx, rx) = channel();
     let state = Arc::new(Mutex::new(ManagerState::new(tx.clone(), server_port)));
 
-    // Start the modules
+    // Start the modules. Args come from the baseline computed in ManagerState::new().
     let config = get_config();
     for module_entry in config.autostart.modules.iter() {
         let name = module_entry.name();
-        let args_str = module_entry.args();
-
-        let args = if args_str.is_empty() {
-            None
-        } else {
-            // Split args string on whitespace, preserving quoted arguments
-            Some(shell_words::split(args_str).unwrap_or_default())
-        };
         state
             .lock()
             .expect("Failed to acquire manager_state lock")
-            .start_module(name, args.as_ref());
+            .start_module(name, None);
     }
 
     // populate the tray menu if not yet already done
@@ -507,13 +535,8 @@ fn handle(
                                     state_guard
                                         .modules_restart_count
                                         .insert(name_clone.clone(), restart_count + 1);
-                                    // Get the stored arguments for this module
-                                    let stored_args = state_guard
-                                        .modules_args
-                                        .get(&name_clone)
-                                        .cloned()
-                                        .flatten();
-                                    state_guard.start_module(&name_clone, stored_args.as_ref());
+                                    // start_module falls back to the args this module was last started with
+                                    state_guard.start_module(&name_clone, None);
                                 }
                             } else {
                                 // Restart limit reached
