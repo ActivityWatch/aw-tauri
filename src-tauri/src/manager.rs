@@ -31,7 +31,7 @@ use {
 };
 
 use log::{debug, error, info, trace, warn};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::{
@@ -41,6 +41,7 @@ use std::sync::{
 use std::time::Duration;
 use std::{env, fs, thread};
 use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem, SubmenuBuilder};
+use tauri::{AppHandle, Wry};
 use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
 
 use crate::{get_app_handle, get_config, get_tray_id, HANDLE_CONDVAR};
@@ -168,6 +169,20 @@ impl ManagerState {
     }
 }
 
+struct TrayMenuCache {
+    // Per-module check items for the running group, keyed by module name, so later events can
+    // sync checked-state in place instead of rebuilding the whole tray menu, which previously
+    // happened on every Started/Stopped message.
+    module_items: HashMap<String, CheckMenuItem<Wry>>,
+    // Names of modules in the running group (those started at least once) when the menu was last
+    // built. The menu only needs rebuilding when this set changes (a module starts for the first
+    // time and must move into the top group); crash-restart loops keep the module in the set and
+    // only toggle its checked state, so they take the cheap sync path.
+    running_keys: BTreeSet<String>,
+}
+
+static TRAY_MENU_CACHE: Mutex<Option<TrayMenuCache>> = Mutex::new(None);
+
 fn update_tray_menu(
     modules_running: &BTreeMap<String, bool>,
     modules_discovered: &BTreeMap<String, PathBuf>,
@@ -197,19 +212,55 @@ fn update_tray_menu(
     let app = &*get_app_handle().lock().expect("Failed to get app handle");
     debug!("App handle acquired");
 
+    let running_keys: BTreeSet<String> = modules_running.keys().cloned().collect();
+    let mut cache = TRAY_MENU_CACHE
+        .lock()
+        .expect("Failed to lock tray menu cache");
+    match cache.as_ref() {
+        // Same running group as last build: ordering is unchanged, so only sync checked state.
+        Some(c) if c.running_keys == running_keys => {
+            for (name, running) in modules_running.iter() {
+                if let Some(item) = c.module_items.get(name) {
+                    if let Err(e) = item.set_checked(*running) {
+                        error!("Failed to update tray checked state for {name}: {e}");
+                    }
+                }
+            }
+            trace!("synced tray menu state");
+        }
+        // First build, or a module joined the running group: rebuild to reorder the menu.
+        _ => {
+            let module_items = build_tray_menu(app, modules_running, modules_discovered);
+            *cache = Some(TrayMenuCache {
+                module_items,
+                running_keys,
+            });
+            trace!("built tray menu");
+        }
+    }
+}
+
+fn build_tray_menu(
+    app: &AppHandle,
+    modules_running: &BTreeMap<String, bool>,
+    modules_discovered: &BTreeMap<String, PathBuf>,
+) -> HashMap<String, CheckMenuItem<Wry>> {
     let open = MenuItem::with_id(app, "open", "Open Dashboard", true, None::<&str>)
         .expect("failed to create open menu item");
     let quit = MenuItem::with_id(app, "quit", "Quit ActivityWatch", true, None::<&str>)
         .expect("failed to create quit menu item");
 
+    let mut module_items = HashMap::new();
     let mut modules_submenu_builder = SubmenuBuilder::new(app, "Modules");
+    // Running modules first, alphabetically (BTreeMap iterates in key order), each with a checkbox.
     for (module, running) in modules_running.iter() {
-        let label = module;
-        let module_menu = CheckMenuItem::with_id(app, module, label, true, *running, None::<&str>)
+        let module_menu = CheckMenuItem::with_id(app, module, module, true, *running, None::<&str>)
             .expect("Failed to create module menu item");
         modules_submenu_builder = modules_submenu_builder.item(&module_menu);
+        module_items.insert(module.clone(), module_menu);
     }
 
+    // Then discovered modules that have never been started, alphabetically.
     for module_name in modules_discovered.keys() {
         if !modules_running.contains_key(module_name) {
             let module_menu = MenuItem::with_id(app, module_name, module_name, true, None::<&str>)
@@ -253,7 +304,8 @@ fn update_tray_menu(
         .expect("Failed to get tray by id")
         .set_menu(Some(menu))
         .expect("Failed to set tray menu");
-    trace!("set tray menu");
+
+    module_items
 }
 
 #[cfg(unix)]
