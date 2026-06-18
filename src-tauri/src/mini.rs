@@ -167,6 +167,7 @@ fn create_tray_icon(
         .expect("Failed to create mini tray menu");
     let icon = load_tray_icon().expect("Failed to load mini tray icon");
 
+    #[allow(unused_mut)] // only reassigned on Linux, below
     let mut builder = TrayIconBuilder::new()
         .with_menu(Box::new(menu))
         .with_icon(icon)
