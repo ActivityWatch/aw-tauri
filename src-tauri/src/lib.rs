@@ -123,6 +123,11 @@ pub(crate) fn get_tray_id() -> &'static TrayIconId {
     &TRAY_ID.get().expect("TRAY_ID not initialized").0
 }
 
+// Escapes a value for use inside a double-quoted TOML basic string.
+fn toml_escape(value: &str) -> String {
+    value.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
 fn write_formatted_config(config: &UserConfig, path: &Path) -> Result<(), std::io::Error> {
     // Helper function to write the config prettier
     let mut output = String::new();
@@ -133,7 +138,10 @@ fn write_formatted_config(config: &UserConfig, path: &Path) -> Result<(), std::i
     if !config.discovery_paths.is_empty() {
         output.push('\n');
         for path in &config.discovery_paths {
-            output.push_str(&format!("  \"{}\",\n", path.to_str().unwrap_or_default()));
+            output.push_str(&format!(
+                "  \"{}\",\n",
+                toml_escape(path.to_str().unwrap_or_default())
+            ));
         }
         output.push(']');
     } else {
@@ -151,12 +159,13 @@ fn write_formatted_config(config: &UserConfig, path: &Path) -> Result<(), std::i
     for module in &config.autostart.modules {
         match module {
             ModuleEntry::Simple(name) => {
-                output.push_str(&format!("  \"{}\",\n", name));
+                output.push_str(&format!("  \"{}\",\n", toml_escape(name)));
             }
             ModuleEntry::Full { name, args } => {
                 output.push_str(&format!(
                     "  {{ name = \"{}\", args = \"{}\" }},\n",
-                    name, args
+                    toml_escape(name),
+                    toml_escape(args)
                 ));
             }
         }
@@ -173,7 +182,11 @@ fn write_formatted_config(config: &UserConfig, path: &Path) -> Result<(), std::i
     if !config.module_args.is_empty() {
         output.push_str("\n[module_args]\n");
         for (name, args) in &config.module_args {
-            output.push_str(&format!("\"{}\" = \"{}\"\n", name, args));
+            output.push_str(&format!(
+                "\"{}\" = \"{}\"\n",
+                toml_escape(name),
+                toml_escape(args)
+            ));
         }
     }
 
