@@ -419,6 +419,15 @@ fn monitor_parent_process(child_pid: u32, read_fd: i32) {
     });
 }
 
+// Splits a configured args string, warning (and falling back to no args) on malformed shell
+// quoting instead of silently dropping the args without a diagnostic.
+fn split_module_args(module_name: &str, args_str: &str) -> Vec<String> {
+    shell_words::split(args_str).unwrap_or_else(|e| {
+        warn!("Failed to parse args for module {module_name} ({args_str:?}): {e}");
+        Vec::new()
+    })
+}
+
 // Builds the baseline args used whenever a module is started without explicit args (manual
 // tray click, or restart after a crash), sourced from both `module_args` and `autostart.modules`
 // entries, so modules don't need to be autostarted to get default args (#131). Where a module
@@ -430,10 +439,7 @@ fn configured_modules_args() -> HashMap<String, Option<Vec<String>>> {
 
     for (name, args_str) in config.module_args.iter() {
         if !args_str.is_empty() {
-            modules_args.insert(
-                name.clone(),
-                Some(shell_words::split(args_str).unwrap_or_default()),
-            );
+            modules_args.insert(name.clone(), Some(split_module_args(name, args_str)));
         }
     }
 
@@ -442,7 +448,7 @@ fn configured_modules_args() -> HashMap<String, Option<Vec<String>>> {
         if !args_str.is_empty() {
             modules_args.insert(
                 module_entry.name().to_string(),
-                Some(shell_words::split(args_str).unwrap_or_default()),
+                Some(split_module_args(module_entry.name(), args_str)),
             );
         }
     }
