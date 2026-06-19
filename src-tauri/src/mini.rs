@@ -3,13 +3,7 @@
 
 use crate::manager;
 use log::{error, info, warn};
-use std::{
-    collections::BTreeMap,
-    io::Cursor,
-    path::{Path, PathBuf},
-    sync::mpsc,
-    thread,
-};
+use std::{io::Cursor, path::Path, sync::mpsc, thread};
 use tao::{
     event::{Event, StartCause},
     event_loop::{ControlFlow, EventLoopBuilder},
@@ -76,14 +70,11 @@ pub fn run() {
     });
 
     let manager_state = manager::start_manager_with_events(server_port, manager_tx);
-    let (mut modules_running, mut modules_discovered) = {
+    let mut modules = {
         let state = manager_state
             .lock()
             .expect("Failed to acquire manager_state lock");
-        (
-            state.modules_running.clone(),
-            state.modules_discovered.clone(),
-        )
+        state.modules_snapshot()
     };
 
     let mut tray_icon: Option<TrayIcon> = None;
@@ -94,7 +85,7 @@ pub fn run() {
 
         match event {
             Event::NewEvents(StartCause::Init) if tray_icon.is_none() => {
-                tray_icon = Some(create_tray_icon(&modules_running, &modules_discovered));
+                tray_icon = Some(create_tray_icon(&modules));
                 if !first_run_notified && *crate::is_first_run() {
                     show_notification(
                         "Aw-Tauri",
@@ -140,14 +131,10 @@ pub fn run() {
                 std::process::exit(1);
             }
             Event::UserEvent(MiniEvent::Manager(event)) => match event {
-                manager::ManagerEvent::ModulesChanged {
-                    modules_running: running,
-                    modules_discovered: discovered,
-                } => {
-                    modules_running = running;
-                    modules_discovered = discovered;
+                manager::ManagerEvent::ModulesChanged { modules: changed } => {
+                    modules = (*changed).clone();
                     if let Some(tray_icon) = &tray_icon {
-                        update_tray_menu(tray_icon, &modules_running, &modules_discovered);
+                        update_tray_menu(tray_icon, &modules);
                     }
                 }
                 manager::ManagerEvent::Notification { title, message } => {
@@ -159,12 +146,8 @@ pub fn run() {
     });
 }
 
-fn create_tray_icon(
-    modules_running: &BTreeMap<String, bool>,
-    modules_discovered: &BTreeMap<String, PathBuf>,
-) -> TrayIcon {
-    let menu = build_tray_menu(modules_running, modules_discovered)
-        .expect("Failed to create mini tray menu");
+fn create_tray_icon(modules: &manager::ModulesSnapshot) -> TrayIcon {
+    let menu = build_tray_menu(modules).expect("Failed to create mini tray menu");
     let icon = load_tray_icon().expect("Failed to load mini tray icon");
 
     #[allow(unused_mut)] // only reassigned on Linux, below
@@ -182,34 +165,31 @@ fn create_tray_icon(
     builder.build().expect("Failed to create mini tray")
 }
 
-fn update_tray_menu(
-    tray_icon: &TrayIcon,
-    modules_running: &BTreeMap<String, bool>,
-    modules_discovered: &BTreeMap<String, PathBuf>,
-) {
-    match build_tray_menu(modules_running, modules_discovered) {
+fn update_tray_menu(tray_icon: &TrayIcon, modules: &manager::ModulesSnapshot) {
+    match build_tray_menu(modules) {
         Ok(menu) => tray_icon.set_menu(Some(Box::new(menu))),
         Err(e) => error!("Failed to update mini tray menu: {e}"),
     }
 }
 
-fn build_tray_menu(
-    modules_running: &BTreeMap<String, bool>,
-    modules_discovered: &BTreeMap<String, PathBuf>,
-) -> Result<Menu, Box<dyn std::error::Error>> {
+fn build_tray_menu(modules: &manager::ModulesSnapshot) -> Result<Menu, Box<dyn std::error::Error>> {
     let menu = Menu::new();
     let open = MenuItem::with_id("open", "Open Dashboard", true, None);
     menu.append(&open)?;
     menu.append(&PredefinedMenuItem::separator())?;
 
     let modules_submenu = Submenu::with_id("modules", "Modules", true);
-    for (module, running) in modules_running {
-        let module_menu =
-            CheckMenuItem::with_id(module_menu_id(module), module, true, *running, None);
-        modules_submenu.append(&module_menu)?;
+    // Started modules first, alphabetically, each with a checkbox.
+    for (module, run_state) in modules {
+        if let Some(running) = run_state {
+            let module_menu =
+                CheckMenuItem::with_id(module_menu_id(module), module, true, *running, None);
+            modules_submenu.append(&module_menu)?;
+        }
     }
-    for module in modules_discovered.keys() {
-        if !modules_running.contains_key(module) {
+    // Then discovered modules that have never been started, alphabetically.
+    for (module, run_state) in modules {
+        if run_state.is_none() {
             let module_menu = MenuItem::with_id(module_menu_id(module), module, true, None);
             modules_submenu.append(&module_menu)?;
         }

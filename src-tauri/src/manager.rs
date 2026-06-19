@@ -66,71 +66,107 @@ enum ModuleMessage {
     },
 }
 
+/// A lightweight, path-free view of every module's run state, keyed by module name.
+/// `None` = discovered but never started, `Some(true)` = running, `Some(false)` = stopped
+/// after having been started. This is all the tray and mini-mode event loop need; it is cheap
+/// to build and shared via `Arc` instead of cloning the full per-module state on every event.
+pub(crate) type ModulesSnapshot = BTreeMap<String, Option<bool>>;
+
 #[derive(Debug, Clone)]
 pub(crate) enum ManagerEvent {
-    ModulesChanged {
-        modules_running: BTreeMap<String, bool>,
-        modules_discovered: BTreeMap<String, PathBuf>,
-    },
-    Notification {
-        title: String,
-        message: String,
-    },
+    ModulesChanged { modules: Arc<ModulesSnapshot> },
+    Notification { title: String, message: String },
+}
+
+/// Per-module lifecycle state. Replaces the parallel maps that were previously keyed by module
+/// name (running/discovered/pid/restart_count/pending_shutdown/args), keeping a single source of
+/// truth per module.
+#[derive(Debug)]
+struct Module {
+    /// Path to the module binary (from `discover_modules`); fixed after startup.
+    path: PathBuf,
+    /// `None` = discovered but never started, `Some(true)` = running, `Some(false)` = started at
+    /// least once and currently stopped. Drives the tray grouping (started modules first).
+    run_state: Option<bool>,
+    pid: Option<u32>,
+    restart_count: u32,
+    pending_shutdown: bool,
+    /// Last-known or configured args, reused on manual or post-crash restart (#131).
+    args: Option<Vec<String>>,
 }
 
 #[derive(Debug)]
 pub struct ManagerState {
     tx: Sender<ModuleMessage>,
     pub server_port: u16,
-    pub modules_running: BTreeMap<String, bool>,
-    pub modules_discovered: BTreeMap<String, PathBuf>,
-    pub modules_pid: HashMap<String, u32>,
-    pub modules_restart_count: HashMap<String, u32>,
-    pub modules_pending_shutdown: HashMap<String, bool>,
-    pub modules_args: HashMap<String, Option<Vec<String>>>,
-    pub modules_menu_set: bool,
+    modules: BTreeMap<String, Module>,
 }
 
 impl ManagerState {
     fn new(tx: Sender<ModuleMessage>, server_port: u16) -> ManagerState {
+        // Seed one entry per discovered module, attaching any configured args. Modules that are
+        // configured but not discovered are dropped: `start_module` only starts discovered ones.
+        let mut configured_args = configured_modules_args();
+        let modules = discover_modules()
+            .into_iter()
+            .map(|(name, path)| {
+                let args = configured_args.remove(&name).flatten();
+                let module = Module {
+                    path,
+                    run_state: None,
+                    pid: None,
+                    restart_count: 0,
+                    pending_shutdown: false,
+                    args,
+                };
+                (name, module)
+            })
+            .collect();
+
         ManagerState {
             tx,
             server_port,
-            //TODO: merge some of these maps into a single struct
-            modules_running: BTreeMap::new(),
-            modules_discovered: discover_modules(),
-            modules_pid: HashMap::new(),
-            modules_restart_count: HashMap::new(),
-            modules_pending_shutdown: HashMap::new(),
-            modules_args: configured_modules_args(),
-            modules_menu_set: false,
+            modules,
         }
     }
+
+    /// A path-free `name -> run state` view for the tray and mini-mode event loop.
+    pub(crate) fn modules_snapshot(&self) -> ModulesSnapshot {
+        self.modules
+            .iter()
+            .map(|(name, module)| (name.clone(), module.run_state))
+            .collect()
+    }
+
     fn started_module(&mut self, name: &str, pid: u32, args: Option<Vec<String>>) {
         info!("Started module: {name}");
-        self.modules_running.insert(name.to_string(), true);
-        self.modules_pid.insert(name.to_string(), pid);
-        self.modules_args.insert(name.to_string(), args);
-        self.modules_pending_shutdown.remove(name);
-        debug!("Running modules: {:?}", self.modules_running);
+        if let Some(module) = self.modules.get_mut(name) {
+            module.run_state = Some(true);
+            module.pid = Some(pid);
+            module.args = args;
+            module.pending_shutdown = false;
+        } else {
+            warn!("Started unknown module {name}, not in discovered set");
+        }
+        debug!("Modules: {:?}", self.modules);
     }
     fn stopped_module(&mut self, name: &str) {
         info!("Stopped module: {name}");
-        self.modules_running.insert(name.to_string(), false);
-        self.modules_pid.remove(name);
+        if let Some(module) = self.modules.get_mut(name) {
+            module.run_state = Some(false);
+            module.pid = None;
+        }
     }
 
     pub fn start_module(&self, name: &str, args: Option<&Vec<String>>) {
         if !self.is_module_running(name) {
-            if let Some(path) = self.modules_discovered.get(name) {
+            if let Some(module) = self.modules.get(name) {
                 // Fall back to the last known (or configured) args for this module, so manual
                 // tray restarts and post-crash restarts don't silently drop them (#131).
-                let effective_args = args
-                    .cloned()
-                    .or_else(|| self.modules_args.get(name).cloned().flatten());
+                let effective_args = args.cloned().or_else(|| module.args.clone());
                 start_module_thread(
                     name.to_string(),
-                    path.clone(),
+                    module.path.clone(),
                     effective_args,
                     self.server_port,
                     self.tx.clone(),
@@ -141,19 +177,26 @@ impl ManagerState {
         }
     }
     pub fn stop_module(&mut self, name: &str) {
-        if let Some(pid) = self.modules_pid.get(name) {
-            // add to pending shutdown to prevent restart
-            self.modules_pending_shutdown.insert(name.to_string(), true);
-            if let Err(e) = send_sigterm(*pid) {
-                error!("Failed to send SIGTERM to module {name}: {e}");
-            } else {
-                debug!("Sent SIGTERM to module: {name}");
+        if let Some(module) = self.modules.get_mut(name) {
+            if let Some(pid) = module.pid {
+                // mark pending shutdown to prevent restart
+                module.pending_shutdown = true;
+                if let Err(e) = send_sigterm(pid) {
+                    error!("Failed to send SIGTERM to module {name}: {e}");
+                } else {
+                    debug!("Sent SIGTERM to module: {name}");
+                }
             }
         }
     }
     pub fn stop_modules(&mut self) {
-        let module_names: Vec<String> = self.modules_pid.keys().cloned().collect();
-        for name in module_names {
+        let running: Vec<String> = self
+            .modules
+            .iter()
+            .filter(|(_, module)| module.pid.is_some())
+            .map(|(name, _)| name.clone())
+            .collect();
+        for name in running {
             self.stop_module(&name);
         }
     }
@@ -165,7 +208,9 @@ impl ManagerState {
         }
     }
     fn is_module_running(&self, name: &str) -> bool {
-        *self.modules_running.get(name).unwrap_or(&false)
+        self.modules
+            .get(name)
+            .is_some_and(|module| module.run_state == Some(true))
     }
 }
 
@@ -183,16 +228,11 @@ struct TrayMenuCache {
 
 static TRAY_MENU_CACHE: Mutex<Option<TrayMenuCache>> = Mutex::new(None);
 
-fn update_tray_menu(
-    modules_running: &BTreeMap<String, bool>,
-    modules_discovered: &BTreeMap<String, PathBuf>,
-    event_tx: &Option<Sender<ManagerEvent>>,
-) {
+fn update_tray_menu(modules: &ModulesSnapshot, event_tx: &Option<Sender<ManagerEvent>>) {
     // In mini mode, forward state to the mini event loop instead of Tauri
     if let Some(tx) = event_tx {
         let _ = tx.send(ManagerEvent::ModulesChanged {
-            modules_running: modules_running.clone(),
-            modules_discovered: modules_discovered.clone(),
+            modules: Arc::new(modules.clone()),
         });
         return;
     }
@@ -212,15 +252,20 @@ fn update_tray_menu(
     let app = &*get_app_handle().lock().expect("Failed to get app handle");
     debug!("App handle acquired");
 
-    let running_keys: BTreeSet<String> = modules_running.keys().cloned().collect();
+    // Running group = modules that have been started at least once (run_state is Some).
+    let running_keys: BTreeSet<String> = modules
+        .iter()
+        .filter(|(_, run_state)| run_state.is_some())
+        .map(|(name, _)| name.clone())
+        .collect();
     let mut cache = TRAY_MENU_CACHE
         .lock()
         .expect("Failed to lock tray menu cache");
     match cache.as_ref() {
         // Same running group as last build: ordering is unchanged, so only sync checked state.
         Some(c) if c.running_keys == running_keys => {
-            for (name, running) in modules_running.iter() {
-                if let Some(item) = c.module_items.get(name) {
+            for (name, run_state) in modules.iter() {
+                if let (Some(item), Some(running)) = (c.module_items.get(name), run_state) {
                     if let Err(e) = item.set_checked(*running) {
                         error!("Failed to update tray checked state for {name}: {e}");
                     }
@@ -230,7 +275,7 @@ fn update_tray_menu(
         }
         // First build, or a module joined the running group: rebuild to reorder the menu.
         _ => {
-            let module_items = build_tray_menu(app, modules_running, modules_discovered);
+            let module_items = build_tray_menu(app, modules);
             *cache = Some(TrayMenuCache {
                 module_items,
                 running_keys,
@@ -242,8 +287,7 @@ fn update_tray_menu(
 
 fn build_tray_menu(
     app: &AppHandle,
-    modules_running: &BTreeMap<String, bool>,
-    modules_discovered: &BTreeMap<String, PathBuf>,
+    modules: &ModulesSnapshot,
 ) -> HashMap<String, CheckMenuItem<Wry>> {
     let open = MenuItem::with_id(app, "open", "Open Dashboard", true, None::<&str>)
         .expect("failed to create open menu item");
@@ -252,18 +296,21 @@ fn build_tray_menu(
 
     let mut module_items = HashMap::new();
     let mut modules_submenu_builder = SubmenuBuilder::new(app, "Modules");
-    // Running modules first, alphabetically (BTreeMap iterates in key order), each with a checkbox.
-    for (module, running) in modules_running.iter() {
-        let module_menu = CheckMenuItem::with_id(app, module, module, true, *running, None::<&str>)
-            .expect("Failed to create module menu item");
-        modules_submenu_builder = modules_submenu_builder.item(&module_menu);
-        module_items.insert(module.clone(), module_menu);
+    // Started modules first, alphabetically (BTreeMap iterates in key order), each with a checkbox.
+    for (module, run_state) in modules.iter() {
+        if let Some(running) = run_state {
+            let module_menu =
+                CheckMenuItem::with_id(app, module, module, true, *running, None::<&str>)
+                    .expect("Failed to create module menu item");
+            modules_submenu_builder = modules_submenu_builder.item(&module_menu);
+            module_items.insert(module.clone(), module_menu);
+        }
     }
 
     // Then discovered modules that have never been started, alphabetically.
-    for module_name in modules_discovered.keys() {
-        if !modules_running.contains_key(module_name) {
-            let module_menu = MenuItem::with_id(app, module_name, module_name, true, None::<&str>)
+    for (module, run_state) in modules.iter() {
+        if run_state.is_none() {
+            let module_menu = MenuItem::with_id(app, module, module, true, None::<&str>)
                 .expect("Failed to create module menu item");
             modules_submenu_builder = modules_submenu_builder.item(&module_menu);
         }
@@ -488,15 +535,9 @@ fn start_manager_inner(
             .start_module(name, None);
     }
 
-    // populate the tray menu if not yet already done
-    let modules_menu_set = state
-        .lock()
-        .expect("Failed to acquire manager_state lock")
-        .modules_menu_set;
-    if !modules_menu_set {
-        tx.send(ModuleMessage::Init {})
-            .expect("Failed to send \"Module Init\" message");
-    }
+    // Force an initial tray build even if no modules autostart (no Started message would arrive).
+    tx.send(ModuleMessage::Init {})
+        .expect("Failed to send \"Module Init\" message");
 
     let state_clone = Arc::clone(&state);
     thread::spawn(move || {
@@ -521,22 +562,14 @@ fn handle(
         }
 
         let event_tx_for_restart = event_tx.clone();
-        let (modules_running, modules_discovered) = {
+        let snapshot = {
             let mut state_guard = state.lock().expect("Failed to acquire manager_state lock");
             match msg {
                 ModuleMessage::Started { name, pid, args } => {
                     state_guard.started_module(&name, pid, args);
-                    (
-                        state_guard.modules_running.clone(),
-                        state_guard.modules_discovered.clone(),
-                    )
                 }
                 ModuleMessage::Stopped { name, output } => {
                     state_guard.stopped_module(&name);
-                    let data = (
-                        state_guard.modules_running.clone(),
-                        state_guard.modules_discovered.clone(),
-                    );
                     let name_clone = name.clone();
                     if output.status.success() {
                         info!("Module {name} exited successfully");
@@ -544,33 +577,26 @@ fn handle(
                         error!("Module {name} exited with error status");
                         thread::spawn(move || {
                             let (should_restart, restart_info) = {
-                                let state_guard = &mut state_clone
+                                let state_guard = state_clone
                                     .lock()
                                     .expect("Failed to acquire manager_state lock");
-                                let restart_count = state_guard
-                                    .modules_restart_count
-                                    .get(&name_clone)
-                                    .unwrap_or(&0);
-
-                                let pending_shutdown = state_guard
-                                    .modules_pending_shutdown
-                                    .get(&name_clone)
-                                    .unwrap_or(&false);
+                                let module = state_guard.modules.get(&name_clone);
 
                                 // If shutdown is pending, exit early
-                                if *pending_shutdown {
+                                if module.is_some_and(|m| m.pending_shutdown) {
                                     return; // Exit the entire thread
                                 }
 
-                                if *restart_count < 3 {
+                                let restart_count = module.map_or(0, |m| m.restart_count);
+                                if restart_count < 3 {
                                     // Exponential backoff: 2^(restart_count + 1) seconds
                                     // restart_count 0 -> 2 seconds, 1 -> 4 seconds, 2 -> 8 seconds
-                                    let delay_secs = 2u64.pow(*restart_count + 1);
+                                    let delay_secs = 2u64.pow(restart_count + 1);
                                     info!(
                                         "Module {name_clone} will restart in {delay_secs} seconds (attempt {} of 3)",
-                                        *restart_count + 1
+                                        restart_count + 1
                                     );
-                                    (true, Some((delay_secs, *restart_count)))
+                                    (true, Some((delay_secs, restart_count)))
                                 } else {
                                     (false, None)
                                 }
@@ -586,24 +612,24 @@ fn handle(
 
                                     thread::sleep(Duration::from_secs(secs));
 
-                                    let state_guard = &mut state_clone
+                                    let mut state_guard = state_clone
                                         .lock()
                                         .expect("Failed to acquire manager_state lock");
 
-                                    state_guard
-                                        .modules_restart_count
-                                        .insert(name_clone.clone(), restart_count + 1);
+                                    if let Some(module) = state_guard.modules.get_mut(&name_clone) {
+                                        module.restart_count = restart_count + 1;
+                                    }
                                     // start_module falls back to the args this module was last started with
                                     state_guard.start_module(&name_clone, None);
                                 }
                             } else {
                                 // Restart limit reached
-                                let state_guard = &mut state_clone
+                                let mut state_guard = state_clone
                                     .lock()
                                     .expect("Failed to acquire manager_state lock");
-                                state_guard
-                                    .modules_pending_shutdown
-                                    .insert(name_clone.clone(), true);
+                                if let Some(module) = state_guard.modules.get_mut(&name_clone) {
+                                    module.pending_shutdown = true;
+                                }
                                 show_warning(
                                     &event_tx_for_restart,
                                     &format!(
@@ -623,17 +649,23 @@ fn handle(
                             String::from_utf8_lossy(&output.stderr)
                         );
                     }
-                    data
                 }
-                ModuleMessage::Init {} => (
-                    state_guard.modules_running.clone(),
-                    state_guard.modules_discovered.clone(),
-                ),
+                ModuleMessage::Init {} => {}
                 // Already handled above via early-continue
                 ModuleMessage::Notification { .. } => unreachable!(),
             }
+
+            // Build the snapshot only if something will consume it: the mini event loop
+            // (event_tx) or the Tauri tray (GUI mode). In --daemon mode nobody does, so skip it.
+            if event_tx.is_some() || !crate::is_daemon_mode() {
+                Some(state_guard.modules_snapshot())
+            } else {
+                None
+            }
         };
-        update_tray_menu(&modules_running, &modules_discovered, &event_tx);
+        if let Some(snapshot) = snapshot {
+            update_tray_menu(&snapshot, &event_tx);
+        }
     }
 }
 
