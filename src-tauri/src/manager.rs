@@ -923,11 +923,14 @@ fn start_notify_module_thread(
             monitor_parent_process(child_pid, pipe_read_fd);
         }
 
-        // Send a message to the manager that the module has started
+        // Report the caller-provided args, NOT the internally-expanded `args`: the
+        // `--output-only`/`--port` flags are re-added on every start, so storing the expanded
+        // command line would re-inject them and compound across a stop/start or restart (the
+        // module would be relaunched with duplicated flags and fail to come back up).
         tx.send(ModuleMessage::Started {
             name: name.to_string(),
             pid: child.id(),
-            args: Some(args),
+            args: custom_args.clone(),
         })
         .expect("Failed to send module started message");
 
