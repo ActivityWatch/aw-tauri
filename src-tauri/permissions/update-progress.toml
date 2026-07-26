@@ -1,0 +1,19 @@
+[[permission]]
+identifier = "allow-restart-app"
+description = "Allows the update progress dialog to restart the application after an update is installed."
+commands.allow = ["restart_app"]
+
+[[permission]]
+identifier = "allow-close-update-progress"
+description = "Allows the update progress dialog to be dismissed without restarting."
+commands.allow = ["close_update_progress"]
+
+[[permission]]
+identifier = "allow-open-external"
+description = "Allows opening external URLs in the system browser."
+commands.allow = ["open_external"]
+
+[[permission]]
+identifier = "allow-greet"
+description = "Allows the greet command."
+commands.allow = ["greet"]

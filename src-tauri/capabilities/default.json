@@ -4,13 +4,18 @@
   "description": "Capability for the main window",
   "windows": [
     "main",
-    "module-alert"
+    "module-alert",
+    "update-progress"
   ],
   "permissions": [
     "core:default",
     "shell:allow-open",
     "dialog:default",
     "opener:default",
-    "updater:default"
+    "updater:default",
+    "allow-restart-app",
+    "allow-close-update-progress",
+    "allow-open-external",
+    "allow-greet"
   ]
 }

@@ -555,6 +555,30 @@
       "description": "Permission identifier",
       "oneOf": [
         {
+          "description": "Allows the update progress dialog to be dismissed without restarting.",
+          "type": "string",
+          "const": "allow-close-update-progress",
+          "markdownDescription": "Allows the update progress dialog to be dismissed without restarting."
+        },
+        {
+          "description": "Allows the greet command.",
+          "type": "string",
+          "const": "allow-greet",
+          "markdownDescription": "Allows the greet command."
+        },
+        {
+          "description": "Allows opening external URLs in the system browser.",
+          "type": "string",
+          "const": "allow-open-external",
+          "markdownDescription": "Allows opening external URLs in the system browser."
+        },
+        {
+          "description": "Allows the update progress dialog to restart the application after an update is installed.",
+          "type": "string",
+          "const": "allow-restart-app",
+          "markdownDescription": "Allows the update progress dialog to restart the application after an update is installed."
+        },
+        {
           "description": "This permission set configures if your\napplication can enable or disable auto\nstarting the application on boot.\n\n#### Granted Permissions\n\nIt allows all to check, enable and\ndisable the automatic start on boot.\n\n\n#### This default permission set includes:\n\n- `allow-enable`\n- `allow-disable`\n- `allow-is-enabled`",
           "type": "string",
           "const": "autostart:default",

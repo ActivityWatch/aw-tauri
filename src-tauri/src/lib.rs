@@ -14,7 +14,7 @@ use std::sync::{mpsc, Condvar, Mutex, OnceLock};
 use std::thread;
 use std::time::Duration;
 use tauri_plugin_autostart::{MacosLauncher, ManagerExt};
-use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
+use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 use tauri_plugin_notification::NotificationExt;
 use tauri_plugin_opener::OpenerExt;
 use tauri_plugin_updater::UpdaterExt;
@@ -24,6 +24,7 @@ mod logging;
 mod manager;
 mod mini;
 mod module_alert_ui;
+mod updater_ui;
 
 /// CLI arguments passed from main()
 #[derive(Debug, Default)]
@@ -181,7 +182,10 @@ fn write_formatted_config(config: &UserConfig, path: &Path) -> Result<(), std::i
 
     // Add updates section
     output.push_str("[updates]\n");
-    output.push_str(&format!("enabled = {}\n", config.updates.enabled));
+    output.push_str(&format!(
+        "auto_download = {}\n",
+        config.updates.auto_download
+    ));
 
     // Add module_args section, for modules that aren't autostarted but still need args
     // when launched manually (e.g. from the tray menu) or restarted after a crash
@@ -368,12 +372,21 @@ pub struct AutostartConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UpdatesConfig {
-    pub enabled: bool,
+    /// When true, download updates as soon as they are found.
+    /// When false, prompt the user before starting the download.
+    #[serde(default = "default_auto_download")]
+    pub auto_download: bool,
+}
+
+fn default_auto_download() -> bool {
+    true
 }
 
 impl Default for UpdatesConfig {
     fn default() -> Self {
-        Self { enabled: true }
+        Self {
+            auto_download: default_auto_download(),
+        }
     }
 }
 
@@ -431,7 +444,9 @@ impl Default for UserConfig {
                 modules,
             },
             module_args: BTreeMap::new(),
-            updates: UpdatesConfig { enabled: true },
+            updates: UpdatesConfig {
+                auto_download: true,
+            },
         }
     }
 }
@@ -668,16 +683,23 @@ fn open_external(url: String, app: tauri::AppHandle) {
     }
 }
 
-/// Downloads and installs an update, logging progress in 10% increments
-/// (rather than on every chunk) to avoid flooding the log file, then
-/// restarts the app on success.
+/// Downloads and installs an update, showing a progress dialog.
+/// Logs progress in 10% increments (rather than on every chunk) to avoid
+/// flooding the log file. Does **not** restart automatically — the user must
+/// click "Restart Now" in the progress dialog after install succeeds.
 async fn download_and_install_update(handle: AppHandle, update: tauri_plugin_updater::Update) {
     use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
+    let update_version = update.version.clone();
+    let progress_window = updater_ui::show_progress_window(&handle, &update_version);
+
     let downloaded = AtomicUsize::new(0);
     let last_logged_percent = AtomicU64::new(u64::MAX);
-    let update_version = update.version.clone();
-    if let Err(e) = update
+    let last_ui_percent = AtomicU64::new(u64::MAX);
+    let last_status_bytes = AtomicUsize::new(0);
+    let window_for_progress = progress_window.clone();
+
+    let install_result = update
         .download_and_install(
             move |chunk_length, total_length| {
                 let current = downloaded.fetch_add(chunk_length, Ordering::Relaxed) + chunk_length;
@@ -688,22 +710,107 @@ async fn download_and_install_update(handle: AppHandle, update: tauri_plugin_upd
                     if last == u64::MAX || bucket > last {
                         info!("Update progress: {}/{} bytes ({}%)", current, total, bucket);
                     }
+
+                    // Update the dialog roughly once per percent to keep UI responsive
+                    // without flooding eval calls on tiny chunks.
+                    let ui_bucket = (percent as u64).min(100);
+                    let last_ui = last_ui_percent.swap(ui_bucket, Ordering::Relaxed);
+                    if last_ui == u64::MAX || ui_bucket > last_ui {
+                        if let Some(ref window) = window_for_progress {
+                            updater_ui::set_progress(window, percent, current, Some(total));
+                        }
+                    }
+                } else if let Some(ref window) = window_for_progress {
+                    // Unknown total size — keep indeterminate bar; refresh status every ~256 KiB.
+                    let last = last_status_bytes.load(Ordering::Relaxed);
+                    if current == chunk_length || current.saturating_sub(last) >= 256 * 1024 {
+                        last_status_bytes.store(current, Ordering::Relaxed);
+                        updater_ui::set_status(
+                            window,
+                            &format!("Downloading… {} bytes", current),
+                            None,
+                        );
+                    }
                 }
             },
-            move || {
-                info!(
-                    "Update download finished. Installing update v{}...",
-                    update_version
-                );
+            {
+                let window_for_done = progress_window.clone();
+                let version_for_done = update_version.clone();
+                move || {
+                    info!(
+                        "Update download finished. Installing update v{}...",
+                        version_for_done
+                    );
+                    if let Some(ref window) = window_for_done {
+                        updater_ui::set_installing(window);
+                    }
+                }
             },
         )
-        .await
-    {
-        warn!("Failed to install update: {}", e);
-    } else {
-        info!("Update installed. Restarting...");
-        handle.restart();
+        .await;
+
+    match install_result {
+        Ok(()) => {
+            info!(
+                "Update v{} installed. Waiting for user to restart.",
+                update_version
+            );
+            if let Some(ref window) = progress_window {
+                updater_ui::set_ready(window);
+            } else {
+                // Fallback if the progress window could not be created.
+                let app = handle.clone();
+                handle
+                    .dialog()
+                    .message(format!(
+                        "Update v{} has been installed.\n\nRestart ActivityWatch now to apply it?",
+                        update_version
+                    ))
+                    .title("Update Ready")
+                    .show(move |confirmed| {
+                        if confirmed {
+                            info!("User confirmed restart after update install.");
+                            app.restart();
+                        } else {
+                            info!("User deferred restart after update install.");
+                        }
+                    });
+            }
+        }
+        Err(e) => {
+            warn!("Failed to install update: {}", e);
+            if let Some(ref window) = progress_window {
+                updater_ui::set_error(window, &format!("Update failed: {}", e));
+            } else {
+                handle
+                    .dialog()
+                    .message(format!("Failed to install update:\n\n{}", e))
+                    .kind(MessageDialogKind::Error)
+                    .title("Update Failed")
+                    .show(|_| {});
+            }
+        }
     }
+}
+
+/// Returns true if the user has opted out of update checks via
+/// `AW_DISABLE_AUTO_UPDATE` (truthy values: 1, true, yes, on).
+fn updates_disabled_via_env() -> bool {
+    env::var("AW_DISABLE_AUTO_UPDATE")
+        .map(|v| matches!(v.to_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+        .unwrap_or(false)
+}
+
+#[tauri::command]
+fn restart_app(app: AppHandle) {
+    info!("Restart requested from update progress dialog.");
+    app.restart();
+}
+
+#[tauri::command]
+fn close_update_progress(app: AppHandle) {
+    info!("Closing update progress dialog without restarting.");
+    updater_ui::close_progress_window(&app);
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -765,6 +872,15 @@ pub fn run() {
                 .status(200)
                 .header("Content-Type", "text/html; charset=utf-8")
                 .body(module_alert_ui::ALERT_HTML.as_bytes().to_vec())
+                .unwrap()
+        })
+        // Serve the update progress HTML with a valid Origin so IPC invoke works
+        // (data: URLs fail with "Origin header is not a valid url").
+        .register_uri_scheme_protocol(updater_ui::URI_SCHEME, |_ctx, _request| {
+            tauri::http::Response::builder()
+                .status(200)
+                .header("Content-Type", "text/html; charset=utf-8")
+                .body(updater_ui::PROGRESS_HTML.as_bytes().to_vec())
                 .unwrap()
         })
         .setup(|app| {
@@ -966,21 +1082,34 @@ pub fn run() {
             // Check for updates in the background
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
+                if updates_disabled_via_env() {
+                    info!("Update check disabled via AW_DISABLE_AUTO_UPDATE");
+                    return;
+                }
                 info!("Checking for updates...");
-                info!("Autoupdate configuration: enabled = {}", get_config().updates.enabled);
+                info!(
+                    "Autoupdate configuration: auto_download = {}",
+                    get_config().updates.auto_download
+                );
                 match handle.updater() {
                     Ok(updater) => match updater.check().await {
                         Ok(Some(update)) => {
-                            let auto_update = get_config().updates.enabled;
-                            if auto_update {
-                                info!("Update available: {}. Downloading and installing automatically...", update.version);
+                            let auto_download = get_config().updates.auto_download;
+                            if auto_download {
+                                info!(
+                                    "Update available: {}. Downloading and installing automatically...",
+                                    update.version
+                                );
                                 let handle2 = handle.clone();
                                 info!("Sending update notification for v{}...", update.version);
                                 match handle2
                                     .notification()
                                     .builder()
                                     .title("ActivityWatch Update")
-                                    .body(format!("Downloading and installing update v{}...", update.version))
+                                    .body(format!(
+                                        "Downloading update v{}… You will be asked to restart when it is ready.",
+                                        update.version
+                                    ))
                                     .show()
                                 {
                                     Ok(_) => info!("Update notification sent."),
@@ -990,10 +1119,13 @@ pub fn run() {
                                     handle2, update,
                                 ));
                             } else {
-                                info!("Update available: {}. Prompting user via dialog...", update.version);
+                                info!(
+                                    "Update available: {}. Prompting user via dialog...",
+                                    update.version
+                                );
                                 let app_handle = handle.clone();
                                 let body = format!(
-                                    "Version {} is available. Install now?\n\nRelease notes:\n{}",
+                                    "Version {} is available.\n\nDownload and install this update?\n\nRelease notes:\n{}",
                                     update.version,
                                     update
                                         .body
@@ -1004,16 +1136,27 @@ pub fn run() {
                                     .dialog()
                                     .message(body)
                                     .title("Update Available")
-                                    .show(move |confirmed| {
-                                        if confirmed {
-                                            info!("User accepted update to v{}. Starting download...", update.version);
+                                    .kind(MessageDialogKind::Info)
+                                    .buttons(MessageDialogButtons::OkCancelCustom(
+                                        "Download".to_string(),
+                                        "Not Now".to_string(),
+                                    ))
+                                    .show(move |approved| {
+                                        if approved {
+                                            info!(
+                                                "User approved download of update v{}. Starting download...",
+                                                update.version
+                                            );
                                             let handle2 = handle.clone();
                                             let update2 = update.clone();
-                                            tauri::async_runtime::spawn(download_and_install_update(
-                                                handle2, update2,
-                                            ));
+                                            tauri::async_runtime::spawn(
+                                                download_and_install_update(handle2, update2),
+                                            );
                                         } else {
-                                            info!("User declined the update to v{}.", update.version);
+                                            info!(
+                                                "User declined download of update v{}.",
+                                                update.version
+                                            );
                                         }
                                     });
                             }
@@ -1034,7 +1177,12 @@ pub fn run() {
             };
         })
         .plugin(tauri_plugin_shell::init())
-        .invoke_handler(tauri::generate_handler![greet, open_external])
+        .invoke_handler(tauri::generate_handler![
+            greet,
+            open_external,
+            restart_app,
+            close_update_progress
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
@@ -1079,9 +1227,9 @@ mod tests {
             minimized = false
             modules = []
             [updates]
-            enabled = true
+            auto_download = true
         "#;
         let config: UserConfig = toml::from_str(toml_str).unwrap();
-        assert!(config.updates.enabled);
+        assert!(config.updates.auto_download);
     }
 }

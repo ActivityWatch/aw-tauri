@@ -30,6 +30,7 @@ tauri-plugin-single-instance = "2.2.1"
 tray-icon = { version = "0.21.3", default-features = false }
 tao = "0.34.5"
 tauri-plugin-updater = "2"
+tauri-plugin-opener = "2"
 
 tokio = { version = "1", features = ["rt-multi-thread"] }
 notify = "8.0.0"
@@ -44,7 +45,6 @@ fern = { version = "0.7.1", features = ["colored"] }
 chrono = "0.4.39"
 aw-server = { git = "https://github.com/ActivityWatch/aw-server-rust.git", branch = "master" }
 aw-datastore = { git = "https://github.com/ActivityWatch/aw-server-rust.git", branch = "master" }
-tauri-plugin-opener = "2"
 glob = "0.3.1"
 open = "5.3.3"
 png = "0.17.16"

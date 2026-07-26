@@ -582,11 +582,11 @@ fn handle(
                     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
 
                     // Check stderr for config errors before deciding how to handle the exit.
-                    // Restarting won't fix a bad config, so we show a specific dialog and stop.
-                    let is_intentional_stop = *state_guard
-                        .modules_pending_shutdown
+                    // Restarting won't fix a bad config, so we surface it and stop retrying.
+                    let is_intentional_stop = state_guard
+                        .modules
                         .get(&name)
-                        .unwrap_or(&false);
+                        .is_some_and(|m| m.pending_shutdown);
                     let config_error_msg = if !is_intentional_stop {
                         stderr
                             .lines()
@@ -602,20 +602,18 @@ fn handle(
 
                     if let Some(err_msg) = config_error_msg {
                         error!("Module {name} exited due to a configuration error: {err_msg}");
-                        state_guard
-                            .modules_pending_shutdown
-                            .insert(name.clone(), true);
-                        let name_for_dialog = name_clone.clone();
-                        thread::spawn(move || {
-                            let app = &*get_app_handle().lock().expect("Failed to get app handle");
-                            app.dialog()
-                                .message(format!(
-                                    "{name_for_dialog} failed to start due to a configuration error:\n\n{err_msg}\n\nPlease fix the configuration file and restart the module."
-                                ))
-                                .kind(MessageDialogKind::Error)
-                                .title("Configuration Error")
-                                .show(|_| {});
-                        });
+                        if let Some(module) = state_guard.modules.get_mut(&name) {
+                            module.pending_shutdown = true;
+                        }
+                        show_module_warning(
+                            &event_tx,
+                            &name_clone,
+                            &format!(
+                                "Failed to start due to a configuration error:\n\n{err_msg}\n\n\
+                                 Please fix the configuration file and restart the module."
+                            ),
+                            module_alert_ui::StatusKind::Warning,
+                        );
                     } else if output.status.success() {
                         info!("Module {name} exited successfully");
                     } else {

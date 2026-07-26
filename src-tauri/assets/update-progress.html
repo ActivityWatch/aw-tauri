@@ -1,0 +1,306 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>ActivityWatch Update</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      --bg: #f7f8fa;
+      --fg: #1a1a1a;
+      --muted: #5c6370;
+      --bar-bg: #e2e5ea;
+      --bar-fill: #3b82f6;
+      --btn-bg: #3b82f6;
+      --btn-fg: #ffffff;
+      --btn-disabled-bg: #c5ccd6;
+      --btn-disabled-fg: #6b7280;
+      --error: #dc2626;
+      --success: #16a34a;
+      --card: #ffffff;
+      --border: #e5e7eb;
+    }
+
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #121418;
+        --fg: #f3f4f6;
+        --muted: #9ca3af;
+        --bar-bg: #2a2f3a;
+        --bar-fill: #60a5fa;
+        --btn-bg: #3b82f6;
+        --btn-fg: #ffffff;
+        --btn-disabled-bg: #374151;
+        --btn-disabled-fg: #9ca3af;
+        --error: #f87171;
+        --success: #4ade80;
+        --card: #1a1d24;
+        --border: #2d3340;
+      }
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    html, body {
+      margin: 0;
+      padding: 0;
+      height: 100%;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      background: var(--bg);
+      color: var(--fg);
+      user-select: none;
+      -webkit-user-select: none;
+    }
+
+    body {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 20px;
+    }
+
+    .card {
+      width: 100%;
+      max-width: 380px;
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 22px 22px 18px;
+      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.08);
+    }
+
+    h1 {
+      margin: 0 0 4px;
+      font-size: 16px;
+      font-weight: 600;
+    }
+
+    .version {
+      margin: 0 0 18px;
+      font-size: 13px;
+      color: var(--muted);
+    }
+
+    .progress-track {
+      width: 100%;
+      height: 10px;
+      background: var(--bar-bg);
+      border-radius: 999px;
+      overflow: hidden;
+    }
+
+    .progress-fill {
+      height: 100%;
+      width: 0%;
+      background: var(--bar-fill);
+      border-radius: 999px;
+      transition: width 0.15s ease-out;
+    }
+
+    .progress-fill.indeterminate {
+      width: 35%;
+      animation: indeterminate 1.2s ease-in-out infinite;
+    }
+
+    @keyframes indeterminate {
+      0% { transform: translateX(-120%); }
+      100% { transform: translateX(320%); }
+    }
+
+    .meta {
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+      margin-top: 10px;
+      gap: 12px;
+    }
+
+    .status {
+      margin: 0;
+      font-size: 13px;
+      color: var(--muted);
+      flex: 1;
+      min-width: 0;
+    }
+
+    .status.error {
+      color: var(--error);
+    }
+
+    .status.success {
+      color: var(--success);
+    }
+
+    .percent {
+      margin: 0;
+      font-size: 13px;
+      font-variant-numeric: tabular-nums;
+      color: var(--muted);
+      white-space: nowrap;
+    }
+
+    .actions {
+      display: flex;
+      justify-content: flex-end;
+      gap: 8px;
+      margin-top: 18px;
+    }
+
+    button {
+      appearance: none;
+      border: none;
+      border-radius: 8px;
+      padding: 8px 14px;
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: opacity 0.15s ease, background 0.15s ease;
+    }
+
+    button:disabled {
+      cursor: not-allowed;
+    }
+
+    button.primary {
+      background: var(--btn-bg);
+      color: var(--btn-fg);
+    }
+
+    button.primary:disabled {
+      background: var(--btn-disabled-bg);
+      color: var(--btn-disabled-fg);
+    }
+
+    button.secondary {
+      background: transparent;
+      color: var(--muted);
+      border: 1px solid var(--border);
+    }
+
+    button:not(:disabled):hover {
+      opacity: 0.9;
+    }
+
+    button:not(:disabled):active {
+      opacity: 0.8;
+    }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>Updating ActivityWatch</h1>
+    <p class="version" id="version">Preparing update…</p>
+
+    <div class="progress-track" aria-hidden="true">
+      <div class="progress-fill indeterminate" id="progress-fill"></div>
+    </div>
+
+    <div class="meta">
+      <p class="status" id="status">Starting download…</p>
+      <p class="percent" id="percent"></p>
+    </div>
+
+    <div class="actions">
+      <button type="button" class="secondary" id="later-btn" hidden>Later</button>
+      <button type="button" class="primary" id="restart-btn" disabled>Restart Now</button>
+    </div>
+  </div>
+
+  <script>
+    const versionEl = document.getElementById('version');
+    const fillEl = document.getElementById('progress-fill');
+    const statusEl = document.getElementById('status');
+    const percentEl = document.getElementById('percent');
+    const restartBtn = document.getElementById('restart-btn');
+    const laterBtn = document.getElementById('later-btn');
+
+    function setVersion(version) {
+      versionEl.textContent = version ? ('Version ' + version) : 'Preparing update…';
+    }
+
+    function setProgress(percent, downloaded, total) {
+      const p = Math.max(0, Math.min(100, Number(percent) || 0));
+      fillEl.classList.remove('indeterminate');
+      fillEl.style.width = p + '%';
+      percentEl.textContent = Math.round(p) + '%';
+
+      if (total && downloaded != null) {
+        statusEl.className = 'status';
+        statusEl.textContent = 'Downloading update…';
+      }
+    }
+
+    function setStatus(message, kind) {
+      statusEl.className = 'status' + (kind ? ' ' + kind : '');
+      statusEl.textContent = message || '';
+    }
+
+    function setInstalling() {
+      fillEl.classList.remove('indeterminate');
+      fillEl.style.width = '100%';
+      percentEl.textContent = '100%';
+      setStatus('Download complete. Installing…', null);
+      restartBtn.disabled = true;
+      laterBtn.hidden = true;
+    }
+
+    function setReady() {
+      fillEl.classList.remove('indeterminate');
+      fillEl.style.width = '100%';
+      percentEl.textContent = '100%';
+      setStatus('Update installed. Restart to apply.', 'success');
+      restartBtn.disabled = false;
+      laterBtn.hidden = false;
+      restartBtn.focus();
+    }
+
+    function setError(message) {
+      fillEl.classList.remove('indeterminate');
+      setStatus(message || 'Update failed.', 'error');
+      percentEl.textContent = '';
+      restartBtn.disabled = true;
+      laterBtn.hidden = false;
+      laterBtn.textContent = 'Close';
+    }
+
+    function invoke(cmd) {
+      if (window.__TAURI_INTERNALS__ && typeof window.__TAURI_INTERNALS__.invoke === 'function') {
+        return window.__TAURI_INTERNALS__.invoke(cmd);
+      }
+      return Promise.reject(new Error('Tauri IPC unavailable'));
+    }
+
+    restartBtn.addEventListener('click', function () {
+      restartBtn.disabled = true;
+      setStatus('Restarting…', null);
+      invoke('restart_app').catch(function (err) {
+        setError('Failed to restart: ' + (err && err.message ? err.message : String(err)));
+      });
+    });
+
+    laterBtn.addEventListener('click', function () {
+      invoke('close_update_progress').catch(function () {
+        window.close();
+      });
+    });
+
+    // Called from Rust via window.eval. Flush any updates that arrived before load.
+    var impl = {
+      setVersion: setVersion,
+      setProgress: setProgress,
+      setStatus: setStatus,
+      setInstalling: setInstalling,
+      setReady: setReady,
+      setError: setError
+    };
+    if (window.__awUpdate && typeof window.__awUpdate.__flush === 'function') {
+      window.__awUpdate.__flush(impl);
+    } else {
+      window.__awUpdate = impl;
+    }
+  </script>
+</body>
+</html>
