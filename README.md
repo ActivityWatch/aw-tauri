@@ -100,7 +100,7 @@ opt in.
 - `autostart.modules` — Modules to start automatically. Each entry can be a string (`"aw-watcher-afk"`) or an object with args (`{ name = "aw-sync", args = "daemon" }`). `aw-sync` is opt-in, not included by default
 - `module_args` — Default args by module name, used when a module is launched from the tray menu or restarted after a crash. Lets you set args for a module *without* adding it to `autostart.modules` (e.g. `aw-watcher-vscode` above is launched manually from the tray, but still gets its args). If a module is listed in both places, the inline args on its `autostart.modules` entry take precedence.
 
-**Note:** On Linux with Wayland, the default modules are `aw-awatcher` instead of `aw-watcher-afk` + `aw-watcher-window` (auto-detected via `XDG_SESSION_TYPE` / `WAYLAND_DISPLAY`).
+**Note:** On Linux, the default watcher is `aw-awatcher` (covers window + AFK on both X11 and Wayland) instead of the separate Python `aw-watcher-afk` / `aw-watcher-window` pair. That keeps self-contained deb/rpm/AppImage packages small and pure-Rust. You can still drop the Python watchers into `~/aw-modules` and point `autostart.modules` at them.
 
 ## Logging
 
@@ -206,9 +206,11 @@ aw-tauri searches for `aw-*` executables in these locations:
 
 | Platform | Paths |
 |----------|-------|
-| Linux    | `~/bin`, `~/.local/bin`, `$XDG_DATA_HOME/activitywatch/aw-tauri/modules`, `~/aw-modules`, `$PATH` |
-| macOS    | `~/aw-modules`, `/Applications/ActivityWatch.app/Contents/MacOS`, `/Applications/ActivityWatch.app/Contents/Resources`, `$PATH` |
+| Linux    | `~/bin`, `~/.local/bin`, `$XDG_DATA_HOME/activitywatch/aw-tauri/modules`, `~/aw-modules`, install resources (`../lib/aw-tauri/modules` next to the binary; `$APPDIR/...` for AppImage), `$PATH` |
+| macOS    | `~/aw-modules`, app bundle `Contents/Resources[/modules]` (resolved from `current_exe()`), `$PATH` |
 | Windows  | `C:\Users\{user}\aw-modules`, `C:\Users\{user}\AppData\Local\Programs\ActivityWatch`, `%PATH%` |
+
+Install-relative paths are always searched at runtime (not only the snapshot written into `config.toml` on first run), so upgrades find modules bundled into the package.
 
 Additional paths can be added via `discovery_paths` in the config.
 
