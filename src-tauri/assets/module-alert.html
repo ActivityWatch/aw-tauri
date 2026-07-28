@@ -1,0 +1,228 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>ActivityWatch</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      --bg: #f5f5f7;
+      --fg: #1d1d1f;
+      --muted: #6e6e73;
+      --card: #ffffff;
+      --border: rgba(0, 0, 0, 0.08);
+      --warn: #b25000;
+      --warn-bg: #fff4e5;
+      --ok: #1b7f3a;
+      --ok-bg: #e8f7ed;
+      --badge-warn-bg: #fff4e5;
+      --badge-ok-bg: #e8f7ed;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #1c1c1e;
+        --fg: #f5f5f7;
+        --muted: #a1a1a6;
+        --card: #2c2c2e;
+        --border: rgba(255, 255, 255, 0.1);
+        --warn: #ffb340;
+        --warn-bg: #3a2a12;
+        --ok: #6dde8b;
+        --ok-bg: #1a3322;
+        --badge-warn-bg: #3a2a12;
+        --badge-ok-bg: #1a3322;
+      }
+    }
+    * { box-sizing: border-box; }
+    html, body {
+      margin: 0;
+      height: 100%;
+      font: 13px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: var(--bg);
+      color: var(--fg);
+    }
+    body {
+      display: flex;
+      flex-direction: column;
+      padding: 16px 16px 14px;
+      gap: 12px;
+    }
+    header {
+      display: flex;
+      align-items: flex-start;
+      gap: 10px;
+    }
+    .icon {
+      flex: 0 0 auto;
+      width: 28px;
+      height: 28px;
+      border-radius: 50%;
+      background: var(--warn-bg);
+      color: var(--warn);
+      display: grid;
+      place-items: center;
+      font-weight: 700;
+      font-size: 15px;
+      line-height: 1;
+    }
+    header.all-ok .icon {
+      background: var(--ok-bg);
+      color: var(--ok);
+    }
+    h1 {
+      margin: 0;
+      font-size: 15px;
+      font-weight: 600;
+      letter-spacing: -0.01em;
+    }
+    .subtitle {
+      margin: 3px 0 0;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.4;
+    }
+    #list {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      overflow: auto;
+      flex: 1;
+      min-height: 0;
+    }
+    .row {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 11px 12px;
+      border-left: 3px solid var(--warn);
+    }
+    .row.ok {
+      border-left-color: var(--ok);
+    }
+    .row-top {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      margin-bottom: 6px;
+    }
+    .name {
+      font-weight: 600;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 12px;
+      min-width: 0;
+    }
+    .badge {
+      flex: 0 0 auto;
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: 0.01em;
+      padding: 2px 8px;
+      border-radius: 999px;
+      background: var(--badge-warn-bg);
+      color: var(--warn);
+    }
+    .row.ok .badge {
+      background: var(--badge-ok-bg);
+      color: var(--ok);
+    }
+    .msg {
+      color: var(--muted);
+      white-space: pre-wrap;
+      word-break: break-word;
+      font-size: 12.5px;
+      line-height: 1.45;
+    }
+    .empty {
+      color: var(--muted);
+      font-size: 12px;
+      padding: 8px 0;
+    }
+    footer {
+      color: var(--muted);
+      font-size: 11px;
+      line-height: 1.35;
+    }
+  </style>
+</head>
+<body>
+  <header id="header">
+    <div class="icon" id="header-icon" aria-hidden="true">!</div>
+    <div>
+      <h1 id="heading">A module stopped</h1>
+      <p class="subtitle" id="subtitle">ActivityWatch is trying to restart it automatically. This list updates as things change.</p>
+    </div>
+  </header>
+  <div id="list"><div class="empty">No status updates yet.</div></div>
+  <footer>If this keeps happening, check the logs for details: open the ActivityWatch tray menu and choose <strong>Open log folder</strong>.</footer>
+  <script>
+    (function () {
+      var list = document.getElementById('list');
+      var header = document.getElementById('header');
+      var headerIcon = document.getElementById('header-icon');
+      var heading = document.getElementById('heading');
+      var subtitle = document.getElementById('subtitle');
+      var rows = Object.create(null);
+
+      function ensureList() {
+        var empty = list.querySelector('.empty');
+        if (empty) empty.remove();
+      }
+
+      function refreshHeader() {
+        var keys = Object.keys(rows);
+        if (!keys.length) return;
+        var anyWarn = keys.some(function (k) {
+          return !rows[k].classList.contains('ok');
+        });
+        header.classList.toggle('all-ok', !anyWarn);
+        headerIcon.textContent = anyWarn ? '!' : '✓';
+        if (anyWarn) {
+          heading.textContent = keys.length === 1 ? 'A module stopped' : 'Some modules stopped';
+          subtitle.textContent = 'ActivityWatch is trying to restart them automatically. This list updates as things change.';
+        } else {
+          heading.textContent = 'Modules are running again';
+          subtitle.textContent = 'Everything recovered. You can close this window.';
+        }
+      }
+
+      function setStatus(name, message, kind) {
+        ensureList();
+        var key = String(name);
+        var row = rows[key];
+        if (!row) {
+          row = document.createElement('div');
+          row.className = 'row';
+          row.dataset.module = key;
+          row.innerHTML =
+            '<div class="row-top">' +
+              '<div class="name"></div>' +
+              '<div class="badge"></div>' +
+            '</div>' +
+            '<div class="msg"></div>';
+          list.appendChild(row);
+          rows[key] = row;
+        }
+        var isOk = kind === 'ok';
+        row.classList.toggle('ok', isOk);
+        row.querySelector('.name').textContent = key;
+        row.querySelector('.badge').textContent = isOk ? 'Running' : 'Restarting';
+        // Limit-reached messages are still "warning" but badge should say Stopped
+        if (!isOk && String(message).indexOf("Couldn’t restart") === 0) {
+          row.querySelector('.badge').textContent = 'Stopped';
+        }
+        row.querySelector('.msg').textContent = String(message);
+        refreshHeader();
+      }
+
+      var impl = { setStatus: setStatus };
+      if (window.__awModuleAlert && typeof window.__awModuleAlert.__flush === 'function') {
+        window.__awModuleAlert.__flush(impl);
+      } else {
+        window.__awModuleAlert = impl;
+      }
+    })();
+  </script>
+</body>
+</html>

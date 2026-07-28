@@ -42,9 +42,8 @@ use std::time::Duration;
 use std::{env, fs, thread};
 use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem, SubmenuBuilder};
 use tauri::{AppHandle, Wry};
-use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
 
-use crate::{get_app_handle, get_config, get_tray_id, HANDLE_CONDVAR};
+use crate::{get_app_handle, get_config, get_tray_id, module_alert_ui, HANDLE_CONDVAR};
 use std::io::{BufRead, BufReader};
 use tauri_plugin_notification::NotificationExt;
 
@@ -566,7 +565,16 @@ fn handle(
             let mut state_guard = state.lock().expect("Failed to acquire manager_state lock");
             match msg {
                 ModuleMessage::Started { name, pid, args } => {
+                    // Capture whether this start follows a crash restart before clearing state.
+                    let was_recovery = state_guard
+                        .modules
+                        .get(&name)
+                        .is_some_and(|m| m.restart_count > 0);
                     state_guard.started_module(&name, pid, args);
+                    if was_recovery {
+                        // Module came back after a crash — update the open alert window in place.
+                        show_module_recovered(&event_tx, &name);
+                    }
                 }
                 ModuleMessage::Stopped { name, output } => {
                     state_guard.stopped_module(&name);
@@ -574,7 +582,8 @@ fn handle(
                     if output.status.success() {
                         info!("Module {name} exited successfully");
                     } else {
-                        error!("Module {name} exited with error status");
+                        // Restart path logs up to 3 attempt lines; keep this at debug to avoid spam.
+                        debug!("Module {name} exited with error status");
                         thread::spawn(move || {
                             let (should_restart, restart_info) = {
                                 let state_guard = state_clone
@@ -592,10 +601,6 @@ fn handle(
                                     // Exponential backoff: 2^(restart_count + 1) seconds
                                     // restart_count 0 -> 2 seconds, 1 -> 4 seconds, 2 -> 8 seconds
                                     let delay_secs = 2u64.pow(restart_count + 1);
-                                    info!(
-                                        "Module {name_clone} will restart in {delay_secs} seconds (attempt {} of 3)",
-                                        restart_count + 1
-                                    );
                                     (true, Some((delay_secs, restart_count)))
                                 } else {
                                     (false, None)
@@ -604,11 +609,20 @@ fn handle(
 
                             if should_restart {
                                 if let Some((secs, restart_count)) = restart_info {
-                                    show_warning(
-                                        &event_tx_for_restart,
-                                        &format!("{name_clone} crashed. Restarting..."),
+                                    let attempt = restart_count + 1;
+                                    // One log line per restart attempt (max 3 total with limit case).
+                                    error!(
+                                        "Module {name_clone} crashed (attempt {attempt} of 3); restarting in {secs}s"
                                     );
-                                    error!("Module {name_clone} crashed and will be restarted");
+                                    show_module_warning(
+                                        &event_tx_for_restart,
+                                        &name_clone,
+                                        &format!(
+                                            "Stopped unexpectedly. Restarting in {secs} seconds…\n\
+                                             Automatic retry {attempt} of 3 — you don’t need to do anything yet."
+                                        ),
+                                        module_alert_ui::StatusKind::Warning,
+                                    );
 
                                     thread::sleep(Duration::from_secs(secs));
 
@@ -623,20 +637,23 @@ fn handle(
                                     state_guard.start_module(&name_clone, None);
                                 }
                             } else {
-                                // Restart limit reached
+                                // Restart limit reached — update UI; no 4th log line (cap is 3).
                                 let mut state_guard = state_clone
                                     .lock()
                                     .expect("Failed to acquire manager_state lock");
                                 if let Some(module) = state_guard.modules.get_mut(&name_clone) {
                                     module.pending_shutdown = true;
                                 }
-                                show_warning(
+                                show_module_warning(
                                     &event_tx_for_restart,
+                                    &name_clone,
                                     &format!(
-                                        "{name_clone} keeps on crashing. Restart limit reached."
+                                        "Couldn’t restart after several tries, so it was left stopped.\n\n\
+                                         Open the ActivityWatch tray menu and choose Open log folder, \
+                                         then check the log for “{name_clone}” for the error details."
                                     ),
+                                    module_alert_ui::StatusKind::Warning,
                                 );
-                                error!("Module {name_clone} exceeded crash restart limit");
                             }
                         });
 
@@ -1031,25 +1048,57 @@ fn route_notification(event_tx: &Option<Sender<ManagerEvent>>, title: &str, mess
     send_tauri_notification(title, message);
 }
 
-/// Route a warning dialog: send via ManagerEvent channel (mini mode) or Tauri dialog (GUI mode).
-fn show_warning(event_tx: &Option<Sender<ManagerEvent>>, message: &str) {
+/// Compact one-line text for tray notifications (no multi-line body).
+fn notification_summary(module_name: &str, message: &str) -> String {
+    let first_line = message.lines().next().unwrap_or(message).trim();
+    format!("{module_name}: {first_line}")
+}
+
+/// Route a module crash warning: mini → notification, daemon → log, GUI → replaceable webview.
+fn show_module_warning(
+    event_tx: &Option<Sender<ManagerEvent>>,
+    module_name: &str,
+    message: &str,
+    kind: module_alert_ui::StatusKind,
+) {
     if let Some(tx) = event_tx {
         let _ = tx.send(ManagerEvent::Notification {
-            title: "Warning".to_string(),
-            message: message.to_string(),
+            title: "ActivityWatch".to_string(),
+            message: notification_summary(module_name, message),
         });
         return;
     }
     if crate::is_daemon_mode() {
-        warn!("{message}");
+        warn!("{module_name}: {message}");
         return;
     }
-    let app = &*get_app_handle().lock().expect("Failed to get app handle");
-    app.dialog()
-        .message(message)
-        .kind(MessageDialogKind::Warning)
-        .title("Warning")
-        .show(|_| {});
+    let app = get_app_handle()
+        .lock()
+        .expect("Failed to get app handle")
+        .clone();
+    module_alert_ui::show_or_update(&app, module_name, message, kind);
+}
+
+/// Update the module-alert UI when a module comes back after a crash restart.
+/// Does not open a new window if the user already dismissed it.
+fn show_module_recovered(event_tx: &Option<Sender<ManagerEvent>>, module_name: &str) {
+    let message = "Back up and running again.";
+    if let Some(tx) = event_tx {
+        let _ = tx.send(ManagerEvent::Notification {
+            title: "ActivityWatch".to_string(),
+            message: format!("{module_name}: running again"),
+        });
+        return;
+    }
+    if crate::is_daemon_mode() {
+        info!("{module_name}: recovered and running again");
+        return;
+    }
+    let app = get_app_handle()
+        .lock()
+        .expect("Failed to get app handle")
+        .clone();
+    module_alert_ui::update_if_open(&app, module_name, message, module_alert_ui::StatusKind::Ok);
 }
 
 fn send_tauri_notification(title: &str, message: &str) {

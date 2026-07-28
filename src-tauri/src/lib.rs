@@ -22,6 +22,7 @@ mod dirs;
 mod logging;
 mod manager;
 mod mini;
+mod module_alert_ui;
 
 /// CLI arguments passed from main()
 #[derive(Debug, Default)]
@@ -700,6 +701,14 @@ pub fn run() {
                 .expect("Failed to open lock file");
             info!("Another instance is running, quitting!");
         }))
+        // Serve the module-alert HTML with a valid Origin for the webview.
+        .register_uri_scheme_protocol(module_alert_ui::URI_SCHEME, |_ctx, _request| {
+            tauri::http::Response::builder()
+                .status(200)
+                .header("Content-Type", "text/html; charset=utf-8")
+                .body(module_alert_ui::ALERT_HTML.as_bytes().to_vec())
+                .unwrap()
+        })
         .setup(|app| {
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
