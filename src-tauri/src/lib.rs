@@ -479,24 +479,14 @@ impl Default for UserConfig {
     fn default() -> Self {
         let discovery_paths = dirs::get_discovery_paths();
 
-        // Build default modules list based on platform and display server
+        // Build default modules list based on platform.
+        // Linux uses aw-awatcher (Rust, covers window+AFK on both X11 and Wayland)
+        // so self-contained deb/rpm/AppImage packages work without the Python watchers.
+        // See ActivityWatch/aw-tauri#232.
         let mut modules = Vec::new();
 
         if cfg!(target_os = "linux") {
-            // Check for Wayland using multiple environment variables
-            let is_wayland = env::var("XDG_SESSION_TYPE")
-                .map(|s| s == "wayland")
-                .unwrap_or(false)
-                || env::var("WAYLAND_DISPLAY").is_ok();
-
-            if is_wayland {
-                // On Linux with Wayland, use aw-awatcher instead of separate watchers
-                modules.push(ModuleEntry::Simple("aw-awatcher".to_string()));
-            } else {
-                // On Linux with X11 or other display servers, use traditional watchers
-                modules.push(ModuleEntry::Simple("aw-watcher-afk".to_string()));
-                modules.push(ModuleEntry::Simple("aw-watcher-window".to_string()));
-            }
+            modules.push(ModuleEntry::Simple("aw-awatcher".to_string()));
         } else {
             // On non-Linux platforms, use traditional watchers
             modules.push(ModuleEntry::Simple("aw-watcher-afk".to_string()));

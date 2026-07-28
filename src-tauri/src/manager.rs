@@ -1208,6 +1208,15 @@ fn discover_modules() -> BTreeMap<String, PathBuf> {
     let path = env::var_os("PATH").unwrap_or_default();
     let mut paths = env::split_paths(&path).collect::<Vec<_>>();
 
+    // Always include install-relative paths at runtime (not only those snapshotted into
+    // config.toml on first run) so upgrades find bundled modules. Prepend so they beat PATH.
+    // Config discovery_paths are prepended after this and take higher priority.
+    for path in crate::dirs::get_install_discovery_paths() {
+        if !paths.contains(&path) {
+            paths.insert(0, path);
+        }
+    }
+
     // check each path in discovery_paths and add it to the start of the paths list if it's not already there
     for path in config.discovery_paths.iter() {
         if !paths.contains(path) {
@@ -1309,6 +1318,13 @@ fn discover_modules() -> BTreeMap<String, PathBuf> {
 
     let path = env::var_os("PATH").unwrap_or_default();
     let mut paths = env::split_paths(&path).collect::<Vec<_>>();
+
+    // Always include install-relative paths at runtime (see unix discover_modules).
+    for path in crate::dirs::get_install_discovery_paths() {
+        if !paths.contains(&path) {
+            paths.insert(0, path);
+        }
+    }
 
     // check each path in discovery_paths and add it to the start of the paths list if it's not already there
     for path in config.discovery_paths.iter() {

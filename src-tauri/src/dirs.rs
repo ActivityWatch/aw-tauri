@@ -159,6 +159,75 @@ pub fn get_runtime_dir() -> PathBuf {
     get_data_dir().unwrap_or_else(|_| PathBuf::from("/tmp"))
 }
 
+/// Paths next to the installed app binary where bundled modules live.
+///
+/// Resolved at runtime from `current_exe()` (and `APPDIR` on AppImage) so
+/// upgrades still find modules even when `config.toml` was written by an older
+/// build that did not list these paths.
+///
+/// Layout (Tauri `bundle.resources`):
+/// - Linux deb/rpm: `/usr/lib/aw-tauri/modules/` (binary in `/usr/bin/`)
+/// - Linux AppImage: `$APPDIR/usr/lib/aw-tauri/modules/`
+/// - macOS: `Contents/Resources/modules/` (and legacy `Contents/Resources/`)
+pub fn get_install_discovery_paths() -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+
+    #[cfg(target_os = "linux")]
+    {
+        if let Ok(exe_path) = std::env::current_exe() {
+            if let Some(exe_dir) = exe_path.parent() {
+                // externalBin / same-directory layout
+                paths.push(exe_dir.to_path_buf());
+
+                // Tauri resources: ../lib/<productName>/ relative to the binary
+                if let Some(prefix) = exe_dir.parent() {
+                    let resource = prefix.join("lib").join("aw-tauri");
+                    if resource.exists() {
+                        paths.push(resource.join("modules"));
+                        paths.push(resource);
+                    }
+                }
+            }
+        }
+
+        // AppImage runtime sets APPDIR to the mounted squashfs root
+        if let Ok(appdir) = std::env::var("APPDIR") {
+            let resource = PathBuf::from(appdir)
+                .join("usr")
+                .join("lib")
+                .join("aw-tauri");
+            if resource.exists() {
+                let modules = resource.join("modules");
+                if !paths.contains(&modules) {
+                    paths.push(modules);
+                }
+                if !paths.contains(&resource) {
+                    paths.push(resource);
+                }
+            }
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        // Structure: Contents/MacOS/aw-tauri -> go up two levels -> Contents/Resources
+        if let Ok(exe_path) = std::env::current_exe() {
+            if let Some(contents_dir) = exe_path.parent().and_then(|p| p.parent()) {
+                let resources_dir = contents_dir.join("Resources");
+                if resources_dir.exists() {
+                    // Modules bundled via tauri.conf.json `bundle.resources` land in Resources/modules/.
+                    paths.push(resources_dir.join("modules"));
+                    // Also include Resources/ directly for compatibility with modules placed
+                    // at the root (e.g. legacy build_app_tauri.sh layout).
+                    paths.push(resources_dir);
+                }
+            }
+        }
+    }
+
+    paths
+}
+
 pub fn get_discovery_paths() -> Vec<PathBuf> {
     let mut discovery_paths = Vec::new();
 
@@ -186,6 +255,9 @@ pub fn get_discovery_paths() -> Vec<PathBuf> {
             // Legacy path for backward compatibility
             discovery_paths.push(home_path.join("aw-modules"));
         }
+
+        // Bundled modules next to the install (deb/rpm/AppImage)
+        discovery_paths.extend(get_install_discovery_paths());
     }
 
     #[cfg(target_os = "windows")]
@@ -210,24 +282,7 @@ pub fn get_discovery_paths() -> Vec<PathBuf> {
         if let Ok(home_dir) = std::env::var("HOME") {
             discovery_paths.push(PathBuf::from(home_dir).join("aw-modules"));
         }
-        // Detect if running inside a .app bundle dynamically via the executable path.
-        // This replaces the previous hardcoded /Applications/ActivityWatch.app paths,
-        // which broke for non-standard install locations (e.g. ~/Downloads, CI artifacts).
-        //
-        // Structure: Contents/MacOS/aw-tauri -> go up two levels -> Contents/Resources
-        if let Ok(exe_path) = std::env::current_exe() {
-            if let Some(contents_dir) = exe_path.parent().and_then(|p| p.parent()) {
-                let resources_dir = contents_dir.join("Resources");
-                if resources_dir.exists() {
-                    // Running inside a macOS .app bundle.
-                    // Modules bundled via tauri.conf.json `bundle.resources` land in Resources/modules/.
-                    discovery_paths.push(resources_dir.join("modules"));
-                    // Also include Resources/ directly for compatibility with modules placed
-                    // at the root (e.g. legacy build_app_tauri.sh layout).
-                    discovery_paths.push(resources_dir);
-                }
-            }
-        }
+        discovery_paths.extend(get_install_discovery_paths());
     }
 
     #[cfg(target_os = "android")]
@@ -296,5 +351,26 @@ mod tests {
         // any other profile gets its own sibling root
         assert_eq!(appname_for("research"), "activitywatch-research");
         assert_eq!(appname_for("my-profile"), "activitywatch-my-profile");
+    }
+
+    #[test]
+    fn test_install_discovery_paths_is_callable() {
+        // Does not require a real install layout; just ensures the helper runs.
+        let _ = get_install_discovery_paths();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_linux_discovery_includes_user_paths() {
+        if let Ok(home) = std::env::var("HOME") {
+            let paths = get_discovery_paths();
+            assert!(
+                paths.iter().any(|p| p.ends_with("aw-modules")),
+                "expected ~/aw-modules in discovery paths, got {:?}",
+                paths
+            );
+            let home_path = PathBuf::from(home);
+            assert!(paths.iter().any(|p| p.starts_with(&home_path)));
+        }
     }
 }

@@ -13,6 +13,16 @@ ifdef TAURI_SIGNING_PRIVATE_KEY
 TAURI_BUILD_ARGS += --config '{"bundle":{"createUpdaterArtifacts":true}}'
 endif
 
+# When src-tauri/modules/ contains staged binaries (e.g. aw-awatcher, aw-sync
+# prepared by the activitywatch bundle build), inject them via bundle.resources
+# so deb/rpm/AppImage are self-contained. Standalone builds without that dir are
+# unchanged. See ActivityWatch/aw-tauri#232.
+ifeq ($(OS),Linux)
+ifneq ($(wildcard src-tauri/modules/aw-*),)
+TAURI_BUILD_ARGS += --config '{"bundle":{"resources":{"modules/":"modules/"}}}'
+endif
+endif
+
 build: prebuild
 	# When TAURI_SIGNING_PRIVATE_KEY is present, the Makefile override above sets
 	# bundle.createUpdaterArtifacts=true. That flag is therefore absent from
