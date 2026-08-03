@@ -173,14 +173,10 @@ pub fn get_discovery_paths() -> Vec<PathBuf> {
         // Windows: User-specific and system paths
         if let Ok(username) = std::env::var("USERNAME") {
             discovery_paths.push(PathBuf::from(format!(r"C:/Users/{}/aw-modules", username)));
-            // The Windows installer (scripts/package/aw-tauri.iss) installs to
-            // Programs/ActivityWatch-Tauri, so the bundled modules live there.
             discovery_paths.push(PathBuf::from(format!(
                 r"C:/Users/{}/AppData/Local/Programs/ActivityWatch-Tauri",
                 username
             )));
-            // Keep the old path so modules from a classic ActivityWatch install
-            // are still found.
             discovery_paths.push(PathBuf::from(format!(
                 r"C:/Users/{}/AppData/Local/Programs/ActivityWatch",
                 username
