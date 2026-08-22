@@ -5,8 +5,16 @@ else
 endif
 OS := $(shell uname -s)
 
+# Updater artifacts (.tar.gz/.zip + .sig) require the signing key, so only
+# enable them when TAURI_SIGNING_PRIVATE_KEY is set (release CI). Without it,
+# plain bundles are built and local/fork-PR builds keep working.
+TAURI_BUILD_ARGS :=
+ifdef TAURI_SIGNING_PRIVATE_KEY
+TAURI_BUILD_ARGS += --config '{"bundle":{"createUpdaterArtifacts":true}}'
+endif
+
 build: prebuild
-	npm run tauri build
+	npm run tauri build -- $(TAURI_BUILD_ARGS)
 
 dev: prebuild
 	npm run tauri dev

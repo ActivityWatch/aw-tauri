@@ -22,7 +22,7 @@
   },
   "plugins": {
     "updater": {
-      "pubkey": "",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IERDOEZGQzlEN0NERDlGQjAKUldTd245MThuZnlQM0Q1Z0JuT0RZU0JEVUxlT0x5TGc0Q09YbVZadHFwRllsRDFRMFJ2eTFtUEYK",
       "endpoints": [
         "https://github.com/ActivityWatch/activitywatch/releases/latest/download/latest.json"
       ],
