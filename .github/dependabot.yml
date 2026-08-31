@@ -13,6 +13,14 @@ updates:
     directory: "/src-tauri"
     schedule:
       interval: "weekly"
+    groups:
+      # Both crates come from the same aw-server-rust Git revision. Updating
+      # them separately creates duplicate Cargo.lock PRs and can leave the
+      # update stream blocked behind one stale PR.
+      aw-server-rust:
+        patterns:
+          - "aw-server"
+          - "aw-datastore"
 
   # Enable version updates for GitHub Actions
   - package-ecosystem: "github-actions"
