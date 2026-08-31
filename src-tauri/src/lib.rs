@@ -583,10 +583,10 @@ fn run_daemon() {
         std::process::exit(1);
     }
 
-    let mut aw_config = aw_server::config::create_config(testing, None);
+    let mut aw_config = aw_server::config::create_config(&cli_args.profile, None);
     aw_config.port = port;
 
-    let db_path = match aw_server::dirs::db_path(testing) {
+    let db_path = match aw_server::dirs::db_path(&cli_args.profile) {
         Ok(path) => match path.to_str() {
             Some(s) => s.to_string(),
             None => {
@@ -680,7 +680,7 @@ pub(crate) fn prepare_aw_server(
     let testing = cli_args.testing;
     let legacy_import = false;
 
-    let mut aw_config = aw_server::config::create_config(testing, None);
+    let mut aw_config = aw_server::config::create_config(&cli_args.profile, None);
 
     // Port priority: CLI flag > testing default (5666) > config file
     let port = cli_args
@@ -694,7 +694,7 @@ pub(crate) fn prepare_aw_server(
         return Err(format!("Port {} is already in use", port));
     }
 
-    let db_path = aw_server::dirs::db_path(testing)
+    let db_path = aw_server::dirs::db_path(&cli_args.profile)
         .map_err(|_| "Failed to get db path".to_string())?
         .to_str()
         .ok_or_else(|| "Database path is not valid UTF-8".to_string())?
@@ -980,14 +980,15 @@ pub fn run() {
                 let testing = cli_args.testing;
                 let legacy_import = false;
 
-                let mut aw_config = aw_server::config::create_config(testing, None);
+                let mut aw_config =
+                    aw_server::config::create_config(&cli_args.profile, None);
 
                 // Port priority: CLI flag > testing default (5666) > config file
                 let port = cli_args
                     .port
                     .unwrap_or(if testing { 5666 } else { user_config.port });
                 aw_config.port = port;
-                let db_path = aw_server::dirs::db_path(testing)
+                let db_path = aw_server::dirs::db_path(&cli_args.profile)
                     .expect("Failed to get db path")
                     .to_str()
                     .unwrap()
