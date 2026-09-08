@@ -132,6 +132,11 @@ pub fn window_title(profile: &str) -> String {
     }
 }
 
+/// Package-name identity used by every autostart entry before profile-aware
+/// names. The default profile keeps this so upgrades do not orphan the
+/// existing login item.
+pub const LEGACY_AUTOSTART_APP_NAME: &str = "aw-tauri";
+
 /// OS autostart entry name. The default profile keeps the plugin's legacy
 /// package-name identity; named profiles use distinct identities so one tray
 /// toggle cannot overwrite or disable another profile's entry.
@@ -139,8 +144,24 @@ pub fn autostart_app_name(profile: &str) -> Option<String> {
     if is_default(profile) {
         None
     } else {
-        Some(format!("aw-tauri-{profile}"))
+        Some(format!("{LEGACY_AUTOSTART_APP_NAME}-{profile}"))
     }
+}
+
+/// True when `command` is the login command of this named profile
+/// (`--profile NAME` as adjacent tokens, including LaunchAgent plist XML).
+/// Default-profile commands have no `--profile` flag, so they never match.
+pub fn command_targets_profile(command: &str, profile: &str) -> bool {
+    if is_default(profile) || profile.is_empty() {
+        return false;
+    }
+    let tokens: Vec<&str> = command
+        .split(|c: char| c.is_whitespace() || matches!(c, '<' | '>' | '"' | '\''))
+        .filter(|t| !t.is_empty() && *t != "string" && *t != "/string")
+        .collect();
+    tokens
+        .windows(2)
+        .any(|pair| pair[0] == "--profile" && pair[1] == profile)
 }
 
 /// Linux D-Bus well-known name base for the single-instance plugin.
@@ -249,5 +270,30 @@ mod tests {
             single_instance_dbus_id("research"),
             "net.activitywatch.app.research"
         );
+    }
+
+    #[test]
+    fn test_command_targets_profile() {
+        assert!(command_targets_profile(
+            "/usr/bin/aw-tauri --profile research",
+            "research"
+        ));
+        assert!(!command_targets_profile(
+            "/usr/bin/aw-tauri --profile research",
+            "testing"
+        ));
+        assert!(!command_targets_profile("/usr/bin/aw-tauri", "research"));
+        assert!(!command_targets_profile(
+            "/usr/bin/aw-tauri --profile research",
+            DEFAULT_PROFILE
+        ));
+        assert!(command_targets_profile(
+            "<string>/Applications/aw-tauri.app</string><string>--profile</string><string>research</string>",
+            "research"
+        ));
+        assert!(!command_targets_profile(
+            r#"C:\Program Files\aw-tauri.exe --profile research-lab"#,
+            "research"
+        ));
     }
 }
