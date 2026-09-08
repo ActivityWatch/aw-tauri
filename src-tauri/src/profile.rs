@@ -132,13 +132,14 @@ pub fn window_title(profile: &str) -> String {
     }
 }
 
-/// OS autostart entry name. Named profiles need distinct identities so one
-/// profile's tray toggle cannot overwrite or disable another profile's entry.
-pub fn autostart_app_name(profile: &str) -> String {
+/// OS autostart entry name. The default profile keeps the plugin's legacy
+/// package-name identity; named profiles use distinct identities so one tray
+/// toggle cannot overwrite or disable another profile's entry.
+pub fn autostart_app_name(profile: &str) -> Option<String> {
     if is_default(profile) {
-        "ActivityWatch".to_string()
+        None
     } else {
-        format!("ActivityWatch ({profile})")
+        Some(format!("aw-tauri-{profile}"))
     }
 }
 
@@ -235,8 +236,11 @@ mod tests {
         assert_eq!(tray_tooltip("research"), "ActivityWatch (research)");
         assert_eq!(window_title(DEFAULT_PROFILE), "aw-tauri");
         assert_eq!(window_title("research"), "aw-tauri (research)");
-        assert_eq!(autostart_app_name(DEFAULT_PROFILE), "ActivityWatch");
-        assert_eq!(autostart_app_name("research"), "ActivityWatch (research)");
+        assert_eq!(autostart_app_name(DEFAULT_PROFILE), None);
+        assert_eq!(
+            autostart_app_name("research"),
+            Some("aw-tauri-research".to_string())
+        );
         assert_eq!(
             single_instance_dbus_id(DEFAULT_PROFILE),
             "net.activitywatch.app"

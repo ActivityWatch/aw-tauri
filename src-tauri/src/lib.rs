@@ -939,10 +939,11 @@ pub fn run() {
         .plugin({
             // AppleScript login items silently drop extra arguments; LaunchAgent
             // writes a plist with ProgramArguments so --profile survives relogin.
-            let mut builder = tauri_plugin_autostart::Builder::new()
-                .app_name(profile::autostart_app_name(&cli_args.profile));
-            if !profile::is_default(&cli_args.profile) {
-                builder = builder.args(["--profile", cli_args.profile.as_str()]);
+            let mut builder = tauri_plugin_autostart::Builder::new();
+            if let Some(app_name) = profile::autostart_app_name(&cli_args.profile) {
+                builder = builder
+                    .app_name(app_name)
+                    .args(["--profile", cli_args.profile.as_str()]);
             }
             #[cfg(target_os = "macos")]
             {
