@@ -6,6 +6,7 @@
 //! which applies the OS change, verifies it took effect, persists it, and rolls
 //! the OS change back if persisting fails.
 
+use std::fs;
 use std::path::Path;
 use std::sync::Mutex;
 
@@ -14,6 +15,7 @@ use tauri::menu::CheckMenuItem;
 use tauri::{AppHandle, Wry};
 use tauri_plugin_autostart::ManagerExt;
 
+use crate::profile;
 use crate::{get_config, get_config_path, write_formatted_config, UserConfig};
 
 /// Menu id of the tray "Start at login" item.
@@ -87,6 +89,8 @@ pub fn set_enabled(app: &AppHandle, enabled: bool) -> Result<bool, String> {
 /// file take effect — and it is applied in *both* directions, so clearing the
 /// flag also removes an already-registered login item.
 pub fn sync_from_config(app: &AppHandle) {
+    migrate_legacy_named_profile_entry(&profile::current_profile());
+
     let desired = get_config().autostart.enabled;
     let current = match is_registered(app) {
         Ok(current) => current,
@@ -111,6 +115,98 @@ pub fn sync_from_config(app: &AppHandle) {
         Ok(()) => info!("Registered for autostart: {desired}"),
         // A missing/read-only autostart directory shouldn't stop the app from starting.
         Err(e) => warn!("Failed to set autostart to {desired}: {e}"),
+    }
+}
+
+/// Drop a leftover shared `aw-tauri` login entry if a previous release
+/// registered this named profile under that identity. The default profile
+/// still owns that name, so we only remove the entry when its command
+/// contains `--profile <this>`.
+fn migrate_legacy_named_profile_entry(profile: &str) {
+    if profile::is_default(profile) {
+        return;
+    }
+
+    #[cfg(target_os = "linux")]
+    if let Some(path) = legacy_linux_desktop_path() {
+        remove_legacy_file_if_owned(&path, profile);
+    }
+
+    #[cfg(target_os = "macos")]
+    if let Some(path) = legacy_macos_launch_agent_path() {
+        remove_legacy_file_if_owned(&path, profile);
+    }
+
+    #[cfg(windows)]
+    migrate_legacy_windows_run_value(profile);
+}
+
+#[cfg(target_os = "linux")]
+fn legacy_linux_desktop_path() -> Option<std::path::PathBuf> {
+    dirs::home_dir().map(|home| {
+        home.join(".config/autostart")
+            .join(format!("{}.desktop", profile::LEGACY_AUTOSTART_APP_NAME))
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn legacy_macos_launch_agent_path() -> Option<std::path::PathBuf> {
+    dirs::home_dir().map(|home| {
+        home.join("Library/LaunchAgents")
+            .join(format!("{}.plist", profile::LEGACY_AUTOSTART_APP_NAME))
+    })
+}
+
+fn remove_legacy_file_if_owned(path: &Path, profile: &str) -> bool {
+    let Ok(contents) = fs::read_to_string(path) else {
+        return false;
+    };
+    if !profile::command_targets_profile(&contents, profile) {
+        return false;
+    }
+    match fs::remove_file(path) {
+        Ok(()) => {
+            info!(
+                "Removed leftover autostart entry at {} owned by profile {profile}",
+                path.display()
+            );
+            true
+        }
+        Err(e) => {
+            warn!(
+                "Failed to remove leftover autostart entry {}: {e}",
+                path.display()
+            );
+            false
+        }
+    }
+}
+
+#[cfg(windows)]
+fn migrate_legacy_windows_run_value(profile: &str) {
+    use winreg::enums::{HKEY_CURRENT_USER, KEY_READ, KEY_SET_VALUE};
+    use winreg::RegKey;
+
+    const RUN_KEY: &str = r"SOFTWARE\Microsoft\Windows\CurrentVersion\Run";
+    let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+    let Ok(key) = hkcu.open_subkey_with_flags(RUN_KEY, KEY_READ) else {
+        return;
+    };
+    let Ok(value) = key.get_value::<String, _>(profile::LEGACY_AUTOSTART_APP_NAME) else {
+        return;
+    };
+    if !profile::command_targets_profile(&value, profile) {
+        return;
+    }
+    match hkcu.open_subkey_with_flags(RUN_KEY, KEY_SET_VALUE) {
+        Ok(key) => match key.delete_value(profile::LEGACY_AUTOSTART_APP_NAME) {
+            Ok(()) => info!(
+                "Removed leftover Windows Run value {} owned by profile {profile}",
+                profile::LEGACY_AUTOSTART_APP_NAME
+            ),
+            Err(e) => warn!("Failed to remove leftover Windows Run value: {e}"),
+        },
+        Err(e) => warn!("Failed to open Windows Run key for leftover removal: {e}"),
     }
 }
 
@@ -322,7 +418,8 @@ fn is_dotted_autostart_enabled(trimmed: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::patch_autostart_enabled;
+    use super::{patch_autostart_enabled, remove_legacy_file_if_owned};
+    use std::fs;
 
     const CONFIG: &str = r#"port = 5600
 discovery_paths = []
@@ -407,5 +504,49 @@ auto_download = true
         let patched =
             patch_autostart_enabled("[autostart]\r\nenabled = true\r\n", false).expect("patch");
         assert_eq!(patched, "[autostart]\r\nenabled = false\r\n");
+    }
+
+    fn write_temp_entry(name: &str, contents: &str) -> std::path::PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "aw-tauri-legacy-autostart-{}-{}-{name}.desktop",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::write(&path, contents).expect("write temp autostart entry");
+        path
+    }
+
+    #[test]
+    fn migrate_removes_legacy_entry_owned_by_this_profile() {
+        let path = write_temp_entry(
+            "owned",
+            "Exec=/usr/bin/aw-tauri --profile research\nName=aw-tauri\n",
+        );
+        assert!(remove_legacy_file_if_owned(&path, "research"));
+        assert!(!path.exists(), "owned leftover should be deleted");
+    }
+
+    #[test]
+    fn migrate_keeps_legacy_entry_owned_by_default_or_other_profile() {
+        let default_path = write_temp_entry("default", "Exec=/usr/bin/aw-tauri\nName=aw-tauri\n");
+        let other_path = write_temp_entry(
+            "other",
+            "Exec=/usr/bin/aw-tauri --profile testing\nName=aw-tauri\n",
+        );
+        assert!(!remove_legacy_file_if_owned(&default_path, "research"));
+        assert!(!remove_legacy_file_if_owned(&other_path, "research"));
+        assert!(
+            default_path.exists(),
+            "default identity must be left intact"
+        );
+        assert!(
+            other_path.exists(),
+            "other named leftover must be left intact"
+        );
+        let _ = fs::remove_file(&default_path);
+        let _ = fs::remove_file(&other_path);
     }
 }
