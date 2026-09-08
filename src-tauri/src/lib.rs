@@ -13,6 +13,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{mpsc, Condvar, Mutex, OnceLock};
 use std::thread;
 use std::time::Duration;
+#[cfg(target_os = "macos")]
 use tauri_plugin_autostart::MacosLauncher;
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 use tauri_plugin_notification::NotificationExt;
@@ -935,20 +936,24 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_autostart::init(
+        .plugin({
             // AppleScript login items silently drop extra arguments; LaunchAgent
             // writes a plist with ProgramArguments so --profile survives relogin.
-            if profile::is_default(&cli_args.profile) {
-                MacosLauncher::AppleScript
-            } else {
-                MacosLauncher::LaunchAgent
-            },
-            if profile::is_default(&cli_args.profile) {
-                Some(vec![])
-            } else {
-                Some(vec!["--profile", cli_args.profile.as_str()])
-            },
-        ))
+            let mut builder = tauri_plugin_autostart::Builder::new()
+                .app_name(profile::autostart_app_name(&cli_args.profile));
+            if !profile::is_default(&cli_args.profile) {
+                builder = builder.args(["--profile", cli_args.profile.as_str()]);
+            }
+            #[cfg(target_os = "macos")]
+            {
+                builder = builder.macos_launcher(if profile::is_default(&cli_args.profile) {
+                    MacosLauncher::AppleScript
+                } else {
+                    MacosLauncher::LaunchAgent
+                });
+            }
+            builder.build()
+        })
         .plugin(single_instance_plugin(&cli_args.profile))
         // Serve the module-alert HTML with a valid Origin for the webview.
         .register_uri_scheme_protocol(module_alert_ui::URI_SCHEME, |_ctx, _request| {

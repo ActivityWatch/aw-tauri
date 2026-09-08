@@ -132,6 +132,16 @@ pub fn window_title(profile: &str) -> String {
     }
 }
 
+/// OS autostart entry name. Named profiles need distinct identities so one
+/// profile's tray toggle cannot overwrite or disable another profile's entry.
+pub fn autostart_app_name(profile: &str) -> String {
+    if is_default(profile) {
+        "ActivityWatch".to_string()
+    } else {
+        format!("ActivityWatch ({profile})")
+    }
+}
+
 /// Linux D-Bus well-known name base for the single-instance plugin.
 /// `default` uses the bundle identifier; other profiles get a suffix so they
 /// can run at the same time as the default instance.
@@ -225,6 +235,8 @@ mod tests {
         assert_eq!(tray_tooltip("research"), "ActivityWatch (research)");
         assert_eq!(window_title(DEFAULT_PROFILE), "aw-tauri");
         assert_eq!(window_title("research"), "aw-tauri (research)");
+        assert_eq!(autostart_app_name(DEFAULT_PROFILE), "ActivityWatch");
+        assert_eq!(autostart_app_name("research"), "ActivityWatch (research)");
         assert_eq!(
             single_instance_dbus_id(DEFAULT_PROFILE),
             "net.activitywatch.app"

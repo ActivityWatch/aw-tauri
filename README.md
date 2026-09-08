@@ -63,7 +63,8 @@ single-instance lock under a sibling appname (`activitywatch-research` instead
 of `activitywatch`). `default` and `testing` keep the paths above so existing
 installs are not orphaned. `--testing` is an alias for `--profile testing`.
 Spawned modules inherit `AW_PROFILE`. Custom profiles take `port` from their
-own config (or `--port`); two instances cannot share 5600.
+own config (or `--port`); two instances cannot share 5600. Enabling **Start at
+login** registers a distinct entry that relaunches the same named profile.
 
 A default config is generated on first run. Example:
 
