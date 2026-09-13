@@ -167,6 +167,7 @@ pub fn command_targets_profile(command: &str, profile: &str) -> bool {
 /// Linux D-Bus well-known name base for the single-instance plugin.
 /// `default` uses the bundle identifier; other profiles get a suffix so they
 /// can run at the same time as the default instance.
+#[cfg(any(target_os = "linux", test))]
 pub fn single_instance_dbus_id(profile: &str) -> String {
     if is_default(profile) {
         "net.activitywatch.app".to_string()

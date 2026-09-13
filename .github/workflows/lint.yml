@@ -51,4 +51,4 @@ jobs:
         make prebuild
 
     - name: Run clippy
-      run: cd src-tauri; cargo clippy
+      run: cd src-tauri; cargo clippy -- -D warnings
