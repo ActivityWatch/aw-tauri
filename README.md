@@ -82,19 +82,22 @@ minimized = true
 modules = [
   "aw-watcher-afk",
   "aw-watcher-window",
-  { name = "aw-sync", args = "daemon" },
 ]
 
 [module_args]
 "aw-watcher-vscode" = "--poll-interval 30"
 ```
 
+`aw-sync` is not included by default — sync is still in preview, so add it to
+`autostart.modules` (e.g. `{ name = "aw-sync", args = "daemon" }`) yourself to
+opt in.
+
 **Key settings:**
 - `port` — Server port (default: 5600)
 - `discovery_paths` — Additional directories to search for `aw-*` module binaries
 - `autostart.enabled` — Register for OS autostart on login. Also toggleable at runtime via **Start at login** in the tray menu, which updates the OS registration *and* writes the new value back here. Editing it by hand takes effect on the next launch, in both directions (setting it to `false` removes an already-registered login item)
 - `autostart.minimized` — Start minimized to tray (if `false`, opens dashboard on launch)
-- `autostart.modules` — Modules to start automatically. Each entry can be a string (`"aw-watcher-afk"`) or an object with args (`{ name = "aw-sync", args = "daemon" }`)
+- `autostart.modules` — Modules to start automatically. Each entry can be a string (`"aw-watcher-afk"`) or an object with args (`{ name = "aw-sync", args = "daemon" }`). `aw-sync` is opt-in, not included by default
 - `module_args` — Default args by module name, used when a module is launched from the tray menu or restarted after a crash. Lets you set args for a module *without* adding it to `autostart.modules` (e.g. `aw-watcher-vscode` above is launched manually from the tray, but still gets its args). If a module is listed in both places, the inline args on its `autostart.modules` entry take precedence.
 
 **Note:** On Linux with Wayland, the default modules are `aw-awatcher` instead of `aw-watcher-afk` + `aw-watcher-window` (auto-detected via `XDG_SESSION_TYPE` / `WAYLAND_DISPLAY`).
@@ -140,10 +143,11 @@ Log rotation happens automatically at 32 MB, keeping the 5 most recent rotated l
         │
         │ spawns child processes
         ▼
-┌──────────────┐  ┌──────────────────┐  ┌─────────┐
-│ aw-watcher-  │  │ aw-watcher-      │  │aw-sync  │
-│ afk          │  │ window           │  │ daemon  │
-└──────────────┘  └──────────────────┘  └─────────┘
+┌──────────────┐  ┌──────────────────┐  ┌─────────────┐
+│ aw-watcher-  │  │ aw-watcher-      │  │aw-sync      │
+│ afk          │  │ window           │  │ daemon      │
+│              │  │                  │  │(opt-in)     │
+└──────────────┘  └──────────────────┘  └─────────────┘
 ```
 
 ### Source layout
