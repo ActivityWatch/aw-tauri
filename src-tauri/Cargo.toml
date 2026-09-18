@@ -50,7 +50,7 @@ aw-datastore = { git = "https://github.com/ActivityWatch/aw-server-rust.git", br
 # unifies the proc-macro to 8.11 and the build fails. Pin the whole 8.7.2 line.
 rust-embed = "=8.7.2"
 rust-embed-impl = "=8.7.2"
-rust-embed-utils = "=8.7.2"
+rust-embed-utils = "=8.12.0"
 glob = "0.3.1"
 open = "5.3.3"
 png = "0.17.16"
