@@ -503,10 +503,11 @@ impl Default for UserConfig {
             modules.push(ModuleEntry::Simple("aw-watcher-window".to_string()));
         }
 
-        modules.push(ModuleEntry::Full {
-            name: "aw-sync".to_string(),
-            args: "daemon".to_string(),
-        });
+        // aw-sync is not autostarted by default: it is still under
+        // development/preview, and enabling it silently creates
+        // ~/ActivityWatchSync without the user opting into sync
+        // (ActivityWatch/activitywatch#1418). Users who want sync can add
+        // it via the module settings.
 
         UserConfig {
             port: 5600,
