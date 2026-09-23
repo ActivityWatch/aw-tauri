@@ -39,6 +39,11 @@ fn set_cached(registered: bool) {
     *REGISTERED.lock().unwrap_or_else(|e| e.into_inner()) = Some(registered);
 }
 
+/// Forget the cached state so the next read goes back to the OS.
+fn clear_cached() {
+    *REGISTERED.lock().unwrap_or_else(|e| e.into_inner()) = None;
+}
+
 /// Whether the app is currently registered to start at login, according to the OS.
 pub fn is_registered(app: &AppHandle) -> Result<bool, String> {
     let registered = app
@@ -80,7 +85,8 @@ pub fn set_enabled(app: &AppHandle, enabled: bool) -> Result<bool, String> {
         })
     };
 
-    apply(enabled)?;
+    // A failed call may still have changed something; re-read the OS next time.
+    apply(enabled).inspect_err(|_| clear_cached())?;
 
     // Don't trust the call's Ok(()) — read the OS back so a silent no-op can't
     // be persisted as success.
@@ -98,7 +104,7 @@ pub fn set_enabled(app: &AppHandle, enabled: bool) -> Result<bool, String> {
             Ok(()) => set_cached(previous),
             Err(rollback_err) => {
                 // The OS state is now unknown; make the next read go back to the OS.
-                *REGISTERED.lock().unwrap_or_else(|e| e.into_inner()) = None;
+                clear_cached();
                 error!("Failed to roll back autostart after a failed config write: {rollback_err}");
             }
         }
@@ -137,13 +143,21 @@ pub fn sync_from_config(app: &AppHandle) {
     } else {
         manager.disable()
     };
-    match result {
-        Ok(()) => {
-            set_cached(desired);
-            info!("Registered for autostart: {desired}");
-        }
+    if let Err(e) = result {
         // A missing/read-only autostart directory shouldn't stop the app from starting.
-        Err(e) => warn!("Failed to set autostart to {desired}: {e}"),
+        warn!("Failed to set autostart to {desired}: {e}");
+        clear_cached();
+        return;
+    }
+    // Don't trust the call's Ok(()): it can silently do nothing, and the tray checkmark is
+    // built from the cache, so read the OS back (which also refreshes the cache).
+    match is_registered(app) {
+        Ok(actual) if actual == desired => info!("Registered for autostart: {desired}"),
+        Ok(actual) => warn!("Autostart is still {actual} after requesting {desired}"),
+        Err(e) => {
+            warn!("{e}");
+            clear_cached();
+        }
     }
 }
 
