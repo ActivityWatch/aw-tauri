@@ -11,9 +11,8 @@
 #[cfg(unix)]
 use {
     nix::sys::signal::{self, Signal},
-    nix::unistd::{close, pipe, read, Pid},
+    nix::unistd::Pid,
     std::os::unix::fs::PermissionsExt,
-    std::os::unix::io::IntoRawFd,
 };
 #[cfg(windows)]
 use {
@@ -420,51 +419,31 @@ fn create_job_object() -> Result<HANDLE, std::io::Error> {
     }
 }
 
-#[cfg(unix)]
-fn monitor_parent_process(child_pid: u32, read_fd: i32) {
-    thread::spawn(move || {
-        // Read from the pipe - when parent dies, the write end is closed by the OS
-        // and we'll get EOF (read returns 0)
-        let mut buf = [0u8; 1];
-        loop {
-            match read(read_fd, &mut buf) {
-                Ok(0) => {
-                    // EOF means parent died (write end of pipe closed)
-                    info!(
-                        "Parent process died (pipe closed), terminating child {}",
-                        child_pid
-                    );
+/// Have the kernel send SIGTERM to the module if aw-tauri dies.
+///
+/// PDEATHSIG fires when the *thread* that spawned the child exits, not the process. That holds
+/// here because each module thread blocks on its child until the child exits.
+///
+/// Linux only: macOS has no equivalent, and on Windows the job object covers this.
+#[cfg(target_os = "linux")]
+fn kill_on_parent_death(command: &mut Command) {
+    use nix::sys::prctl;
+    use std::os::unix::process::CommandExt;
 
-                    // Close our read end of the pipe
-                    let _ = close(read_fd);
-
-                    // Send SIGTERM to the child process
-                    if let Err(e) = send_sigterm(child_pid) {
-                        error!("Failed to terminate child process {}: {}", child_pid, e);
-                    } else {
-                        debug!("Successfully sent SIGTERM to child process {}", child_pid);
-                    }
-                    break;
-                }
-                Ok(_) => {
-                    // Should never receive data, but if we do, just continue monitoring
-                    // This handles spurious wake-ups gracefully
-                }
-                Err(e) => {
-                    // Error reading from pipe - parent likely died
-                    error!("Error reading from parent monitor pipe: {}", e);
-                    let _ = close(read_fd);
-
-                    if let Err(e) = send_sigterm(child_pid) {
-                        error!("Failed to terminate child process {}: {}", child_pid, e);
-                    } else {
-                        debug!("Successfully sent SIGTERM to child process {}", child_pid);
-                    }
-                    break;
-                }
+    let parent = nix::unistd::getpid();
+    // SAFETY: prctl and getppid are async-signal-safe syscalls and the closure doesn't allocate.
+    unsafe {
+        command.pre_exec(move || {
+            prctl::set_pdeathsig(Signal::SIGTERM)?;
+            // aw-tauri may have died between fork and prctl, in which case no signal will come.
+            if nix::unistd::getppid() != parent {
+                return Err(std::io::Error::other(
+                    "aw-tauri exited before module started",
+                ));
             }
-        }
-    });
+            Ok(())
+        });
+    }
 }
 
 // Splits a configured args string, warning (and falling back to no args) on malformed shell
@@ -723,21 +702,10 @@ fn start_generic_module_thread(
             }
         };
 
-        // Create pipe for Unix parent death detection
-        #[cfg(unix)]
-        let (pipe_read_fd, _pipe_write_keeper) = match pipe() {
-            Ok((read_fd, write_fd)) => {
-                // read_fd is read end, write_fd stays open in parent and auto-closes when parent dies
-                (read_fd.into_raw_fd(), Some(std::fs::File::from(write_fd)))
-            }
-            Err(e) => {
-                error!("Failed to create pipe for parent monitoring: {}", e);
-                (-1, None)
-            }
-        };
-
         // Start the child process
         let mut command = Command::new(&path);
+        #[cfg(target_os = "linux")]
+        kill_on_parent_death(&mut command);
 
         // Use custom args if provided, otherwise only pass port arg if it's not the default (5600)
         if let Some(ref args) = custom_args {
@@ -762,10 +730,6 @@ fn start_generic_module_thread(
                         CloseHandle(handle);
                     }
                 }
-                #[cfg(unix)]
-                if pipe_read_fd >= 0 {
-                    let _ = close(pipe_read_fd);
-                }
                 return;
             }
         };
@@ -785,12 +749,6 @@ fn start_generic_module_thread(
                     );
                 }
             }
-        }
-
-        // On Unix, start parent process monitor with pipe
-        #[cfg(unix)]
-        if pipe_read_fd >= 0 {
-            monitor_parent_process(child_pid, pipe_read_fd);
         }
 
         // Send a message to the manager that the module has started
@@ -841,22 +799,10 @@ fn start_notify_module_thread(
             }
         };
 
-        // Create pipe for Unix parent death detection
-        // Create pipe for Unix parent death detection
-        #[cfg(unix)]
-        let (pipe_read_fd, _pipe_write_keeper) = match pipe() {
-            Ok((read_fd, write_fd)) => {
-                // read_fd is read end, write_fd stays open in parent and auto-closes when parent dies
-                (read_fd.into_raw_fd(), Some(std::fs::File::from(write_fd)))
-            }
-            Err(e) => {
-                error!("Failed to create pipe for parent monitoring: {}", e);
-                (-1, None)
-            }
-        };
-
         // Start the child process with --output-only flag
         let mut command = Command::new(&path);
+        #[cfg(target_os = "linux")]
+        kill_on_parent_death(&mut command);
 
         // Always add --output-only flag for aw-notify
         let mut args = vec!["--output-only".to_string()];
@@ -895,10 +841,6 @@ fn start_notify_module_thread(
                             CloseHandle(handle);
                         }
                     }
-                    #[cfg(unix)]
-                    if pipe_read_fd >= 0 {
-                        let _ = close(pipe_read_fd);
-                    }
                     // Fallback to generic module handler to avoid recursion
                     start_generic_module_thread(name, path, custom_args, server_port, tx);
                     return;
@@ -910,16 +852,10 @@ fn start_notify_module_thread(
                             CloseHandle(handle);
                         }
                     }
-                    #[cfg(unix)]
-                    if pipe_read_fd >= 0 {
-                        let _ = close(pipe_read_fd);
-                    }
                     return;
                 }
             }
         };
-
-        let child_pid = child.id();
 
         // On Windows, assign child to job object
         #[cfg(windows)]
@@ -934,12 +870,6 @@ fn start_notify_module_thread(
                     );
                 }
             }
-        }
-
-        // On Unix, start parent process monitor with pipe
-        #[cfg(unix)]
-        if pipe_read_fd >= 0 {
-            monitor_parent_process(child_pid, pipe_read_fd);
         }
 
         // Report the caller-provided args, NOT the internally-expanded `args`: the
@@ -1010,11 +940,6 @@ fn start_notify_module_thread(
                         CloseHandle(handle);
                     }
                 }
-                #[cfg(unix)]
-                if pipe_read_fd >= 0 {
-                    let _ = close(pipe_read_fd);
-                }
-
                 // Fallback to generic module handler
                 start_generic_module_thread(name, path, custom_args, server_port, tx);
                 return;
