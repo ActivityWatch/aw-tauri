@@ -43,7 +43,7 @@ use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem, SubmenuBuil
 use tauri::{AppHandle, Wry};
 
 use crate::{get_app_handle, get_config, get_tray_id, module_alert_ui, HANDLE_CONDVAR};
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Read};
 use tauri_plugin_notification::NotificationExt;
 
 #[derive(Debug)]
@@ -883,6 +883,11 @@ fn start_notify_module_thread(
         })
         .expect("Failed to send module started message");
 
+        // Drain stderr concurrently: aw-notify logs there, and if nothing reads the pipe it fills
+        // up (~64 KiB) and the child blocks on its next log write while we wait on stdout.
+        let stderr = child.stderr.take().expect("Failed to get stderr");
+        let stderr_reader = thread::spawn(move || read_tail(stderr, STDERR_TAIL_BYTES));
+
         let stdout = child.stdout.take().expect("Failed to get stdout");
         let reader = BufReader::new(stdout);
 
@@ -924,7 +929,13 @@ fn start_notify_module_thread(
         }
 
         // Wait for the child to exit
-        let output = child.wait_with_output().expect("Failed to wait on child");
+        let status = child.wait().expect("Failed to wait on child");
+        let output = std::process::Output {
+            status,
+            // stdout was consumed line by line above
+            stdout: Vec::new(),
+            stderr: stderr_reader.join().unwrap_or_default(),
+        };
 
         // Check if the process failed due to unsupported --output-only flag
         // Exit code 2 is commonly used by clap/click for argument errors
@@ -961,6 +972,33 @@ fn start_notify_module_thread(
         })
         .expect("Failed to send module stopped message");
     });
+}
+
+/// How much of a module's stderr to keep for crash diagnostics.
+const STDERR_TAIL_BYTES: usize = 64 * 1024;
+
+/// Reads `reader` to EOF, keeping only the last `max` bytes so a chatty module can't grow memory
+/// without bound over a long run.
+fn read_tail(mut reader: impl Read, max: usize) -> Vec<u8> {
+    let mut tail = Vec::new();
+    let mut buf = [0u8; 8192];
+    loop {
+        match reader.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => {
+                tail.extend_from_slice(&buf[..n]);
+                if tail.len() > max {
+                    tail.drain(..tail.len() - max);
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(e) => {
+                warn!("Failed to read module stderr: {e}");
+                break;
+            }
+        }
+    }
+    tail
 }
 
 /// Route a notification: send via ManagerEvent channel (mini mode) or Tauri (GUI mode).
@@ -1240,4 +1278,20 @@ fn discover_modules() -> BTreeMap<String, PathBuf> {
     }
 
     found_modules
+}
+
+#[cfg(test)]
+mod tests {
+    use super::read_tail;
+
+    #[test]
+    fn read_tail_keeps_everything_under_the_limit() {
+        assert_eq!(read_tail(&b"hello"[..], 64), b"hello");
+    }
+
+    #[test]
+    fn read_tail_keeps_only_the_last_bytes() {
+        let input: Vec<u8> = (0..20_000u32).map(|i| (i % 251) as u8).collect();
+        assert_eq!(read_tail(&input[..], 1000), &input[input.len() - 1000..]);
+    }
 }
