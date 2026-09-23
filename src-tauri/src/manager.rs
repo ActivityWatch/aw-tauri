@@ -94,6 +94,10 @@ struct Module {
     started_at: Option<Instant>,
     /// Automatic restarts since the module last ran stably or was started by hand.
     restart_count: u32,
+    /// Incremented on every start request (not on the async `Started` message, which can lag),
+    /// so a delayed restart can tell whether the module has been started, and possibly stopped
+    /// again, since the crash it was scheduled for.
+    generation: u64,
     pending_shutdown: bool,
     /// Last-known or configured args, reused on manual or post-crash restart (#131).
     args: Option<Vec<String>>,
@@ -121,6 +125,7 @@ impl ManagerState {
                     pid: None,
                     started_at: None,
                     restart_count: 0,
+                    generation: 0,
                     pending_shutdown: false,
                     args,
                 };
@@ -173,9 +178,10 @@ impl ManagerState {
         }
     }
 
-    pub fn start_module(&self, name: &str, args: Option<&Vec<String>>) {
+    pub fn start_module(&mut self, name: &str, args: Option<&Vec<String>>) {
         if !self.is_module_running(name) {
-            if let Some(module) = self.modules.get(name) {
+            if let Some(module) = self.modules.get_mut(name) {
+                module.generation += 1;
                 // Fall back to the last known (or configured) args for this module, so manual
                 // tray restarts and post-crash restarts don't silently drop them (#131).
                 let effective_args = args.cloned().or_else(|| module.args.clone());
@@ -600,18 +606,19 @@ fn handle(
                                 }
 
                                 let restart_count = module.map_or(0, |m| m.restart_count);
+                                let generation = module.map_or(0, |m| m.generation);
                                 if restart_count < 3 {
                                     // Exponential backoff: 2^(restart_count + 1) seconds
                                     // restart_count 0 -> 2 seconds, 1 -> 4 seconds, 2 -> 8 seconds
                                     let delay_secs = 2u64.pow(restart_count + 1);
-                                    (true, Some((delay_secs, restart_count)))
+                                    (true, Some((delay_secs, restart_count, generation)))
                                 } else {
                                     (false, None)
                                 }
                             };
 
                             if should_restart {
-                                if let Some((secs, restart_count)) = restart_info {
+                                if let Some((secs, restart_count, generation)) = restart_info {
                                     let attempt = restart_count + 1;
                                     // One log line per restart attempt (max 3 total with limit case).
                                     error!(
@@ -633,9 +640,18 @@ fn handle(
                                         .lock()
                                         .expect("Failed to acquire manager_state lock");
 
-                                    if let Some(module) = state_guard.modules.get_mut(&name_clone) {
-                                        module.restart_count = restart_count + 1;
+                                    let Some(module) = state_guard.modules.get_mut(&name_clone)
+                                    else {
+                                        return;
+                                    };
+                                    // The user may have started the module during the backoff (and
+                                    // maybe stopped it again, or it crashed and scheduled its own
+                                    // retry). Any start since the crash supersedes this retry.
+                                    if module.generation != generation || module.pending_shutdown {
+                                        debug!("Skipping automatic restart of {name_clone}: state changed during backoff");
+                                        return;
                                     }
+                                    module.restart_count = restart_count + 1;
                                     // start_module falls back to the args this module was last started with
                                     state_guard.start_module(&name_clone, None);
                                 }
@@ -1304,6 +1320,7 @@ mod tests {
             pid: Some(1),
             started_at,
             restart_count,
+            generation: 1,
             pending_shutdown: false,
             args: None,
         };
