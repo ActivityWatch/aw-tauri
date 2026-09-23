@@ -993,7 +993,8 @@ pub fn run() {
                             return Ok(());
                         }
                     };
-                tauri::async_runtime::spawn(build_rocket(server_state, aw_config).launch());
+                let rocket_handle =
+                    tauri::async_runtime::spawn(build_rocket(server_state, aw_config).launch());
                 // Create main window programmatically to attach initialization script.
                 // The script intercepts clicks on external links and opens them in the system
                 // browser via the open_external Tauri command. This approach works reliably for
@@ -1023,6 +1024,31 @@ pub fn run() {
                 .build()
                 .expect("Failed to create main window");
                 let manager_state = manager::start_manager();
+
+                // Rocket handles SIGINT/SIGTERM (and SIGHUP on Unix) by shutting the server down.
+                // Nothing else would end the app then, so stop the modules and exit with it.
+                let server_manager_state = manager_state.clone();
+                let server_app = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    let exit_code = match rocket_handle.await {
+                        Ok(Ok(_)) => {
+                            info!("Server shut down, exiting");
+                            0
+                        }
+                        Ok(Err(e)) => {
+                            error!("Server exited with error: {e:?}");
+                            1
+                        }
+                        Err(join_err) => {
+                            error!("Rocket task panicked: {join_err:?}");
+                            1
+                        }
+                    };
+                    if let Ok(mut state) = server_manager_state.lock() {
+                        state.stop_modules();
+                    }
+                    server_app.exit(exit_code);
+                });
 
                 let open = MenuItem::with_id(app, "open", "Open Dashboard", true, None::<&str>)
                     .expect("Failed to create open menu item");
