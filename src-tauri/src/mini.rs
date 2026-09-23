@@ -19,6 +19,10 @@ use tray_icon::{
     Icon, TrayIcon, TrayIconBuilder,
 };
 
+/// Matches `identifier` in tauri.conf.json.
+#[cfg(target_os = "macos")]
+const MACOS_BUNDLE_ID: &str = "net.activitywatch.tauri";
+
 enum MiniEvent {
     Menu(MenuEvent),
     Manager(manager::ManagerEvent),
@@ -44,6 +48,14 @@ pub fn run() {
         aw_server::endpoints::build_rocket(server_state, aw_config).launch(),
     );
     info!("Running aw-tauri mini mode at {}", dashboard_url.as_str());
+
+    // Pick the notification sender up front. Otherwise notify-rust resolves one on the first
+    // notification by running an AppleScript lookup for an app named "use_default", on the main
+    // thread, which can spin at full CPU indefinitely and freeze the tray.
+    #[cfg(target_os = "macos")]
+    if let Err(e) = notify_rust::set_application(MACOS_BUNDLE_ID) {
+        warn!("Failed to set notification sender to {MACOS_BUNDLE_ID}: {e}");
+    }
 
     let event_loop = EventLoopBuilder::<MiniEvent>::with_user_event().build();
     let server_proxy = event_loop.create_proxy();
