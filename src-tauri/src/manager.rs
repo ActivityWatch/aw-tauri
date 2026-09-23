@@ -760,10 +760,13 @@ fn start_generic_module_thread(
 
         // Pipe stderr too: it's where modules report why they crashed, and when inherited it went
         // to aw-tauri's own stderr, which is /dev/null for a GUI app.
-        let child = command
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn();
+        let child = {
+            let _guard = SPAWN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            command
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+        };
 
         let mut child = match child {
             Ok(c) => c,
@@ -880,11 +883,14 @@ fn start_notify_module_thread(
         #[cfg(windows)]
         command.creation_flags(CREATE_NO_WINDOW);
 
-        let mut child = match command
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn()
-        {
+        let child = {
+            let _guard = SPAWN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            command
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+        };
+        let mut child = match child {
             Ok(child) => child,
             Err(e) => {
                 // An unsupported --output-only is detected after exit (below), not here: spawn
@@ -1016,6 +1022,12 @@ fn start_notify_module_thread(
         .expect("Failed to send module stopped message");
     });
 }
+
+/// Serializes module spawns. On macOS, std creates a child's stdio pipes with pipe() and only then
+/// marks them close-on-exec, so a module spawned at the same moment from another thread can
+/// inherit them. The pipe then stays open after its module exits, the reader never sees EOF, and
+/// the Stopped message is delayed until the other module exits too.
+static SPAWN_LOCK: Mutex<()> = Mutex::new(());
 
 /// How much of a module's stdout/stderr to keep for crash diagnostics.
 const OUTPUT_TAIL_BYTES: usize = 64 * 1024;
@@ -1375,6 +1387,46 @@ mod tests {
                 Err(e) => panic!("module never stopped: {e}"),
             }
         }
+    }
+
+    /// Starting modules concurrently must not leak one module's output pipes into another:
+    /// if a long-running module inherits them, the short one never reports Stopped.
+    #[cfg(unix)]
+    #[test]
+    fn concurrent_spawns_dont_delay_stopped() {
+        let (tx, rx) = channel();
+        let sh = |script: &str, tx: &Sender<ModuleMessage>| {
+            let args = vec!["-c".to_string(), script.to_string()];
+            start_generic_module_thread(
+                "sh".into(),
+                "/bin/sh".into(),
+                Some(args),
+                5600,
+                tx.clone(),
+            );
+        };
+        const QUICK: usize = 40;
+        for _ in 0..QUICK {
+            sh("sleep 20; : aw-tauri-spawn-test", &tx);
+            sh("exit 0", &tx);
+        }
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut stopped = 0;
+        while stopped < QUICK {
+            match rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+                Ok(ModuleMessage::Stopped { .. }) => stopped += 1,
+                Ok(_) => {}
+                Err(_) => break,
+            }
+        }
+        // Clean up the sleepers.
+        let _ = Command::new("pkill")
+            .args(["-f", "aw-tauri-spawn-test"])
+            .status();
+        assert_eq!(
+            stopped, QUICK,
+            "some short-lived modules never reported Stopped"
+        );
     }
 
     #[cfg(unix)]
