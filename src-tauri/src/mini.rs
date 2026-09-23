@@ -26,6 +26,8 @@ const MACOS_BUNDLE_ID: &str = "net.activitywatch.tauri";
 enum MiniEvent {
     Menu(MenuEvent),
     Manager(manager::ManagerEvent),
+    /// Rocket shut down cleanly, e.g. on SIGTERM.
+    ServerStopped,
     ServerFailed(String),
 }
 
@@ -69,7 +71,11 @@ pub fn run() {
                 error!("Rocket task panicked: {join_err:?}");
                 let _ = server_proxy.send_event(MiniEvent::ServerFailed(format!("{join_err:?}")));
             }
-            Ok(Ok(_)) => {} // clean shutdown — event loop is likely already exiting
+            Ok(Ok(_)) => {
+                // Rocket handles SIGINT/SIGTERM (and SIGHUP on Unix) by shutting the server down.
+                // If the user quit, the event loop is already gone and this send fails harmlessly.
+                let _ = server_proxy.send_event(MiniEvent::ServerStopped);
+            }
         }
     });
     let menu_proxy = event_loop.create_proxy();
@@ -140,6 +146,13 @@ pub fn run() {
                         }
                     }
                 }
+            }
+            Event::UserEvent(MiniEvent::ServerStopped) => {
+                info!("Server shut down, exiting");
+                if let Ok(mut state) = manager_state.lock() {
+                    state.stop_modules();
+                }
+                *control_flow = ControlFlow::Exit;
             }
             Event::UserEvent(MiniEvent::ServerFailed(msg)) => {
                 show_notification("ActivityWatch Error", &format!("Server failed: {msg}"));
