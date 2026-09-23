@@ -37,7 +37,7 @@ use std::sync::{
     mpsc::{channel, Receiver, Sender},
     Arc, Mutex,
 };
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use std::{env, fs, thread};
 use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem, SubmenuBuilder};
 use tauri::{AppHandle, Wry};
@@ -45,6 +45,9 @@ use tauri::{AppHandle, Wry};
 use crate::{get_app_handle, get_config, get_tray_id, module_alert_ui, HANDLE_CONDVAR};
 use std::io::{BufRead, BufReader, Read};
 use tauri_plugin_notification::NotificationExt;
+
+/// How long a module must run before a crash no longer counts toward the restart limit.
+const STABLE_UPTIME: Duration = Duration::from_secs(60);
 
 #[derive(Debug)]
 enum ModuleMessage {
@@ -87,6 +90,9 @@ struct Module {
     /// least once and currently stopped. Drives the tray grouping (started modules first).
     run_state: Option<bool>,
     pid: Option<u32>,
+    /// When the current run started, used to tell a crash loop from a crash after a long run.
+    started_at: Option<Instant>,
+    /// Automatic restarts since the module last ran stably or was started by hand.
     restart_count: u32,
     pending_shutdown: bool,
     /// Last-known or configured args, reused on manual or post-crash restart (#131).
@@ -113,6 +119,7 @@ impl ManagerState {
                     path,
                     run_state: None,
                     pid: None,
+                    started_at: None,
                     restart_count: 0,
                     pending_shutdown: false,
                     args,
@@ -141,6 +148,7 @@ impl ManagerState {
         if let Some(module) = self.modules.get_mut(name) {
             module.run_state = Some(true);
             module.pid = Some(pid);
+            module.started_at = Some(Instant::now());
             module.args = args;
             module.pending_shutdown = false;
         } else {
@@ -153,6 +161,15 @@ impl ManagerState {
         if let Some(module) = self.modules.get_mut(name) {
             module.run_state = Some(false);
             module.pid = None;
+            // A module that ran for a while before crashing isn't crash-looping, so give it the
+            // full set of retries again instead of carrying old crashes forward forever.
+            if module
+                .started_at
+                .take()
+                .is_some_and(|t| t.elapsed() >= STABLE_UPTIME)
+            {
+                module.restart_count = 0;
+            }
         }
     }
 
@@ -202,6 +219,11 @@ impl ManagerState {
         if self.is_module_running(name) {
             self.stop_module(name);
         } else {
+            // A manual start is a fresh start: re-arm automatic restarts (even after the limit
+            // was hit) and don't report it as a crash recovery.
+            if let Some(module) = self.modules.get_mut(name) {
+                module.restart_count = 0;
+            }
             self.start_module(name, None);
         }
     }
@@ -1269,7 +1291,51 @@ fn discover_modules() -> BTreeMap<String, PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use super::read_tail;
+    use super::*;
+
+    fn state_with_module(
+        name: &str,
+        restart_count: u32,
+        started_at: Option<Instant>,
+    ) -> ManagerState {
+        let module = Module {
+            path: PathBuf::from("/nonexistent"),
+            run_state: Some(true),
+            pid: Some(1),
+            started_at,
+            restart_count,
+            pending_shutdown: false,
+            args: None,
+        };
+        ManagerState {
+            tx: channel().0,
+            server_port: 5600,
+            modules: BTreeMap::from([(name.to_string(), module)]),
+        }
+    }
+
+    #[test]
+    fn crash_after_stable_run_resets_restart_count() {
+        let mut state =
+            state_with_module("aw-watcher", 3, Instant::now().checked_sub(STABLE_UPTIME));
+        state.stopped_module("aw-watcher");
+        assert_eq!(state.modules["aw-watcher"].restart_count, 0);
+    }
+
+    #[test]
+    fn manual_start_resets_restart_count() {
+        let mut state = state_with_module("aw-watcher", 3, None);
+        state.stopped_module("aw-watcher");
+        state.handle_system_click("aw-watcher");
+        assert_eq!(state.modules["aw-watcher"].restart_count, 0);
+    }
+
+    #[test]
+    fn crash_loop_keeps_restart_count() {
+        let mut state = state_with_module("aw-watcher", 2, Some(Instant::now()));
+        state.stopped_module("aw-watcher");
+        assert_eq!(state.modules["aw-watcher"].restart_count, 2);
+    }
 
     #[test]
     fn read_tail_keeps_everything_under_the_limit() {
