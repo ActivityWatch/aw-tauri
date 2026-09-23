@@ -342,13 +342,19 @@ pub fn listen_for_lockfile() {
             loop {
                 match watcher.wait_for_file() {
                     Ok(()) => {
-                        log::info!("Lock file detected");
-                        remove_file(get_runtime_path().join(&lock_name))
-                            .expect("Failed to remove lock file");
+                        // One lock file write usually produces several events (Create, then
+                        // Modify). The first one removes the file; treat NotFound on the rest as
+                        // already handled rather than panicking and killing this thread.
+                        match remove_file(get_runtime_path().join(&lock_name)) {
+                            Ok(()) => log::info!("Lock file detected"),
+                            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                            Err(e) => warn!("Failed to remove lock file: {e}"),
+                        }
                         let app = &*get_app_handle().lock().expect("Failed to get app handle");
                         if let Some(window) = app.webview_windows().get("main") {
-                            window.show().expect("Failed to show main window");
-                            window.set_focus().expect("Failed to focus main window");
+                            if let Err(e) = window.show().and_then(|()| window.set_focus()) {
+                                warn!("Failed to show main window: {e}");
+                            }
                         }
                     }
                     Err(e) => {
