@@ -984,64 +984,21 @@ pub fn run() {
                 // Bring the OS login item in line with `[autostart] enabled`.
                 autostart::sync_from_config(app.handle());
 
-                let testing = cli_args.testing;
-                let legacy_import = false;
-
-                let mut aw_config =
-                    aw_server::config::create_config(&cli_args.profile, None);
-
-                // Port priority: CLI flag > testing default (5666) > config file
-                let port = cli_args
-                    .port
-                    .unwrap_or(if testing { 5666 } else { user_config.port });
-                aw_config.port = port;
-                let db_path = aw_server::dirs::db_path(&cli_args.profile)
-                    .expect("Failed to get db path")
-                    .to_str()
-                    .unwrap()
-                    .to_string();
-                let device_id = aw_server::device_id::get_device_id();
-
-                let webui_var = std::env::var("AW_WEBUI_DIR");
-
-                let asset_path_opt = if let Ok(path_str) = &webui_var {
-                    let asset_path = PathBuf::from(&path_str);
-                    if asset_path.exists() {
-                        info!("Using webui path: {}", path_str);
-                        Some(asset_path)
-                    } else {
-                        panic!("Path set via env var AW_WEBUI_DIR does not exist");
-                    }
-                } else {
-                    info!("Using bundled assets");
-                    None
-                };
-
-                let server_state = aw_server::endpoints::ServerState {
-                    // Even if legacy_import is set to true it is disabled on Android so
-                    // it will not happen there
-                    datastore: aw_datastore::Datastore::new(db_path, legacy_import),
-                    asset_resolver: aw_server::endpoints::AssetResolver::new(asset_path_opt),
-                    device_id,
-                };
-                if !is_port_available(port).expect("Failed to check port availability") {
-                    app.dialog()
-                        .message(format!("Port {} is already in use", port))
-                        .kind(MessageDialogKind::Error)
-                        .title("Error")
-                        .show(|_| {});
-                    panic!("Port {} is already in use", port);
-                }
-                log_profile_startup(&cli_args.profile, port);
-                let dashboard_api_key = aw_config
-                    .auth
-                    .api_key
-                    .as_deref()
-                    .filter(|key| !key.is_empty());
-                if dashboard_api_key.is_some() {
-                    info!("Bootstrapping aw-webui API token into dashboard URL");
-                }
-                let dashboard_url = build_dashboard_url(port, dashboard_api_key);
+                let (dashboard_url, server_state, aw_config) =
+                    match prepare_aw_server(user_config, cli_args) {
+                        Ok(server) => server,
+                        Err(message) => {
+                            // Show the error and exit once it's dismissed. Panicking here, as
+                            // before, killed the process before the dialog ever appeared.
+                            error!("{message}");
+                            app.dialog()
+                                .message(message)
+                                .kind(MessageDialogKind::Error)
+                                .title("Error")
+                                .show(|_| std::process::exit(1));
+                            return Ok(());
+                        }
+                    };
                 tauri::async_runtime::spawn(build_rocket(server_state, aw_config).launch());
                 // Create main window programmatically to attach initialization script.
                 // The script intercepts clicks on external links and opens them in the system
