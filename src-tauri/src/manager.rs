@@ -831,29 +831,16 @@ fn start_notify_module_thread(
         {
             Ok(child) => child,
             Err(e) => {
-                let error_msg = e.to_string();
-                if error_msg.contains("No such option: --output-only") {
-                    info!("aw-notify module doesn't support --output-only, falling back to default behavior");
-                    // Clean up job handle before fallback
-                    #[cfg(windows)]
-                    if let Some(handle) = job_handle {
-                        unsafe {
-                            CloseHandle(handle);
-                        }
+                // An unsupported --output-only is detected after exit (below), not here: spawn
+                // errors are OS errors and never contain the child's usage message.
+                error!("Failed to start module {name}: {e}");
+                #[cfg(windows)]
+                if let Some(handle) = job_handle {
+                    unsafe {
+                        CloseHandle(handle);
                     }
-                    // Fallback to generic module handler to avoid recursion
-                    start_generic_module_thread(name, path, custom_args, server_port, tx);
-                    return;
-                } else {
-                    error!("Failed to start module {name}: {e}");
-                    #[cfg(windows)]
-                    if let Some(handle) = job_handle {
-                        unsafe {
-                            CloseHandle(handle);
-                        }
-                    }
-                    return;
                 }
+                return;
             }
         };
 
