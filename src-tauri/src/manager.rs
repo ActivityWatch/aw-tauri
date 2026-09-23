@@ -266,17 +266,18 @@ fn update_tray_menu(modules: ModulesSnapshot, event_tx: &Option<Sender<ManagerEv
     if crate::is_daemon_mode() {
         return;
     }
-    let (lock, cvar) = &*HANDLE_CONDVAR;
-    let mut state = lock.lock().expect("Failed to acquire manager_state lock");
-
-    debug!("Attempting to get app handle");
-    while !*state {
-        state = cvar
-            .wait(state)
-            .expect("Failed to wait on condition variable");
+    {
+        // Wait until setup has stored the app handle; release the lock before building the menu.
+        let (lock, cvar) = &*HANDLE_CONDVAR;
+        let mut initialized = lock.lock().expect("Failed to lock HANDLE_CONDVAR");
+        debug!("Attempting to get app handle");
+        while !*initialized {
+            initialized = cvar
+                .wait(initialized)
+                .expect("Failed to wait on condition variable");
+        }
     }
-    debug!("Condition variable set");
-    let app = &*get_app_handle().lock().expect("Failed to get app handle");
+    let app = get_app_handle();
     debug!("App handle acquired");
 
     // Running group = modules that have been started at least once (run_state is Some).
@@ -1079,11 +1080,8 @@ fn show_module_warning(
         warn!("{module_name}: {message}");
         return;
     }
-    let app = get_app_handle()
-        .lock()
-        .expect("Failed to get app handle")
-        .clone();
-    module_alert_ui::show_or_update(&app, module_name, message, kind);
+    let app = get_app_handle();
+    module_alert_ui::show_or_update(app, module_name, message, kind);
 }
 
 /// Update the module-alert UI when a module comes back after a crash restart.
@@ -1101,11 +1099,8 @@ fn show_module_recovered(event_tx: &Option<Sender<ManagerEvent>>, module_name: &
         info!("{module_name}: recovered and running again");
         return;
     }
-    let app = get_app_handle()
-        .lock()
-        .expect("Failed to get app handle")
-        .clone();
-    module_alert_ui::update_if_open(&app, module_name, message, module_alert_ui::StatusKind::Ok);
+    let app = get_app_handle();
+    module_alert_ui::update_if_open(app, module_name, message, module_alert_ui::StatusKind::Ok);
 }
 
 fn send_tauri_notification(title: &str, message: &str) {
@@ -1116,30 +1111,24 @@ fn send_tauri_notification(title: &str, message: &str) {
         );
         return;
     }
-    // Get app handle and send notification
-    if let Ok(app_handle_guard) = get_app_handle().lock() {
-        let app_handle = &*app_handle_guard;
-        let result = app_handle
-            .notification()
-            .builder()
-            .title(title)
-            .body(message)
-            .show();
+    let result = get_app_handle()
+        .notification()
+        .builder()
+        .title(title)
+        .body(message)
+        .show();
 
-        match result {
-            Ok(_) => {
-                trace!(
-                    "Sent notification: title='{}', message preview='{}'",
-                    title,
-                    message.lines().next().unwrap_or("")
-                );
-            }
-            Err(e) => {
-                error!("Failed to send notification: {}", e);
-            }
+    match result {
+        Ok(_) => {
+            trace!(
+                "Sent notification: title='{}', message preview='{}'",
+                title,
+                message.lines().next().unwrap_or("")
+            );
         }
-    } else {
-        error!("Failed to get app handle lock for notification");
+        Err(e) => {
+            error!("Failed to send notification: {}", e);
+        }
     }
 }
 

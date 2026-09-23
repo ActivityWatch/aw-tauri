@@ -139,16 +139,9 @@ use tauri::{
     AppHandle, Manager, Url,
 };
 
-pub struct AppHandleWrapper(Mutex<AppHandle>);
-
-impl Drop for AppHandleWrapper {
-    fn drop(&mut self) {
-        let (_lock, cvar) = &*HANDLE_CONDVAR;
-        cvar.notify_all();
-    }
-}
-
-static HANDLE: OnceLock<AppHandleWrapper> = OnceLock::new();
+// AppHandle is cheap to clone and safe to share across threads, so it isn't behind a Mutex:
+// one would only serialize callers and be held across slow main-thread UI calls.
+static HANDLE: OnceLock<AppHandle> = OnceLock::new();
 lazy_static! {
     static ref HANDLE_CONDVAR: (Mutex<bool>, Condvar) = (Mutex::new(false), Condvar::new());
 }
@@ -170,14 +163,15 @@ static CONFIG: OnceLock<UserConfig> = OnceLock::new();
 static FIRST_RUN: OnceLock<bool> = OnceLock::new();
 
 fn init_app_handle(handle: AppHandle) {
-    HANDLE.get_or_init(|| AppHandleWrapper(Mutex::new(handle)));
-    let (lock, _cvar) = &*HANDLE_CONDVAR;
+    HANDLE.get_or_init(|| handle);
+    let (lock, cvar) = &*HANDLE_CONDVAR;
     let mut started = lock.lock().expect("Failed to lock HANDLE_CONDVAR");
     *started = true;
+    cvar.notify_all();
 }
 
-pub(crate) fn get_app_handle() -> &'static Mutex<AppHandle> {
-    &HANDLE.get().expect("HANDLE not initialized").0
+pub(crate) fn get_app_handle() -> &'static AppHandle {
+    HANDLE.get().expect("HANDLE not initialized")
 }
 
 fn init_tray_id(id: TrayIconId) {
@@ -300,7 +294,7 @@ pub fn handle_first_run() {
     let first_run = is_first_run();
     if *first_run {
         thread::spawn(|| {
-            let app = &*get_app_handle().lock().expect("Failed to get app handle");
+            let app = get_app_handle();
             app.notification()
                 .builder()
                 .title("Aw-Tauri")
@@ -350,7 +344,7 @@ pub fn listen_for_lockfile() {
                             Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
                             Err(e) => warn!("Failed to remove lock file: {e}"),
                         }
-                        let app = &*get_app_handle().lock().expect("Failed to get app handle");
+                        let app = get_app_handle();
                         if let Some(window) = app.webview_windows().get("main") {
                             if let Err(e) = window.show().and_then(|()| window.set_focus()) {
                                 warn!("Failed to show main window: {e}");
@@ -547,7 +541,7 @@ pub(crate) fn get_config() -> &'static UserConfig {
                     warn!("Failed to parse config file: {}. Using default config.", e);
 
                     if !is_daemon_mode() && !is_mini_mode() {
-                        let app = &*get_app_handle().lock().expect("Failed to get app handle");
+                        let app = get_app_handle();
                         app.dialog()
                             .message("Malformed config file. Using default config.")
                             .kind(MessageDialogKind::Error)
