@@ -30,11 +30,32 @@ static MENU_ITEM: Mutex<Option<CheckMenuItem<Wry>>> = Mutex::new(None);
 /// toggles cannot interleave and lose one of the writes.
 static PERSIST_LOCK: Mutex<()> = Mutex::new(());
 
+/// Last autostart state read from or written to the OS. Querying the OS can be slow (the macOS
+/// AppleScript launcher runs `osascript` against System Events), and the tray menu is rebuilt
+/// several times during startup, so menu rebuilds read this instead.
+static REGISTERED: Mutex<Option<bool>> = Mutex::new(None);
+
+fn set_cached(registered: bool) {
+    *REGISTERED.lock().unwrap_or_else(|e| e.into_inner()) = Some(registered);
+}
+
 /// Whether the app is currently registered to start at login, according to the OS.
 pub fn is_registered(app: &AppHandle) -> Result<bool, String> {
-    app.autolaunch()
+    let registered = app
+        .autolaunch()
         .is_enabled()
-        .map_err(|e| format!("Failed to read autostart state: {e}"))
+        .map_err(|e| format!("Failed to read autostart state: {e}"))?;
+    set_cached(registered);
+    Ok(registered)
+}
+
+/// Like [`is_registered`], but answers from the cache when the OS has already been queried.
+fn is_registered_cached(app: &AppHandle) -> Result<bool, String> {
+    let cached = *REGISTERED.lock().unwrap_or_else(|e| e.into_inner());
+    match cached {
+        Some(registered) => Ok(registered),
+        None => is_registered(app),
+    }
 }
 
 /// Registers or unregisters the app for autostart and persists the choice.
@@ -73,8 +94,13 @@ pub fn set_enabled(app: &AppHandle, enabled: bool) -> Result<bool, String> {
 
     if let Err(e) = persist_enabled(enabled) {
         // Config and OS would now disagree; undo the OS change so they don't.
-        if let Err(rollback_err) = apply(previous) {
-            error!("Failed to roll back autostart after a failed config write: {rollback_err}");
+        match apply(previous) {
+            Ok(()) => set_cached(previous),
+            Err(rollback_err) => {
+                // The OS state is now unknown; make the next read go back to the OS.
+                *REGISTERED.lock().unwrap_or_else(|e| e.into_inner()) = None;
+                error!("Failed to roll back autostart after a failed config write: {rollback_err}");
+            }
         }
         return Err(e);
     }
@@ -112,7 +138,10 @@ pub fn sync_from_config(app: &AppHandle) {
         manager.disable()
     };
     match result {
-        Ok(()) => info!("Registered for autostart: {desired}"),
+        Ok(()) => {
+            set_cached(desired);
+            info!("Registered for autostart: {desired}");
+        }
         // A missing/read-only autostart directory shouldn't stop the app from starting.
         Err(e) => warn!("Failed to set autostart to {desired}: {e}"),
     }
@@ -212,7 +241,7 @@ fn migrate_legacy_windows_run_value(profile: &str) {
 
 /// Builds the tray "Start at login" item, checked to match the current OS state.
 pub fn build_menu_item(app: &AppHandle) -> CheckMenuItem<Wry> {
-    let checked = is_registered(app).unwrap_or_else(|e| {
+    let checked = is_registered_cached(app).unwrap_or_else(|e| {
         warn!("{e}; falling back to the configured value for the tray checkmark");
         get_config().autostart.enabled
     });
