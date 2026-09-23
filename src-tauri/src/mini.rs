@@ -3,7 +3,13 @@
 
 use crate::manager;
 use log::{error, info, warn};
-use std::{io::Cursor, path::Path, sync::mpsc, thread};
+use std::{
+    collections::{BTreeSet, HashMap},
+    io::Cursor,
+    path::Path,
+    sync::{mpsc, Arc},
+    thread,
+};
 use tao::{
     event::{Event, StartCause},
     event_loop::{ControlFlow, EventLoopBuilder},
@@ -74,18 +80,18 @@ pub fn run() {
         let state = manager_state
             .lock()
             .expect("Failed to acquire manager_state lock");
-        state.modules_snapshot()
+        Arc::new(state.modules_snapshot())
     };
 
-    let mut tray_icon: Option<TrayIcon> = None;
+    let mut tray: Option<MiniTray> = None;
     let mut first_run_notified = false;
 
     event_loop.run(move |event, _, control_flow| {
         *control_flow = ControlFlow::Wait;
 
         match event {
-            Event::NewEvents(StartCause::Init) if tray_icon.is_none() => {
-                tray_icon = Some(create_tray_icon(&modules));
+            Event::NewEvents(StartCause::Init) if tray.is_none() => {
+                tray = Some(MiniTray::new(&modules));
                 if !first_run_notified && *crate::is_first_run() {
                     show_notification(
                         "Aw-Tauri",
@@ -132,9 +138,9 @@ pub fn run() {
             }
             Event::UserEvent(MiniEvent::Manager(event)) => match event {
                 manager::ManagerEvent::ModulesChanged { modules: changed } => {
-                    modules = (*changed).clone();
-                    if let Some(tray_icon) = &tray_icon {
-                        update_tray_menu(tray_icon, &modules);
+                    modules = changed;
+                    if let Some(tray) = &mut tray {
+                        tray.update(&modules);
                     }
                 }
                 manager::ManagerEvent::Notification { title, message } => {
@@ -146,8 +152,59 @@ pub fn run() {
     });
 }
 
-fn create_tray_icon(modules: &manager::ModulesSnapshot) -> TrayIcon {
-    let menu = build_tray_menu(modules).expect("Failed to create mini tray menu");
+/// The mini-mode tray icon plus what's needed to update its menu in place.
+struct MiniTray {
+    icon: TrayIcon,
+    /// Check items for modules in the running group, keyed by module name.
+    module_items: HashMap<String, CheckMenuItem>,
+    /// Modules that had been started at least once when the menu was last built. The menu only
+    /// needs rebuilding when this changes; otherwise only checkmarks change.
+    running_keys: BTreeSet<String>,
+}
+
+impl MiniTray {
+    fn new(modules: &manager::ModulesSnapshot) -> Self {
+        let (menu, module_items) =
+            build_tray_menu(modules).expect("Failed to create mini tray menu");
+        MiniTray {
+            icon: create_tray_icon(menu),
+            module_items,
+            running_keys: running_keys(modules),
+        }
+    }
+
+    fn update(&mut self, modules: &manager::ModulesSnapshot) {
+        let running_keys = running_keys(modules);
+        if running_keys == self.running_keys {
+            // Same running group, so the menu order is unchanged: only sync checkmarks.
+            for (name, run_state) in modules {
+                if let (Some(item), Some(running)) = (self.module_items.get(name), run_state) {
+                    item.set_checked(*running);
+                }
+            }
+            return;
+        }
+        match build_tray_menu(modules) {
+            Ok((menu, module_items)) => {
+                self.icon.set_menu(Some(Box::new(menu)));
+                self.module_items = module_items;
+                self.running_keys = running_keys;
+            }
+            Err(e) => error!("Failed to update mini tray menu: {e}"),
+        }
+    }
+}
+
+/// Modules that have been started at least once, i.e. the tray's top group.
+fn running_keys(modules: &manager::ModulesSnapshot) -> BTreeSet<String> {
+    modules
+        .iter()
+        .filter(|(_, run_state)| run_state.is_some())
+        .map(|(name, _)| name.clone())
+        .collect()
+}
+
+fn create_tray_icon(menu: Menu) -> TrayIcon {
     let icon = load_tray_icon().expect("Failed to load mini tray icon");
 
     #[allow(unused_mut)] // only reassigned on Linux, below
@@ -165,19 +222,17 @@ fn create_tray_icon(modules: &manager::ModulesSnapshot) -> TrayIcon {
     builder.build().expect("Failed to create mini tray")
 }
 
-fn update_tray_menu(tray_icon: &TrayIcon, modules: &manager::ModulesSnapshot) {
-    match build_tray_menu(modules) {
-        Ok(menu) => tray_icon.set_menu(Some(Box::new(menu))),
-        Err(e) => error!("Failed to update mini tray menu: {e}"),
-    }
-}
+type ModuleItems = HashMap<String, CheckMenuItem>;
 
-fn build_tray_menu(modules: &manager::ModulesSnapshot) -> Result<Menu, Box<dyn std::error::Error>> {
+fn build_tray_menu(
+    modules: &manager::ModulesSnapshot,
+) -> Result<(Menu, ModuleItems), Box<dyn std::error::Error>> {
     let menu = Menu::new();
     let open = MenuItem::with_id("open", "Open Dashboard", true, None);
     menu.append(&open)?;
     menu.append(&PredefinedMenuItem::separator())?;
 
+    let mut module_items = HashMap::new();
     let modules_submenu = Submenu::with_id("modules", "Modules", true);
     // Started modules first, alphabetically, each with a checkbox.
     for (module, run_state) in modules {
@@ -185,6 +240,7 @@ fn build_tray_menu(modules: &manager::ModulesSnapshot) -> Result<Menu, Box<dyn s
             let module_menu =
                 CheckMenuItem::with_id(module_menu_id(module), module, true, *running, None);
             modules_submenu.append(&module_menu)?;
+            module_items.insert(module.clone(), module_menu);
         }
     }
     // Then discovered modules that have never been started, alphabetically.
@@ -206,7 +262,7 @@ fn build_tray_menu(modules: &manager::ModulesSnapshot) -> Result<Menu, Box<dyn s
     let quit = MenuItem::with_id("quit", "Quit ActivityWatch", true, None);
     menu.append(&quit)?;
 
-    Ok(menu)
+    Ok((menu, module_items))
 }
 
 fn module_menu_id(module: &str) -> String {
