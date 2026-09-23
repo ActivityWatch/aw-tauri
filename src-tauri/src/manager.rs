@@ -756,9 +756,14 @@ fn start_generic_module_thread(
         #[cfg(windows)]
         command.creation_flags(CREATE_NO_WINDOW);
 
-        let child = command.stdout(std::process::Stdio::piped()).spawn();
+        // Pipe stderr too: it's where modules report why they crashed, and when inherited it went
+        // to aw-tauri's own stderr, which is /dev/null for a GUI app.
+        let child = command
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn();
 
-        let child = match child {
+        let mut child = match child {
             Ok(c) => c,
             Err(e) => {
                 error!("Failed to start module {name}: {e}");
@@ -797,10 +802,15 @@ fn start_generic_module_thread(
         })
         .expect("Failed to send Module Started message");
 
+        // Drain stderr on its own thread, keeping only a bounded tail for the crash log.
+        let stderr = child.stderr.take().expect("Failed to get stderr");
+        let stderr_reader = thread::spawn(move || read_tail(stderr, STDERR_TAIL_BYTES));
+
         // Wait for the child to exit
-        let output = child
+        let mut output = child
             .wait_with_output()
             .expect("Failed to wait on child process");
+        output.stderr = stderr_reader.join().unwrap_or_default();
 
         // Clean up job handle on Windows
         #[cfg(windows)]
@@ -1352,6 +1362,29 @@ mod tests {
         let mut state = state_with_module("aw-watcher", 2, Some(Instant::now()));
         state.stopped_module("aw-watcher");
         assert_eq!(state.modules["aw-watcher"].restart_count, 2);
+    }
+
+    /// Runs `script` through the generic module path and returns its Stopped output.
+    #[cfg(unix)]
+    fn run_generic_module(script: &str) -> std::process::Output {
+        let (tx, rx) = channel();
+        let args = vec!["-c".to_string(), script.to_string()];
+        start_generic_module_thread("sh".into(), "/bin/sh".into(), Some(args), 5600, tx);
+        loop {
+            match rx.recv_timeout(Duration::from_secs(10)) {
+                Ok(ModuleMessage::Stopped { output, .. }) => return output,
+                Ok(_) => continue,
+                Err(e) => panic!("module never stopped: {e}"),
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn generic_module_captures_stderr() {
+        let output = run_generic_module("echo boom >&2; exit 3");
+        assert_eq!(output.status.code(), Some(3));
+        assert_eq!(output.stderr, b"boom\n");
     }
 
     #[test]
