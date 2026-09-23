@@ -454,7 +454,7 @@ fn create_job_object() -> Result<HANDLE, std::io::Error> {
 /// PDEATHSIG fires when the *thread* that spawned the child exits, not the process. That holds
 /// here because each module thread blocks on its child until the child exits.
 ///
-/// Linux only: macOS has no equivalent, and on Windows the job object covers this.
+/// On macOS see the watchdog-based version below; on Windows the job object covers this.
 #[cfg(target_os = "linux")]
 fn kill_on_parent_death(command: &mut Command) {
     use nix::sys::prctl;
@@ -474,6 +474,54 @@ fn kill_on_parent_death(command: &mut Command) {
             Ok(())
         });
     }
+}
+
+/// Have modules receive SIGTERM if aw-tauri dies, including by crash, Force Quit or SIGKILL.
+///
+/// macOS has no PDEATHSIG, so every module joins a process group led by a small watchdog shell.
+/// The watchdog polls aw-tauri's pid once a second and, once it's gone, sends SIGTERM to the whole
+/// group, which also covers helper processes the modules started themselves.
+#[cfg(target_os = "macos")]
+fn kill_on_parent_death(command: &mut Command) {
+    use std::os::unix::process::CommandExt;
+    use std::sync::OnceLock;
+
+    static WATCHDOG_GROUP: OnceLock<Option<i32>> = OnceLock::new();
+    let group = *WATCHDOG_GROUP.get_or_init(|| match spawn_watchdog(std::process::id()) {
+        Ok(watchdog) => Some(watchdog.id() as i32),
+        Err(e) => {
+            error!("Failed to start module watchdog; modules may outlive a crash: {e}");
+            None
+        }
+    });
+    let Some(group) = group else { return };
+    // Joining a group that no longer exists (watchdog killed, no modules left) would make the
+    // spawn itself fail, so only join a live one.
+    if signal::killpg(Pid::from_raw(group), None).is_ok() {
+        command.process_group(group);
+    } else {
+        warn!("Module watchdog is gone; this module won't be stopped if aw-tauri crashes");
+    }
+}
+
+/// Spawns the watchdog as the leader of a new process group. It ignores SIGTERM itself so the
+/// final `kill -TERM 0` (every process in its group) reaches the modules and then lets it exit.
+#[cfg(target_os = "macos")]
+fn spawn_watchdog(parent: u32) -> std::io::Result<std::process::Child> {
+    use std::os::unix::process::CommandExt;
+    use std::process::Stdio;
+
+    let script =
+        format!("trap '' TERM; while kill -0 {parent} 2>/dev/null; do sleep 1; done; kill -TERM 0");
+    // Long-lived like the modules, so it must not inherit their pipes either.
+    let _guard = SPAWN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    Command::new("/bin/sh")
+        .args(["-c", &script])
+        .process_group(0)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
 }
 
 // Splits a configured args string, warning (and falling back to no args) on malformed shell
@@ -744,7 +792,7 @@ fn start_generic_module_thread(
 
         // Start the child process
         let mut command = Command::new(&path);
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         kill_on_parent_death(&mut command);
 
         // Use custom args if provided, otherwise only pass port arg if it's not the default (5600)
@@ -860,7 +908,7 @@ fn start_notify_module_thread(
 
         // Start the child process with --output-only flag
         let mut command = Command::new(&path);
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         kill_on_parent_death(&mut command);
 
         // Always add --output-only flag for aw-notify
@@ -1481,6 +1529,41 @@ mod tests {
         );
 
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn watchdog_terminates_group_when_parent_dies() {
+        use std::os::unix::process::{CommandExt, ExitStatusExt};
+
+        let mut parent = Command::new("sleep").arg("60").spawn().unwrap();
+        let mut watchdog = spawn_watchdog(parent.id()).unwrap();
+        let mut module = Command::new("sleep")
+            .arg("60")
+            .process_group(watchdog.id() as i32)
+            .spawn()
+            .unwrap();
+
+        // Still running while the parent is alive.
+        thread::sleep(Duration::from_millis(1500));
+        assert!(module.try_wait().unwrap().is_none());
+
+        parent.kill().unwrap();
+        parent.wait().unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let status = loop {
+            if let Some(status) = module.try_wait().unwrap() {
+                break status;
+            }
+            if Instant::now() > deadline {
+                let _ = module.kill();
+                panic!("module outlived its parent");
+            }
+            thread::sleep(Duration::from_millis(100));
+        };
+        assert_eq!(status.signal(), Some(Signal::SIGTERM as i32));
+        watchdog.wait().unwrap();
     }
 
     #[test]
