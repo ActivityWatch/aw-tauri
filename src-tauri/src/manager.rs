@@ -1134,8 +1134,6 @@ fn send_tauri_notification(title: &str, message: &str) {
 
 #[cfg(unix)]
 fn discover_modules() -> BTreeMap<String, PathBuf> {
-    use std::os::unix::fs::MetadataExt;
-
     let excluded = [
         "aw-tauri",
         "aw-client",
@@ -1160,13 +1158,27 @@ fn discover_modules() -> BTreeMap<String, PathBuf> {
     // Create new PATH-like string
     let new_paths = env::join_paths(paths).unwrap_or_default();
 
-    // Build a set of paths to search
+    // Search starting with PATH entries
+    let found_modules = find_modules_in(env::split_paths(&new_paths).collect(), &excluded);
+
+    debug!(
+        "Discovered modules: {:?}",
+        found_modules.keys().collect::<Vec<_>>()
+    );
+    found_modules
+}
+
+/// Searches `dirs_to_search`, and any `aw-*` subdirectories, for executable `aw-*` modules.
+#[cfg(unix)]
+fn find_modules_in(
+    mut dirs_to_search: Vec<PathBuf>,
+    excluded: &[&str],
+) -> BTreeMap<String, PathBuf> {
+    use std::os::unix::fs::MetadataExt;
+
     let mut found_modules = BTreeMap::new();
     // Use (device, inode) pairs for cycle detection (works across filesystems)
     let mut visited_inodes = HashSet::new();
-
-    // Create a stack of directories to search, starting with PATH entries
-    let mut dirs_to_search: Vec<PathBuf> = env::split_paths(&new_paths).collect();
 
     // Process directories in depth-first order
     while let Some(dir) = dirs_to_search.pop() {
@@ -1191,9 +1203,12 @@ fn discover_modules() -> BTreeMap<String, PathBuf> {
                 };
                 let path = entry.path();
 
-                let metadata = match entry.metadata() {
+                // Follow symlinks: a symlink's own mode is always 0o777 on Linux, so checking it
+                // (as entry.metadata() would) accepted any aw-* link, even one to a
+                // non-executable or missing file, and never descended into linked directories.
+                let metadata = match fs::metadata(&path) {
                     Ok(m) => m,
-                    Err(_) => continue,
+                    Err(_) => continue, // broken symlink or unreadable
                 };
 
                 // If it's a directory starting with "aw-", add to search stack
@@ -1201,7 +1216,7 @@ fn discover_modules() -> BTreeMap<String, PathBuf> {
                     dirs_to_search.push(path);
                 }
                 // If it's an executable file
-                else if metadata.is_file() || metadata.file_type().is_symlink() {
+                else if metadata.is_file() {
                     // Skip if has extension or is excluded
                     if file_name.contains('.') || excluded.contains(&file_name.as_str()) {
                         continue;
@@ -1217,10 +1232,6 @@ fn discover_modules() -> BTreeMap<String, PathBuf> {
         }
     }
 
-    debug!(
-        "Discovered modules: {:?}",
-        found_modules.keys().collect::<Vec<_>>()
-    );
     found_modules
 }
 
@@ -1383,6 +1394,41 @@ mod tests {
         assert!(output.status.success());
         assert!(output.stdout.len() <= OUTPUT_TAIL_BYTES);
         assert!(output.stdout.ends_with(b"tail-marker\n"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn find_modules_follows_symlinks_to_their_targets() {
+        use std::os::unix::fs::symlink;
+
+        let dir = env::temp_dir().join(format!("aw-tauri-discover-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let bin = dir.join("bin");
+        let nested = dir.join("nested");
+        fs::create_dir_all(&bin).unwrap();
+        fs::create_dir_all(&nested).unwrap();
+
+        let make = |path: PathBuf, mode: u32| {
+            fs::write(&path, "").unwrap();
+            fs::set_permissions(&path, fs::Permissions::from_mode(mode)).unwrap();
+            path
+        };
+        let exec = make(dir.join("real-exec"), 0o755);
+        let plain = make(dir.join("real-plain"), 0o644);
+        make(nested.join("aw-nested"), 0o755);
+
+        symlink(&exec, bin.join("aw-good")).unwrap();
+        symlink(&plain, bin.join("aw-not-executable")).unwrap();
+        symlink(dir.join("missing"), bin.join("aw-broken")).unwrap();
+        symlink(&nested, bin.join("aw-linked-dir")).unwrap();
+
+        let found = find_modules_in(vec![bin], &[]);
+        assert_eq!(
+            found.keys().map(String::as_str).collect::<Vec<_>>(),
+            ["aw-good", "aw-nested"]
+        );
+
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
