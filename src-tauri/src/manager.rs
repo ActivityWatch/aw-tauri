@@ -1194,23 +1194,18 @@ fn discover_modules() -> BTreeMap<String, PathBuf> {
         // Look for aw-* executables in this directory
         if let Ok(entries) = fs::read_dir(&dir) {
             for entry in entries.filter_map(Result::ok) {
+                // Filter by name before touching metadata: PATH holds thousands of entries and
+                // only a handful are aw-*, so this skips a stat call for almost all of them.
+                let file_name = match entry.file_name().into_string() {
+                    Ok(name) if name.starts_with("aw-") => name,
+                    _ => continue,
+                };
                 let path = entry.path();
 
-                // Get metadata once and reuse (avoid duplicate fs::metadata call)
                 let metadata = match entry.metadata() {
                     Ok(m) => m,
                     Err(_) => continue,
                 };
-
-                let file_name = match path.file_name().and_then(|n| n.to_str()) {
-                    Some(name) => name.to_string(),
-                    None => continue,
-                };
-
-                // Process only items starting with "aw-"
-                if !file_name.starts_with("aw-") {
-                    continue;
-                }
 
                 // If it's a directory starting with "aw-", add to search stack
                 if metadata.is_dir() {
@@ -1281,20 +1276,16 @@ fn discover_modules() -> BTreeMap<String, PathBuf> {
         // Look for aw-* executables in this directory
         if let Ok(entries) = fs::read_dir(&dir) {
             for entry in entries.filter_map(Result::ok) {
+                // Filter by name before touching metadata: PATH holds thousands of entries and
+                // only a handful are aw-*, so this skips a stat call for almost all of them.
+                let file_name = match entry.file_name().into_string() {
+                    Ok(name) if name.starts_with("aw-") => name,
+                    _ => continue,
+                };
                 let path = entry.path();
 
                 // Skip if not a file or directory
                 if let Ok(metadata) = fs::metadata(&path) {
-                    let file_name = match path.file_name().and_then(|n| n.to_str()) {
-                        Some(name) => name.to_string(),
-                        None => continue,
-                    };
-
-                    // Process only items starting with "aw-"
-                    if !file_name.starts_with("aw-") {
-                        continue;
-                    }
-
                     // If it's a directory starting with "aw-", add to search stack
                     if metadata.is_dir() {
                         dirs_to_search.push(path);
