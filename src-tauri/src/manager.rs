@@ -254,14 +254,15 @@ struct TrayMenuCache {
 
 static TRAY_MENU_CACHE: Mutex<Option<TrayMenuCache>> = Mutex::new(None);
 
-fn update_tray_menu(modules: &ModulesSnapshot, event_tx: &Option<Sender<ManagerEvent>>) {
+fn update_tray_menu(modules: ModulesSnapshot, event_tx: &Option<Sender<ManagerEvent>>) {
     // In mini mode, forward state to the mini event loop instead of Tauri
     if let Some(tx) = event_tx {
         let _ = tx.send(ManagerEvent::ModulesChanged {
-            modules: Arc::new(modules.clone()),
+            modules: Arc::new(modules),
         });
         return;
     }
+    let modules = &modules;
     if crate::is_daemon_mode() {
         return;
     }
@@ -700,7 +701,7 @@ fn handle(
             }
         };
         if let Some(snapshot) = snapshot {
-            update_tray_menu(&snapshot, &event_tx);
+            update_tray_menu(snapshot, &event_tx);
         }
     }
 }
