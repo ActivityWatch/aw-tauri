@@ -802,15 +802,21 @@ fn start_generic_module_thread(
         })
         .expect("Failed to send Module Started message");
 
-        // Drain stderr on its own thread, keeping only a bounded tail for the crash log.
+        // Drain both pipes on their own threads, keeping only a bounded tail of each for the crash
+        // log. wait_with_output() would buffer everything a module prints for its whole run,
+        // which for a watcher can be weeks.
+        let stdout = child.stdout.take().expect("Failed to get stdout");
+        let stdout_reader = thread::spawn(move || read_tail(stdout, OUTPUT_TAIL_BYTES));
         let stderr = child.stderr.take().expect("Failed to get stderr");
-        let stderr_reader = thread::spawn(move || read_tail(stderr, STDERR_TAIL_BYTES));
+        let stderr_reader = thread::spawn(move || read_tail(stderr, OUTPUT_TAIL_BYTES));
 
         // Wait for the child to exit
-        let mut output = child
-            .wait_with_output()
-            .expect("Failed to wait on child process");
-        output.stderr = stderr_reader.join().unwrap_or_default();
+        let status = child.wait().expect("Failed to wait on child process");
+        let output = std::process::Output {
+            status,
+            stdout: stdout_reader.join().unwrap_or_default(),
+            stderr: stderr_reader.join().unwrap_or_default(),
+        };
 
         // Clean up job handle on Windows
         #[cfg(windows)]
@@ -921,7 +927,7 @@ fn start_notify_module_thread(
         // Drain stderr concurrently: aw-notify logs there, and if nothing reads the pipe it fills
         // up (~64 KiB) and the child blocks on its next log write while we wait on stdout.
         let stderr = child.stderr.take().expect("Failed to get stderr");
-        let stderr_reader = thread::spawn(move || read_tail(stderr, STDERR_TAIL_BYTES));
+        let stderr_reader = thread::spawn(move || read_tail(stderr, OUTPUT_TAIL_BYTES));
 
         let stdout = child.stdout.take().expect("Failed to get stdout");
         let reader = BufReader::new(stdout);
@@ -1009,8 +1015,8 @@ fn start_notify_module_thread(
     });
 }
 
-/// How much of a module's stderr to keep for crash diagnostics.
-const STDERR_TAIL_BYTES: usize = 64 * 1024;
+/// How much of a module's stdout/stderr to keep for crash diagnostics.
+const OUTPUT_TAIL_BYTES: usize = 64 * 1024;
 
 /// Reads `reader` to EOF, keeping only the last `max` bytes so a chatty module can't grow memory
 /// without bound over a long run.
@@ -1028,7 +1034,7 @@ fn read_tail(mut reader: impl Read, max: usize) -> Vec<u8> {
             }
             Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
             Err(e) => {
-                warn!("Failed to read module stderr: {e}");
+                warn!("Failed to read module output: {e}");
                 break;
             }
         }
@@ -1385,6 +1391,17 @@ mod tests {
         let output = run_generic_module("echo boom >&2; exit 3");
         assert_eq!(output.status.code(), Some(3));
         assert_eq!(output.stderr, b"boom\n");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn generic_module_keeps_only_output_tail() {
+        // ~1 MiB on stdout, then a marker that must survive in the tail.
+        let output =
+            run_generic_module("head -c 1048576 /dev/zero | tr '\\0' x; echo; echo tail-marker");
+        assert!(output.status.success());
+        assert!(output.stdout.len() <= OUTPUT_TAIL_BYTES);
+        assert!(output.stdout.ends_with(b"tail-marker\n"));
     }
 
     #[test]
