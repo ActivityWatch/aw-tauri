@@ -14,6 +14,9 @@ TAURI_BUILD_ARGS += --config '{"bundle":{"createUpdaterArtifacts":true}}'
 endif
 
 build: prebuild
+	# When TAURI_SIGNING_PRIVATE_KEY is present, the Makefile override above sets
+	# bundle.createUpdaterArtifacts=true. That flag is therefore absent from
+	# tauri.conf.json even though signed builds produce .sig files.
 	npm run tauri build -- $(TAURI_BUILD_ARGS)
 
 dev: prebuild
