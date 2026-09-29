@@ -1239,7 +1239,7 @@ fn discover_modules() -> BTreeMap<String, PathBuf> {
 
 /// Searches `dirs_to_search`, and any `aw-*` subdirectories, for executable `aw-*` modules.
 #[cfg(unix)]
-fn find_modules_in(
+pub(crate) fn find_modules_in(
     mut dirs_to_search: Vec<PathBuf>,
     excluded: &[&str],
 ) -> BTreeMap<String, PathBuf> {

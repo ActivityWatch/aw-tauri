@@ -480,7 +480,8 @@ impl Default for UserConfig {
         let discovery_paths = dirs::get_discovery_paths();
 
         // Build default modules list based on platform
-        let modules = if cfg!(target_os = "linux") {
+        #[cfg(target_os = "linux")]
+        let modules = {
             let is_wayland = env::var("XDG_SESSION_TYPE")
                 .map(|s| s == "wayland")
                 .unwrap_or(false)
@@ -489,10 +490,10 @@ impl Default for UserConfig {
                 module_available("aw-awatcher", &discovery_paths),
                 is_wayland,
             )
-        } else {
-            // On non-Linux platforms, use traditional watchers
-            vec!["aw-watcher-afk", "aw-watcher-window"]
         };
+        // On non-Linux platforms, use traditional watchers
+        #[cfg(not(target_os = "linux"))]
+        let modules = vec!["aw-watcher-afk", "aw-watcher-window"];
         let modules = modules
             .into_iter()
             .map(|name| ModuleEntry::Simple(name.to_string()))
@@ -520,6 +521,7 @@ impl Default for UserConfig {
 /// installs that only have the Python watchers still record activity: the
 /// Python window watcher can't see Wayland windows, so Wayland still gets
 /// aw-awatcher.
+#[cfg(any(target_os = "linux", test))]
 fn default_linux_modules(awatcher_available: bool, is_wayland: bool) -> Vec<&'static str> {
     if awatcher_available || is_wayland {
         vec!["aw-awatcher"]
@@ -528,14 +530,17 @@ fn default_linux_modules(awatcher_available: bool, is_wayland: bool) -> Vec<&'st
     }
 }
 
-/// Whether a file called `name` exists in `discovery_paths` or `$PATH`.
+/// Whether the module manager would find module `name` in `discovery_paths` or
+/// `$PATH`, using the same search (including `aw-*` subdirectories).
+#[cfg(all(unix, any(target_os = "linux", test)))]
 fn module_available(name: &str, discovery_paths: &[PathBuf]) -> bool {
     let path_var = env::var_os("PATH").unwrap_or_default();
-    discovery_paths
+    let dirs = discovery_paths
         .iter()
         .cloned()
         .chain(env::split_paths(&path_var))
-        .any(|dir| dir.join(name).is_file())
+        .collect();
+    manager::find_modules_in(dirs, &[]).contains_key(name)
 }
 
 fn get_config_path() -> PathBuf {
@@ -1265,7 +1270,7 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_dashboard_url, default_linux_modules, module_available};
+    use super::{build_dashboard_url, default_linux_modules};
 
     #[test]
     fn default_linux_modules_prefers_awatcher_when_installed() {
@@ -1284,23 +1289,35 @@ mod tests {
         assert_eq!(default_linux_modules(false, true), vec!["aw-awatcher"]);
     }
 
+    #[cfg(unix)]
     #[test]
-    fn module_available_checks_discovery_paths() {
+    fn module_available_matches_manager_discovery() {
+        use super::module_available;
+        use std::os::unix::fs::PermissionsExt;
+
         let dir = std::env::temp_dir().join(format!(
             "aw-tauri-test-module-available-{}",
             std::process::id()
         ));
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("aw-test-module-xyz"), "").unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        let write_module = |path: &std::path::Path, mode: u32| {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, "").unwrap();
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+        };
+        write_module(&dir.join("aw-test-flat-xyz"), 0o755);
+        write_module(
+            &dir.join("aw-test-dir-xyz").join("aw-test-nested-xyz"),
+            0o755,
+        );
+        write_module(&dir.join("aw-test-noexec-xyz"), 0o644);
 
-        assert!(module_available(
-            "aw-test-module-xyz",
-            std::slice::from_ref(&dir)
-        ));
-        assert!(!module_available(
-            "aw-test-module-missing",
-            std::slice::from_ref(&dir)
-        ));
+        let paths = std::slice::from_ref(&dir);
+        assert!(module_available("aw-test-flat-xyz", paths));
+        // modules in aw-* subdirectories are found, like the manager does
+        assert!(module_available("aw-test-nested-xyz", paths));
+        assert!(!module_available("aw-test-noexec-xyz", paths));
+        assert!(!module_available("aw-test-missing-xyz", paths));
 
         let _ = std::fs::remove_dir_all(&dir);
     }
