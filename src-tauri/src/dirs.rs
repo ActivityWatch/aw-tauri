@@ -8,7 +8,7 @@
 //! Module segments (`aw-tauri`, …) do not change.
 
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::profile::{current_profile, DEFAULT_PROFILE, TESTING_PROFILE};
 
@@ -170,58 +170,77 @@ pub fn get_runtime_dir() -> PathBuf {
 /// - Linux AppImage: `$APPDIR/usr/lib/aw-tauri/modules/`
 /// - macOS: `Contents/Resources/modules/` (and legacy `Contents/Resources/`)
 pub fn get_install_discovery_paths() -> Vec<PathBuf> {
-    let mut paths = Vec::new();
-
     #[cfg(target_os = "linux")]
     {
-        if let Ok(exe_path) = std::env::current_exe() {
-            if let Some(exe_dir) = exe_path.parent() {
-                // externalBin / same-directory layout
-                paths.push(exe_dir.to_path_buf());
-
-                // Tauri resources: ../lib/<productName>/ relative to the binary
-                if let Some(prefix) = exe_dir.parent() {
-                    let resource = prefix.join("lib").join("aw-tauri");
-                    if resource.exists() {
-                        paths.push(resource.join("modules"));
-                        paths.push(resource);
-                    }
-                }
-            }
-        }
-
-        // AppImage runtime sets APPDIR to the mounted squashfs root
-        if let Ok(appdir) = std::env::var("APPDIR") {
-            let resource = PathBuf::from(appdir)
-                .join("usr")
-                .join("lib")
-                .join("aw-tauri");
-            if resource.exists() {
-                let modules = resource.join("modules");
-                if !paths.contains(&modules) {
-                    paths.push(modules);
-                }
-                if !paths.contains(&resource) {
-                    paths.push(resource);
-                }
-            }
-        }
+        linux_install_discovery_paths(
+            std::env::current_exe().ok().as_deref(),
+            std::env::var_os("APPDIR").map(PathBuf::from).as_deref(),
+        )
     }
 
     #[cfg(target_os = "macos")]
     {
-        // Structure: Contents/MacOS/aw-tauri -> go up two levels -> Contents/Resources
-        if let Ok(exe_path) = std::env::current_exe() {
-            if let Some(contents_dir) = exe_path.parent().and_then(|p| p.parent()) {
-                let resources_dir = contents_dir.join("Resources");
-                if resources_dir.exists() {
-                    // Modules bundled via tauri.conf.json `bundle.resources` land in Resources/modules/.
-                    paths.push(resources_dir.join("modules"));
-                    // Also include Resources/ directly for compatibility with modules placed
-                    // at the root (e.g. legacy build_app_tauri.sh layout).
-                    paths.push(resources_dir);
-                }
+        macos_install_discovery_paths(std::env::current_exe().ok().as_deref())
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        Vec::new()
+    }
+}
+
+/// Linux layout, split out from `get_install_discovery_paths` so it can be
+/// tested against a fake install tree.
+#[cfg(any(target_os = "linux", test))]
+fn linux_install_discovery_paths(exe_path: Option<&Path>, appdir: Option<&Path>) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+
+    if let Some(exe_dir) = exe_path.and_then(Path::parent) {
+        // externalBin / same-directory layout
+        paths.push(exe_dir.to_path_buf());
+
+        // Tauri resources: ../lib/<productName>/ relative to the binary
+        if let Some(prefix) = exe_dir.parent() {
+            let resource = prefix.join("lib").join("aw-tauri");
+            if resource.exists() {
+                paths.push(resource.join("modules"));
+                paths.push(resource);
             }
+        }
+    }
+
+    // AppImage runtime sets APPDIR to the mounted squashfs root
+    if let Some(appdir) = appdir {
+        let resource = appdir.join("usr").join("lib").join("aw-tauri");
+        if resource.exists() {
+            let modules = resource.join("modules");
+            if !paths.contains(&modules) {
+                paths.push(modules);
+            }
+            if !paths.contains(&resource) {
+                paths.push(resource);
+            }
+        }
+    }
+
+    paths
+}
+
+/// macOS layout, split out from `get_install_discovery_paths` so it can be
+/// tested against a fake app bundle.
+#[cfg(any(target_os = "macos", test))]
+fn macos_install_discovery_paths(exe_path: Option<&Path>) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+
+    // Structure: Contents/MacOS/aw-tauri -> go up two levels -> Contents/Resources
+    if let Some(contents_dir) = exe_path.and_then(Path::parent).and_then(Path::parent) {
+        let resources_dir = contents_dir.join("Resources");
+        if resources_dir.exists() {
+            // Modules bundled via tauri.conf.json `bundle.resources` land in Resources/modules/.
+            paths.push(resources_dir.join("modules"));
+            // Also include Resources/ directly for compatibility with modules placed
+            // at the root (e.g. legacy build_app_tauri.sh layout).
+            paths.push(resources_dir);
         }
     }
 
@@ -353,10 +372,102 @@ mod tests {
         assert_eq!(appname_for("my-profile"), "activitywatch-my-profile");
     }
 
+    /// Fresh, empty scratch dir for building fake install trees.
+    fn scratch_dir(name: &str) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("aw-tauri-test-{}-{}", name, std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
     #[test]
-    fn test_install_discovery_paths_is_callable() {
-        // Does not require a real install layout; just ensures the helper runs.
-        let _ = get_install_discovery_paths();
+    fn test_linux_install_paths_deb_rpm_layout() {
+        // /usr/bin/aw-tauri with resources in /usr/lib/aw-tauri/
+        let root = scratch_dir("deb");
+        let usr = root.join("usr");
+        fs::create_dir_all(usr.join("bin")).unwrap();
+        fs::create_dir_all(usr.join("lib").join("aw-tauri").join("modules")).unwrap();
+
+        let paths = linux_install_discovery_paths(Some(&usr.join("bin").join("aw-tauri")), None);
+        assert_eq!(
+            paths,
+            vec![
+                usr.join("bin"),
+                usr.join("lib").join("aw-tauri").join("modules"),
+                usr.join("lib").join("aw-tauri"),
+            ]
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn test_linux_install_paths_without_resources() {
+        // No ../lib/aw-tauri next to the binary: only the binary's own dir.
+        let root = scratch_dir("bare");
+        fs::create_dir_all(root.join("bin")).unwrap();
+
+        let paths = linux_install_discovery_paths(Some(&root.join("bin").join("aw-tauri")), None);
+        assert_eq!(paths, vec![root.join("bin")]);
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn test_linux_install_paths_appimage_layout() {
+        // AppImage: binary runs from a different dir, resources under $APPDIR.
+        let root = scratch_dir("appimage");
+        let appdir = root.join("squashfs-root");
+        let resource = appdir.join("usr").join("lib").join("aw-tauri");
+        fs::create_dir_all(resource.join("modules")).unwrap();
+        let exe_dir = root.join("elsewhere").join("bin");
+        fs::create_dir_all(&exe_dir).unwrap();
+
+        let paths = linux_install_discovery_paths(Some(&exe_dir.join("aw-tauri")), Some(&appdir));
+        assert_eq!(
+            paths,
+            vec![exe_dir.clone(), resource.join("modules"), resource.clone()]
+        );
+
+        // When the binary itself lives in $APPDIR/usr/bin, paths aren't duplicated.
+        let exe = appdir.join("usr").join("bin").join("aw-tauri");
+        let paths = linux_install_discovery_paths(Some(&exe), Some(&appdir));
+        assert_eq!(
+            paths,
+            vec![
+                appdir.join("usr").join("bin"),
+                resource.join("modules"),
+                resource,
+            ]
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn test_macos_install_paths_bundle_layout() {
+        let root = scratch_dir("macos");
+        let contents = root.join("ActivityWatch.app").join("Contents");
+        fs::create_dir_all(contents.join("MacOS")).unwrap();
+        fs::create_dir_all(contents.join("Resources").join("modules")).unwrap();
+
+        let paths = macos_install_discovery_paths(Some(&contents.join("MacOS").join("aw-tauri")));
+        assert_eq!(
+            paths,
+            vec![
+                contents.join("Resources").join("modules"),
+                contents.join("Resources"),
+            ]
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn test_install_paths_without_exe() {
+        assert!(linux_install_discovery_paths(None, None).is_empty());
+        assert!(macos_install_discovery_paths(None).is_empty());
     }
 
     #[cfg(target_os = "linux")]

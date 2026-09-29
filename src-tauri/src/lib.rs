@@ -479,19 +479,24 @@ impl Default for UserConfig {
     fn default() -> Self {
         let discovery_paths = dirs::get_discovery_paths();
 
-        // Build default modules list based on platform.
-        // Linux uses aw-awatcher (Rust, covers window+AFK on both X11 and Wayland)
-        // so self-contained deb/rpm/AppImage packages work without the Python watchers.
-        // See ActivityWatch/aw-tauri#232.
-        let mut modules = Vec::new();
-
-        if cfg!(target_os = "linux") {
-            modules.push(ModuleEntry::Simple("aw-awatcher".to_string()));
+        // Build default modules list based on platform
+        let modules = if cfg!(target_os = "linux") {
+            let is_wayland = env::var("XDG_SESSION_TYPE")
+                .map(|s| s == "wayland")
+                .unwrap_or(false)
+                || env::var("WAYLAND_DISPLAY").is_ok();
+            default_linux_modules(
+                module_available("aw-awatcher", &discovery_paths),
+                is_wayland,
+            )
         } else {
             // On non-Linux platforms, use traditional watchers
-            modules.push(ModuleEntry::Simple("aw-watcher-afk".to_string()));
-            modules.push(ModuleEntry::Simple("aw-watcher-window".to_string()));
-        }
+            vec!["aw-watcher-afk", "aw-watcher-window"]
+        };
+        let modules = modules
+            .into_iter()
+            .map(|name| ModuleEntry::Simple(name.to_string()))
+            .collect();
 
         UserConfig {
             port: 5600,
@@ -507,6 +512,30 @@ impl Default for UserConfig {
             },
         }
     }
+}
+
+/// First-run watchers on Linux. aw-awatcher (Rust, covers window + AFK on X11
+/// and Wayland) is preferred when it's installed, e.g. bundled in a
+/// self-contained deb/rpm/AppImage. Without it, keep the previous defaults so
+/// installs that only have the Python watchers still record activity: the
+/// Python window watcher can't see Wayland windows, so Wayland still gets
+/// aw-awatcher.
+fn default_linux_modules(awatcher_available: bool, is_wayland: bool) -> Vec<&'static str> {
+    if awatcher_available || is_wayland {
+        vec!["aw-awatcher"]
+    } else {
+        vec!["aw-watcher-afk", "aw-watcher-window"]
+    }
+}
+
+/// Whether a file called `name` exists in `discovery_paths` or `$PATH`.
+fn module_available(name: &str, discovery_paths: &[PathBuf]) -> bool {
+    let path_var = env::var_os("PATH").unwrap_or_default();
+    discovery_paths
+        .iter()
+        .cloned()
+        .chain(env::split_paths(&path_var))
+        .any(|dir| dir.join(name).is_file())
 }
 
 fn get_config_path() -> PathBuf {
@@ -1236,7 +1265,45 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
-    use super::build_dashboard_url;
+    use super::{build_dashboard_url, default_linux_modules, module_available};
+
+    #[test]
+    fn default_linux_modules_prefers_awatcher_when_installed() {
+        assert_eq!(default_linux_modules(true, false), vec!["aw-awatcher"]);
+        assert_eq!(default_linux_modules(true, true), vec!["aw-awatcher"]);
+    }
+
+    #[test]
+    fn default_linux_modules_falls_back_without_awatcher() {
+        // X11 without aw-awatcher keeps the Python watchers
+        assert_eq!(
+            default_linux_modules(false, false),
+            vec!["aw-watcher-afk", "aw-watcher-window"]
+        );
+        // Wayland has no working Python window watcher, so stay on aw-awatcher
+        assert_eq!(default_linux_modules(false, true), vec!["aw-awatcher"]);
+    }
+
+    #[test]
+    fn module_available_checks_discovery_paths() {
+        let dir = std::env::temp_dir().join(format!(
+            "aw-tauri-test-module-available-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("aw-test-module-xyz"), "").unwrap();
+
+        assert!(module_available(
+            "aw-test-module-xyz",
+            std::slice::from_ref(&dir)
+        ));
+        assert!(!module_available(
+            "aw-test-module-missing",
+            std::slice::from_ref(&dir)
+        ));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn build_dashboard_url_omits_token_when_auth_disabled() {

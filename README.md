@@ -100,7 +100,7 @@ opt in.
 - `autostart.modules` — Modules to start automatically. Each entry can be a string (`"aw-watcher-afk"`) or an object with args (`{ name = "aw-sync", args = "daemon" }`). `aw-sync` is opt-in, not included by default
 - `module_args` — Default args by module name, used when a module is launched from the tray menu or restarted after a crash. Lets you set args for a module *without* adding it to `autostart.modules` (e.g. `aw-watcher-vscode` above is launched manually from the tray, but still gets its args). If a module is listed in both places, the inline args on its `autostart.modules` entry take precedence.
 
-**Note:** On Linux, the default watcher is `aw-awatcher` (covers window + AFK on both X11 and Wayland) instead of the separate Python `aw-watcher-afk` / `aw-watcher-window` pair. That keeps self-contained deb/rpm/AppImage packages small and pure-Rust. You can still drop the Python watchers into `~/aw-modules` and point `autostart.modules` at them.
+**Note:** On Linux, the default watcher is `aw-awatcher` (covers window + AFK on both X11 and Wayland) when it is installed, e.g. bundled in a self-contained deb/rpm/AppImage. If it isn't found on first run, X11 falls back to the Python `aw-watcher-afk` + `aw-watcher-window` pair, and Wayland keeps `aw-awatcher` (the Python window watcher can't see Wayland windows).
 
 ## Logging
 
