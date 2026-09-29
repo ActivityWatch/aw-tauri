@@ -6,7 +6,15 @@
   "app": {
     "windows": [],
     "security": {
-      "csp": null
+      "csp": null,
+      "dangerousRemoteDomainIpcAccess": [
+        {
+          "scheme": "http",
+          "domain": "localhost",
+          "windows": ["main"],
+          "enableTauriAPI": true
+        }
+      ]
     }
   },
   "bundle": {
