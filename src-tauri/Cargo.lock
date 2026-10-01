@@ -368,7 +368,7 @@ checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
 [[package]]
 name = "aw-client-rust"
 version = "0.1.0"
-source = "git+https://github.com/ActivityWatch/aw-server-rust.git?branch=master#e7c54393f6d761c8feb83ea0bd1688fcfe6b3e18"
+source = "git+https://github.com/ActivityWatch/aw-server-rust.git?branch=master#1f2fb0bcca2d9b54af9a40d08b6b22a16e98cee1"
 dependencies = [
  "aw-models",
  "aw-transform",
@@ -390,7 +390,7 @@ dependencies = [
 [[package]]
 name = "aw-datastore"
 version = "0.1.0"
-source = "git+https://github.com/ActivityWatch/aw-server-rust.git?branch=master#e7c54393f6d761c8feb83ea0bd1688fcfe6b3e18"
+source = "git+https://github.com/ActivityWatch/aw-server-rust.git?branch=master#1f2fb0bcca2d9b54af9a40d08b6b22a16e98cee1"
 dependencies = [
  "aw-models",
  "aw-transform",
@@ -407,7 +407,7 @@ dependencies = [
 [[package]]
 name = "aw-models"
 version = "0.1.0"
-source = "git+https://github.com/ActivityWatch/aw-server-rust.git?branch=master#e7c54393f6d761c8feb83ea0bd1688fcfe6b3e18"
+source = "git+https://github.com/ActivityWatch/aw-server-rust.git?branch=master#1f2fb0bcca2d9b54af9a40d08b6b22a16e98cee1"
 dependencies = [
  "chrono",
  "log",
@@ -419,7 +419,7 @@ dependencies = [
 [[package]]
 name = "aw-query"
 version = "0.1.0"
-source = "git+https://github.com/ActivityWatch/aw-server-rust.git?branch=master#e7c54393f6d761c8feb83ea0bd1688fcfe6b3e18"
+source = "git+https://github.com/ActivityWatch/aw-server-rust.git?branch=master#1f2fb0bcca2d9b54af9a40d08b6b22a16e98cee1"
 dependencies = [
  "aw-datastore",
  "aw-models",
@@ -435,7 +435,7 @@ dependencies = [
 [[package]]
 name = "aw-server"
 version = "0.14.0"
-source = "git+https://github.com/ActivityWatch/aw-server-rust.git?branch=master#e7c54393f6d761c8feb83ea0bd1688fcfe6b3e18"
+source = "git+https://github.com/ActivityWatch/aw-server-rust.git?branch=master#1f2fb0bcca2d9b54af9a40d08b6b22a16e98cee1"
 dependencies = [
  "android_logger",
  "aw-client-rust",
@@ -514,7 +514,7 @@ dependencies = [
 [[package]]
 name = "aw-transform"
 version = "0.1.0"
-source = "git+https://github.com/ActivityWatch/aw-server-rust.git?branch=master#e7c54393f6d761c8feb83ea0bd1688fcfe6b3e18"
+source = "git+https://github.com/ActivityWatch/aw-server-rust.git?branch=master#1f2fb0bcca2d9b54af9a40d08b6b22a16e98cee1"
 dependencies = [
  "aw-models",
  "chrono",
