@@ -637,11 +637,11 @@ fn run_daemon() {
         }
     };
 
-    let server_state = aw_server::endpoints::ServerState {
-        datastore: aw_datastore::Datastore::new(db_path, false),
-        asset_resolver: aw_server::endpoints::AssetResolver::new(asset_path_opt),
+    let server_state = ServerState::new(
+        aw_datastore::Datastore::new(db_path, false),
+        aw_server::endpoints::AssetResolver::new(asset_path_opt),
         device_id,
-    };
+    );
 
     log_profile_startup(&cli_args.profile, port);
     info!("Starting aw-tauri in daemon mode on port {port}");
@@ -736,11 +736,11 @@ pub(crate) fn prepare_aw_server(
         None
     };
 
-    let server_state = ServerState {
-        datastore: aw_datastore::Datastore::new(db_path, legacy_import),
-        asset_resolver: aw_server::endpoints::AssetResolver::new(asset_path_opt),
+    let server_state = ServerState::new(
+        aw_datastore::Datastore::new(db_path, legacy_import),
+        aw_server::endpoints::AssetResolver::new(asset_path_opt),
         device_id,
-    };
+    );
     log_profile_startup(&cli_args.profile, port);
     let dashboard_api_key = aw_config
         .auth
