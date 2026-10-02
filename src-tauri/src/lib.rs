@@ -1062,6 +1062,10 @@ pub fn run() {
                 // aw-notify never autostarts unless the user explicitly enables it.
                 let notify_enabled = read_notify_enabled(&db_path);
                 let db_path_arc = Arc::new(db_path);
+                // Capture port before aw_config is moved into build_rocket so the
+                // manager uses the CLI-computed port (--port / --testing) rather
+                // than the raw config-file default from get_config().port.
+                let server_port = aw_config.port;
                 let rocket_handle =
                     tauri::async_runtime::spawn(build_rocket(server_state, aw_config).launch());
                 // Create main window programmatically to attach initialization script.
@@ -1093,7 +1097,7 @@ pub fn run() {
                 .build()
                 .expect("Failed to create main window");
                 let manager_state = manager::start_manager_with_notify(
-                    get_config().port,
+                    server_port,
                     notify_enabled,
                 );
 
