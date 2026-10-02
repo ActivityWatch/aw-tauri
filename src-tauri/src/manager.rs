@@ -1500,7 +1500,7 @@ mod tests {
         let module = Module {
             path: PathBuf::from("/nonexistent"),
             run_state: Some(true),
-            pid: Some(1),
+            pid: Some(1234),
             started_at,
             restart_count,
             generation: 1,
