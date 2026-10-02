@@ -272,7 +272,7 @@ fn write_formatted_config(config: &UserConfig, path: &Path) -> Result<(), std::i
 /// Read `aw-notify.enabled` from the settings datastore.
 /// Opens a short-lived second connection to the same SQLite file (WAL mode; safe).
 /// Returns `false` on any error so aw-notify never autostarts by accident.
-fn read_notify_enabled(db_path: &str) -> bool {
+pub(crate) fn read_notify_enabled(db_path: &str) -> bool {
     let ds = aw_datastore::Datastore::new(db_path.to_string(), false);
     match ds.get_key_value("settings.aw-notify") {
         Ok(val) => serde_json::from_str::<serde_json::Value>(&val)
@@ -284,7 +284,8 @@ fn read_notify_enabled(db_path: &str) -> bool {
 }
 
 /// Write `aw-notify.enabled` to the settings datastore, preserving all other keys.
-pub(crate) fn write_notify_enabled(db_path: &str, enabled: bool) {
+/// Returns `true` if the write succeeded, `false` on any datastore error.
+pub(crate) fn write_notify_enabled(db_path: &str, enabled: bool) -> bool {
     let ds = aw_datastore::Datastore::new(db_path.to_string(), false);
     // Preserve existing keys in the aw-notify settings object.
     let existing: serde_json::Value = match ds.get_key_value("settings.aw-notify") {
@@ -301,6 +302,9 @@ pub(crate) fn write_notify_enabled(db_path: &str, enabled: bool) {
     let new_val = serde_json::Value::Object(obj).to_string();
     if let Err(e) = ds.set_key_value("settings.aw-notify", &new_val) {
         error!("Failed to write aw-notify.enabled: {:?}", e);
+        false
+    } else {
+        true
     }
 }
 
@@ -654,6 +658,7 @@ fn run_daemon() {
             std::process::exit(1);
         }
     };
+    let daemon_notify_enabled = read_notify_enabled(&db_path);
     let device_id = aw_server::device_id::get_device_id();
 
     let asset_path_opt = match std::env::var("AW_WEBUI_DIR") {
@@ -693,7 +698,7 @@ fn run_daemon() {
 
     // Start module manager after Rocket is already starting up.
     // Pass the CLI-computed port so --testing and --port are respected.
-    let manager_state = manager::start_manager_with_port(port);
+    let manager_state = manager::start_manager_with_notify(port, daemon_notify_enabled);
 
     // Wait for server shutdown (Rocket handles SIGINT/SIGTERM cleanly)
     // Use match instead of expect so that stop_modules() always runs —
@@ -1186,8 +1191,11 @@ pub fn run() {
                             .lock()
                             .expect("Failed to acquire manager_state lock");
                         let now_enabled = !state.is_notify_enabled();
-                        write_notify_enabled(&db_path_arc, now_enabled);
-                        state.set_notify_enabled(app, now_enabled);
+                        if write_notify_enabled(&db_path_arc, now_enabled) {
+                            state.set_notify_enabled(app, now_enabled);
+                        } else {
+                            error!("Notify toggle aborted: datastore write failed; state unchanged");
+                        }
                     } else {
                         // Modules menu clicks
                         let mut state = manager_state

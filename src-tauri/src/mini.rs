@@ -36,7 +36,7 @@ pub fn run() {
 
     let user_config = crate::get_config();
 
-    let (dashboard_url, server_state, aw_config, _db_path) =
+    let (dashboard_url, server_state, aw_config, db_path) =
         match crate::prepare_aw_server(user_config, cli_args) {
             Ok(server) => server,
             Err(message) => {
@@ -46,6 +46,7 @@ pub fn run() {
             }
         };
     let server_port = aw_config.port;
+    let notify_opt_in = crate::read_notify_enabled(&db_path);
     let rocket_handle = tauri::async_runtime::spawn(
         aw_server::endpoints::build_rocket(server_state, aw_config).launch(),
     );
@@ -93,7 +94,7 @@ pub fn run() {
         }
     });
 
-    let manager_state = manager::start_manager_with_events(server_port, manager_tx);
+    let manager_state = manager::start_manager_with_events(server_port, manager_tx, notify_opt_in);
     let mut modules = {
         let state = manager_state
             .lock()
