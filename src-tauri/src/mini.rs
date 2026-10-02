@@ -36,7 +36,7 @@ pub fn run() {
 
     let user_config = crate::get_config();
 
-    let (dashboard_url, server_state, aw_config) =
+    let (dashboard_url, server_state, aw_config, _db_path) =
         match crate::prepare_aw_server(user_config, cli_args) {
             Ok(server) => server,
             Err(message) => {

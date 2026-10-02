@@ -10,7 +10,7 @@ use std::env;
 use std::fs::{create_dir_all, read_to_string, remove_file, write, OpenOptions};
 use std::net::{SocketAddr, TcpListener};
 use std::path::{Path, PathBuf};
-use std::sync::{mpsc, Condvar, Mutex, OnceLock};
+use std::sync::{mpsc, Arc, Condvar, Mutex, OnceLock};
 use std::thread;
 use std::time::Duration;
 #[cfg(target_os = "macos")]
@@ -267,6 +267,41 @@ fn write_formatted_config(config: &UserConfig, path: &Path) -> Result<(), std::i
     }
 
     write(path, output)
+}
+
+/// Read `aw-notify.enabled` from the settings datastore.
+/// Opens a short-lived second connection to the same SQLite file (WAL mode; safe).
+/// Returns `false` on any error so aw-notify never autostarts by accident.
+fn read_notify_enabled(db_path: &str) -> bool {
+    let ds = aw_datastore::Datastore::new(db_path.to_string(), false);
+    match ds.get_key_value("settings.aw-notify") {
+        Ok(val) => serde_json::from_str::<serde_json::Value>(&val)
+            .ok()
+            .and_then(|v| v.get("enabled")?.as_bool())
+            .unwrap_or(false),
+        Err(_) => false,
+    }
+}
+
+/// Write `aw-notify.enabled` to the settings datastore, preserving all other keys.
+pub(crate) fn write_notify_enabled(db_path: &str, enabled: bool) {
+    let ds = aw_datastore::Datastore::new(db_path.to_string(), false);
+    // Preserve existing keys in the aw-notify settings object.
+    let existing: serde_json::Value = match ds.get_key_value("settings.aw-notify") {
+        Ok(val) => {
+            serde_json::from_str(&val).unwrap_or(serde_json::Value::Object(Default::default()))
+        }
+        Err(_) => serde_json::Value::Object(Default::default()),
+    };
+    let mut obj = match existing {
+        serde_json::Value::Object(m) => m,
+        _ => Default::default(),
+    };
+    obj.insert("enabled".to_string(), serde_json::Value::Bool(enabled));
+    let new_val = serde_json::Value::Object(obj).to_string();
+    if let Err(e) = ds.set_key_value("settings.aw-notify", &new_val) {
+        error!("Failed to write aw-notify.enabled: {:?}", e);
+    }
 }
 
 pub fn is_port_available(port: u16) -> std::io::Result<bool> {
@@ -696,7 +731,7 @@ fn run_daemon() {
 pub(crate) fn prepare_aw_server(
     user_config: &UserConfig,
     cli_args: &CliArgs,
-) -> Result<(Url, ServerState, AWConfig), String> {
+) -> Result<(Url, ServerState, AWConfig, String), String> {
     let testing = cli_args.testing;
     let legacy_import = false;
 
@@ -737,7 +772,7 @@ pub(crate) fn prepare_aw_server(
     };
 
     let server_state = ServerState::new(
-        aw_datastore::Datastore::new(db_path, legacy_import),
+        aw_datastore::Datastore::new(db_path.clone(), legacy_import),
         aw_server::endpoints::AssetResolver::new(asset_path_opt),
         device_id,
     );
@@ -751,7 +786,7 @@ pub(crate) fn prepare_aw_server(
         info!("Bootstrapping aw-webui API token into dashboard URL");
     }
     let dashboard_url = build_dashboard_url(port, dashboard_api_key);
-    Ok((dashboard_url, server_state, aw_config))
+    Ok((dashboard_url, server_state, aw_config, db_path))
 }
 
 /// Run the lightweight mini mode: tray + server, no Tauri WebView.
@@ -1002,7 +1037,7 @@ pub fn run() {
                 // Bring the OS login item in line with `[autostart] enabled`.
                 autostart::sync_from_config(app.handle());
 
-                let (dashboard_url, server_state, aw_config) =
+                let (dashboard_url, server_state, aw_config, db_path) =
                     match prepare_aw_server(user_config, cli_args) {
                         Ok(server) => server,
                         Err(message) => {
@@ -1017,6 +1052,11 @@ pub fn run() {
                             return Ok(());
                         }
                     };
+                // Read aw-notify.enabled from the settings store before Rocket takes ownership
+                // of the datastore.  A missing key / invalid JSON / any error → false so
+                // aw-notify never autostarts unless the user explicitly enables it.
+                let notify_enabled = read_notify_enabled(&db_path);
+                let db_path_arc = Arc::new(db_path);
                 let rocket_handle =
                     tauri::async_runtime::spawn(build_rocket(server_state, aw_config).launch());
                 // Create main window programmatically to attach initialization script.
@@ -1047,7 +1087,10 @@ pub fn run() {
                 )
                 .build()
                 .expect("Failed to create main window");
-                let manager_state = manager::start_manager();
+                let manager_state = manager::start_manager_with_notify(
+                    get_config().port,
+                    notify_enabled,
+                );
 
                 // Rocket handles SIGINT/SIGTERM (and SIGHUP on Unix) by shutting the server down.
                 // Nothing else would end the app then, so stop the modules and exit with it.
@@ -1138,6 +1181,13 @@ pub fn run() {
                             .expect("Failed to open log folder");
                     } else if event.id().0 == autostart::MENU_ID {
                         autostart::handle_menu_click(app);
+                    } else if event.id().0 == manager::NOTIFY_TOGGLE_ID {
+                        let mut state = manager_state
+                            .lock()
+                            .expect("Failed to acquire manager_state lock");
+                        let now_enabled = !state.is_notify_enabled();
+                        write_notify_enabled(&db_path_arc, now_enabled);
+                        state.set_notify_enabled(app, now_enabled);
                     } else {
                         // Modules menu clicks
                         let mut state = manager_state
