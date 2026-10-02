@@ -59,6 +59,7 @@ enum ModuleMessage {
     },
     Stopped {
         name: String,
+        pid: u32,
         output: std::process::Output,
     },
     Init {},
@@ -171,9 +172,19 @@ impl ManagerState {
         }
         debug!("Modules: {:?}", self.modules);
     }
-    fn stopped_module(&mut self, name: &str) {
-        info!("Stopped module: {name}");
+    fn stopped_module(&mut self, name: &str, pid: u32) {
+        info!("Stopped module: {name} (pid {pid})");
         if let Some(module) = self.modules.get_mut(name) {
+            // Drop Stopped messages from a process that is no longer the tracked one.
+            // This prevents a delayed exit from an old process clobbering a replacement
+            // that was started while the old one was shutting down (rapid toggle race).
+            if module.pid.is_some() && module.pid != Some(pid) {
+                debug!(
+                    "Ignoring stale Stopped for {name}: pid {pid} ≠ tracked {:?}",
+                    module.pid
+                );
+                return;
+            }
             module.run_state = Some(false);
             module.pid = None;
             // A module that ran for a while before crashing isn't crash-looping, so give it the
@@ -720,8 +731,8 @@ fn handle(
                         show_module_recovered(&event_tx, &name);
                     }
                 }
-                ModuleMessage::Stopped { name, output } => {
-                    state_guard.stopped_module(&name);
+                ModuleMessage::Stopped { name, pid, output } => {
+                    state_guard.stopped_module(&name, pid);
                     let name_clone = name.clone();
                     if output.status.success() {
                         info!("Module {name} exited successfully");
@@ -967,6 +978,7 @@ fn start_generic_module_thread(
         // Send the process output to the manager
         tx.send(ModuleMessage::Stopped {
             name: name.to_string(),
+            pid: child_pid,
             output,
         })
         .expect("Failed to send module stopped message");
@@ -1058,9 +1070,10 @@ fn start_notify_module_thread(
         // `--output-only`/`--port` flags are re-added on every start, so storing the expanded
         // command line would re-inject them and compound across a stop/start or restart (the
         // module would be relaunched with duplicated flags and fail to come back up).
+        let child_pid = child.id();
         tx.send(ModuleMessage::Started {
             name: name.to_string(),
-            pid: child.id(),
+            pid: child_pid,
             args: custom_args.clone(),
         })
         .expect("Failed to send module started message");
@@ -1150,6 +1163,7 @@ fn start_notify_module_thread(
         // Send the process output to the manager
         tx.send(ModuleMessage::Stopped {
             name: name.to_string(),
+            pid: child_pid,
             output,
         })
         .expect("Failed to send module stopped message");
@@ -1504,14 +1518,14 @@ mod tests {
     fn crash_after_stable_run_resets_restart_count() {
         let mut state =
             state_with_module("aw-watcher", 3, Instant::now().checked_sub(STABLE_UPTIME));
-        state.stopped_module("aw-watcher");
+        state.stopped_module("aw-watcher", 1234);
         assert_eq!(state.modules["aw-watcher"].restart_count, 0);
     }
 
     #[test]
     fn manual_start_resets_restart_count() {
         let mut state = state_with_module("aw-watcher", 3, None);
-        state.stopped_module("aw-watcher");
+        state.stopped_module("aw-watcher", 1234);
         state.handle_system_click("aw-watcher");
         assert_eq!(state.modules["aw-watcher"].restart_count, 0);
     }
@@ -1519,7 +1533,7 @@ mod tests {
     #[test]
     fn crash_loop_keeps_restart_count() {
         let mut state = state_with_module("aw-watcher", 2, Some(Instant::now()));
-        state.stopped_module("aw-watcher");
+        state.stopped_module("aw-watcher", 1234);
         assert_eq!(state.modules["aw-watcher"].restart_count, 2);
     }
 
