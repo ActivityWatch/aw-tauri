@@ -270,9 +270,13 @@ impl ManagerState {
         if enabled {
             if let Some(module) = self.modules.get_mut("aw-notify") {
                 module.restart_count = 0;
-                // Clear any pending shutdown so a module that is currently stopping
-                // (or was stopped) can restart once the process exits.
                 module.pending_shutdown = false;
+                // Force into a stopped state so start_module does not treat a
+                // process that is still shutting down as "running" and skip the
+                // spawn.  aw-notify only connects outward (no owned port), so a
+                // brief overlap while the old process exits is harmless.
+                module.run_state = Some(false);
+                module.pid = None;
             }
             self.start_module("aw-notify", None);
         } else {
