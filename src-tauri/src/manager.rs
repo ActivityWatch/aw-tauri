@@ -33,6 +33,7 @@ use log::{debug, error, info, trace, warn};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::PathBuf;
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 use std::sync::{
     mpsc::{channel, Receiver, Sender},
     Arc, Mutex,
@@ -103,11 +104,19 @@ struct Module {
     args: Option<Vec<String>>,
 }
 
+/// Tray menu ID for the "Enable notifications" toggle.
+pub(crate) const NOTIFY_TOGGLE_ID: &str = "notify_toggle";
+
+/// Shared notify-enabled state for the tray rebuild path (set from ManagerState).
+static NOTIFY_ENABLED_GLOBAL: AtomicBool = AtomicBool::new(false);
+
 #[derive(Debug)]
 pub struct ManagerState {
     tx: Sender<ModuleMessage>,
     pub server_port: u16,
     modules: BTreeMap<String, Module>,
+    /// Whether aw-notify was started (or should be started) per the settings flag.
+    notify_enabled: bool,
 }
 
 impl ManagerState {
@@ -137,6 +146,7 @@ impl ManagerState {
             tx,
             server_port,
             modules,
+            notify_enabled: false,
         }
     }
 
@@ -238,6 +248,33 @@ impl ManagerState {
             .get(name)
             .is_some_and(|module| module.run_state == Some(true))
     }
+
+    pub(crate) fn is_notify_enabled(&self) -> bool {
+        self.notify_enabled
+    }
+
+    /// Write the new enabled state, update the tray CheckMenuItem, and start/stop aw-notify.
+    pub(crate) fn set_notify_enabled(&mut self, _app: &AppHandle, enabled: bool) {
+        self.notify_enabled = enabled;
+        NOTIFY_ENABLED_GLOBAL.store(enabled, AtomicOrdering::Relaxed);
+        // Sync the tray checkmark via the cached item
+        if let Ok(cache) = TRAY_MENU_CACHE.lock() {
+            if let Some(c) = cache.as_ref() {
+                if let Some(item) = c.notify_item.as_ref() {
+                    let _ = item.set_checked(enabled);
+                }
+            }
+        }
+        // Start or stop the module immediately
+        if enabled {
+            if let Some(module) = self.modules.get_mut("aw-notify") {
+                module.restart_count = 0;
+            }
+            self.start_module("aw-notify", None);
+        } else {
+            self.stop_module("aw-notify");
+        }
+    }
 }
 
 struct TrayMenuCache {
@@ -250,6 +287,8 @@ struct TrayMenuCache {
     // time and must move into the top group); crash-restart loops keep the module in the set and
     // only toggle its checked state, so they take the cheap sync path.
     running_keys: BTreeSet<String>,
+    // The notify toggle CheckMenuItem so set_notify_enabled can sync its checked state in-place.
+    notify_item: Option<CheckMenuItem<Wry>>,
 }
 
 static TRAY_MENU_CACHE: Mutex<Option<TrayMenuCache>> = Mutex::new(None);
@@ -303,10 +342,11 @@ fn update_tray_menu(modules: ModulesSnapshot, event_tx: &Option<Sender<ManagerEv
         }
         // First build, or a module joined the running group: rebuild to reorder the menu.
         _ => {
-            let module_items = build_tray_menu(app, modules);
+            let (module_items, notify_item) = build_tray_menu(app, modules);
             *cache = Some(TrayMenuCache {
                 module_items,
                 running_keys,
+                notify_item,
             });
             trace!("built tray menu");
         }
@@ -316,7 +356,10 @@ fn update_tray_menu(modules: ModulesSnapshot, event_tx: &Option<Sender<ManagerEv
 fn build_tray_menu(
     app: &AppHandle,
     modules: &ModulesSnapshot,
-) -> HashMap<String, CheckMenuItem<Wry>> {
+) -> (
+    HashMap<String, CheckMenuItem<Wry>>,
+    Option<CheckMenuItem<Wry>>,
+) {
     let open = MenuItem::with_id(app, "open", "Open Dashboard", true, None::<&str>)
         .expect("failed to create open menu item");
     let quit = MenuItem::with_id(app, "quit", "Quit ActivityWatch", true, None::<&str>)
@@ -359,6 +402,16 @@ fn build_tray_menu(
     let log_folder = MenuItem::with_id(app, "log_folder", "Open log folder", true, None::<&str>)
         .expect("Failed to create log folder menu item");
     let autostart_item = crate::autostart::build_menu_item(app);
+    let notify_checked = NOTIFY_ENABLED_GLOBAL.load(AtomicOrdering::Relaxed);
+    let notify_toggle_item = CheckMenuItem::with_id(
+        app,
+        NOTIFY_TOGGLE_ID,
+        "Enable notifications",
+        true,
+        notify_checked,
+        None::<&str>,
+    )
+    .expect("Failed to create notify toggle menu item");
     let separator = PredefinedMenuItem::separator(app).expect("Failed to create separator");
     let menu = Menu::with_items(
         app,
@@ -367,6 +420,7 @@ fn build_tray_menu(
             &separator,
             &module_submenu,
             &separator,
+            &notify_toggle_item,
             &autostart_item,
             &config_folder,
             &log_folder,
@@ -382,7 +436,7 @@ fn build_tray_menu(
         .set_menu(Some(menu))
         .expect("Failed to set tray menu");
 
-    module_items
+    (module_items, Some(notify_toggle_item))
 }
 
 #[cfg(unix)]
@@ -561,32 +615,53 @@ fn configured_modules_args() -> HashMap<String, Option<Vec<String>>> {
     modules_args
 }
 
+#[allow(dead_code)]
 pub fn start_manager() -> Arc<Mutex<ManagerState>> {
-    start_manager_inner(get_config().port, None)
+    start_manager_inner(get_config().port, None, false)
 }
 
 pub(crate) fn start_manager_with_port(server_port: u16) -> Arc<Mutex<ManagerState>> {
-    start_manager_inner(server_port, None)
+    start_manager_inner(server_port, None, false)
+}
+
+/// Start the manager, honoring the `aw-notify.enabled` flag read from the settings store.
+/// When `notify_opt_in` is false, aw-notify is skipped at autostart even if it is listed in
+/// `autostart.modules`.
+pub(crate) fn start_manager_with_notify(
+    server_port: u16,
+    notify_opt_in: bool,
+) -> Arc<Mutex<ManagerState>> {
+    start_manager_inner(server_port, None, notify_opt_in)
 }
 
 pub(crate) fn start_manager_with_events(
     server_port: u16,
     event_tx: Sender<ManagerEvent>,
 ) -> Arc<Mutex<ManagerState>> {
-    start_manager_inner(server_port, Some(event_tx))
+    start_manager_inner(server_port, Some(event_tx), false)
 }
 
 fn start_manager_inner(
     server_port: u16,
     event_tx: Option<Sender<ManagerEvent>>,
+    notify_opt_in: bool,
 ) -> Arc<Mutex<ManagerState>> {
     let (tx, rx) = channel();
     let state = Arc::new(Mutex::new(ManagerState::new(tx.clone(), server_port)));
+    {
+        let mut s = state.lock().expect("Failed to acquire manager_state lock");
+        s.notify_enabled = notify_opt_in;
+    }
+    NOTIFY_ENABLED_GLOBAL.store(notify_opt_in, AtomicOrdering::Relaxed);
 
     // Start the modules. Args come from the baseline computed in ManagerState::new().
     let config = get_config();
     for module_entry in config.autostart.modules.iter() {
         let name = module_entry.name();
+        if name == "aw-notify" && !notify_opt_in {
+            info!("Skipping aw-notify autostart: aw-notify.enabled is not true in settings");
+            continue;
+        }
         state
             .lock()
             .expect("Failed to acquire manager_state lock")
