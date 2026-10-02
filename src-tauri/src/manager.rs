@@ -209,9 +209,10 @@ impl ManagerState {
     }
     pub fn stop_module(&mut self, name: &str) {
         if let Some(module) = self.modules.get_mut(name) {
+            // Mark pending_shutdown unconditionally so a module in backoff (no pid yet)
+            // does not restart after its delay expires.
+            module.pending_shutdown = true;
             if let Some(pid) = module.pid {
-                // mark pending shutdown to prevent restart
-                module.pending_shutdown = true;
                 if let Err(e) = send_sigterm(pid) {
                     error!("Failed to send SIGTERM to module {name}: {e}");
                 } else {
@@ -269,6 +270,9 @@ impl ManagerState {
         if enabled {
             if let Some(module) = self.modules.get_mut("aw-notify") {
                 module.restart_count = 0;
+                // Clear any pending shutdown so a module that is currently stopping
+                // (or was stopped) can restart once the process exits.
+                module.pending_shutdown = false;
             }
             self.start_module("aw-notify", None);
         } else {
@@ -620,6 +624,7 @@ pub fn start_manager() -> Arc<Mutex<ManagerState>> {
     start_manager_inner(get_config().port, None, false)
 }
 
+#[allow(dead_code)]
 pub(crate) fn start_manager_with_port(server_port: u16) -> Arc<Mutex<ManagerState>> {
     start_manager_inner(server_port, None, false)
 }
@@ -637,8 +642,9 @@ pub(crate) fn start_manager_with_notify(
 pub(crate) fn start_manager_with_events(
     server_port: u16,
     event_tx: Sender<ManagerEvent>,
+    notify_opt_in: bool,
 ) -> Arc<Mutex<ManagerState>> {
-    start_manager_inner(server_port, Some(event_tx), false)
+    start_manager_inner(server_port, Some(event_tx), notify_opt_in)
 }
 
 fn start_manager_inner(
