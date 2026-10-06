@@ -46,6 +46,10 @@ pub fn get_config_dir() -> Result<PathBuf, ()> {
     config_dir_in(&appname())
 }
 
+/// The dir aw-tauri's own config/data live in, under a platform root.
+#[cfg(not(target_os = "android"))]
+const MODULE: &str = "aw-tauri";
+
 /// `<config root>/<appname>/aw-tauri`. `%LOCALAPPDATA%` on Windows (not
 /// Roaming), first moving over anything v0.14.0 put under Roaming, with
 /// aw-server-rust's resolver so aw-tauri and aw-server follow one rule: see
@@ -55,7 +59,7 @@ fn config_dir_in(appname: &str) -> Result<PathBuf, ()> {
     Ok(aw_server::dirs::module_dir(
         aw_server::dirs::user_config_root().ok_or(())?,
         appname,
-        "aw-tauri",
+        MODULE,
     ))
 }
 
@@ -76,7 +80,7 @@ fn data_dir_in(appname: &str) -> Result<PathBuf, ()> {
     Ok(aw_server::dirs::module_dir(
         aw_server::dirs::user_data_root().ok_or(())?,
         appname,
-        "aw-tauri",
+        MODULE,
     ))
 }
 
@@ -438,14 +442,15 @@ mod tests {
         // Explicit default profile rather than the getters' AW_PROFILE, so a
         // developer's exported profile cannot fail (or mask) the pins.
         let app = appname_for(DEFAULT_PROFILE);
-        assert_eq!(data_dir_in(&app).unwrap(), data.join("aw-tauri"));
-        assert_eq!(config_dir_in(&app).unwrap(), config.join("aw-tauri"));
+        // The roots `config_dir_in`/`data_dir_in` build on, joined without
+        // calling `module_dir`: on a Windows machine with v0.14.0 data, that
+        // would migrate the real install from a test. (The server's own
+        // dirs, including `db_path`, are pinned in aw-server-rust.)
+        let config_root = aw_server::dirs::user_config_root().unwrap();
+        let data_root = aw_server::dirs::user_data_root().unwrap();
+        assert_eq!(config_root.join(&app).join(MODULE), config.join("aw-tauri"));
+        assert_eq!(data_root.join(&app).join(MODULE), data.join("aw-tauri"));
         assert_eq!(log_dir_in(&app).unwrap(), log);
-        // The embedded server's database, resolved by aw-server-rust.
-        assert_eq!(
-            aw_server::dirs::db_path(DEFAULT_PROFILE).unwrap(),
-            data.join("aw-server-rust").join("sqlite.db")
-        );
     }
 
     /// Fresh, empty scratch dir for building fake install trees.
