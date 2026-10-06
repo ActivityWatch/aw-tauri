@@ -280,7 +280,15 @@ pub(crate) fn legacy_import_if_fresh(db_path: &str, profile: &str, testing: bool
     info!("Fresh database, checking for a python aw-server database to import");
     let ds = aw_datastore::Datastore::new(db_path.to_string(), true);
     // The import runs in the worker before it serves requests; wait for it.
-    let _ = ds.get_buckets();
+    // aw_datastore's own messages are filtered out at the default log level,
+    // so report the outcome here.
+    match ds.get_buckets() {
+        Ok(buckets) => info!(
+            "Database created with {} buckets after import check",
+            buckets.len()
+        ),
+        Err(e) => warn!("Could not read buckets after import check: {e:?}"),
+    }
     ds.close();
 }
 
