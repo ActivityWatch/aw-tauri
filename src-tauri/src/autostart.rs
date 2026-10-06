@@ -115,15 +115,25 @@ pub fn set_enabled(app: &AppHandle, enabled: bool) -> Result<bool, String> {
     Ok(actual)
 }
 
-/// Applies `[autostart] enabled` from the config to the OS at startup.
+/// Reconciles the autostart state at application startup.
 ///
-/// The config is authoritative here — this is what makes a hand-edited config
-/// file take effect — and it is applied in *both* directions, so clearing the
-/// flag also removes an already-registered login item.
+/// The OS is treated as authoritative once a config file exists.  If the OS
+/// entry disagrees with the stored config value, the config is updated to match
+/// what the OS says — not the other way around.  This means that disabling
+/// autostart outside the app (Task Manager's `StartupApproved`, macOS Login
+/// Items, a desktop startup manager) is respected on the next launch rather
+/// than silently re-enabled.
+///
+/// On a fresh install, before any config file has been written, the default
+/// config value (`enabled = true`) is applied to the OS to set up the initial
+/// login entry.  After that first run the OS state takes precedence.
 pub fn sync_from_config(app: &AppHandle) {
     migrate_legacy_named_profile_entry(&profile::current_profile());
 
-    let desired = get_config().autostart.enabled;
+    #[cfg(target_os = "macos")]
+    migrate_legacy_default_macos_launch_agent();
+
+    let config_enabled = get_config().autostart.enabled;
     let current = match is_registered(app) {
         Ok(current) => current,
         Err(e) => {
@@ -132,32 +142,85 @@ pub fn sync_from_config(app: &AppHandle) {
         }
     };
 
-    if current == desired {
-        info!("Registered for autostart: {desired} (already in sync)");
+    if current == config_enabled {
+        info!("Registered for autostart: {current} (in sync)");
         return;
     }
 
-    let manager = app.autolaunch();
-    let result = if desired {
-        manager.enable()
+    // OS and config disagree.  How to reconcile depends on whether this is the
+    // first run (no config file on disk yet) or a subsequent launch:
+    //
+    // • First run — config file does not exist: apply the default config to the
+    //   OS to complete initial setup.
+    // • Subsequent launch — config file exists: the user may have changed
+    //   autostart outside the app.  Treat OS as the source of truth and persist
+    //   its state into config so the next launch sees them in sync.
+    let is_first_run = !get_config_path().exists();
+
+    if is_first_run {
+        let manager = app.autolaunch();
+        let result = if config_enabled {
+            manager.enable()
+        } else {
+            manager.disable()
+        };
+        if let Err(e) = result {
+            warn!("Failed to set autostart to {config_enabled} on first run: {e}");
+            clear_cached();
+            return;
+        }
+        // Don't trust the call's Ok(()): it can silently do nothing.
+        match is_registered(app) {
+            Ok(actual) if actual == config_enabled => {
+                info!("Registered for autostart: {config_enabled}")
+            }
+            Ok(actual) => warn!("Autostart is still {actual} after requesting {config_enabled}"),
+            Err(e) => {
+                warn!("{e}");
+                clear_cached();
+            }
+        }
     } else {
-        manager.disable()
+        // OS wins: persist its state so config stays honest.
+        info!(
+            "OS autostart is {current} but config says {config_enabled}; \
+             updating config to match OS (may have been changed outside the app)",
+        );
+        if let Err(e) = persist_enabled(current) {
+            warn!("Failed to persist OS autostart state to config: {e}");
+        }
+    }
+}
+
+/// Remove `~/Library/LaunchAgents/aw-tauri.plist` if it belongs to the default
+/// profile and is therefore a leftover from builds before b7d5832 (Nov 2025),
+/// which switched from `MacosLauncher::LaunchAgent` to `MacosLauncher::AppleScript`.
+/// The new launcher does not write this file; keeping it starts a second instance
+/// at login.  Named-profile plists that happen to have the same base name are
+/// identified by their `--profile` flag and left alone — they are cleaned up by
+/// [`migrate_legacy_named_profile_entry`] on that profile's own next run.
+#[cfg(target_os = "macos")]
+fn migrate_legacy_default_macos_launch_agent() {
+    let Some(path) = legacy_macos_launch_agent_path() else {
+        return;
     };
-    if let Err(e) = result {
-        // A missing/read-only autostart directory shouldn't stop the app from starting.
-        warn!("Failed to set autostart to {desired}: {e}");
-        clear_cached();
+    let Ok(contents) = fs::read_to_string(&path) else {
+        return;
+    };
+    if contents.contains("--profile") {
+        // Belongs to a named profile — leave it.
         return;
     }
-    // Don't trust the call's Ok(()): it can silently do nothing, and the tray checkmark is
-    // built from the cache, so read the OS back (which also refreshes the cache).
-    match is_registered(app) {
-        Ok(actual) if actual == desired => info!("Registered for autostart: {desired}"),
-        Ok(actual) => warn!("Autostart is still {actual} after requesting {desired}"),
-        Err(e) => {
-            warn!("{e}");
-            clear_cached();
-        }
+    match fs::remove_file(&path) {
+        Ok(()) => info!(
+            "Removed legacy default-profile macOS LaunchAgent at {} \
+             (app now uses Login Items via AppleScript)",
+            path.display()
+        ),
+        Err(e) => warn!(
+            "Failed to remove legacy macOS LaunchAgent {}: {e}",
+            path.display()
+        ),
     }
 }
 
