@@ -1511,6 +1511,7 @@ mod tests {
             tx: channel().0,
             server_port: 5600,
             modules: BTreeMap::from([(name.to_string(), module)]),
+            notify_enabled: false,
         }
     }
 
