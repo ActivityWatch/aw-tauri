@@ -269,6 +269,21 @@ fn write_formatted_config(config: &UserConfig, path: &Path) -> Result<(), std::i
     write(path, output)
 }
 
+/// Import python aw-server's database if `db_path` does not exist yet, as
+/// standalone aw-server-rust does on first start. Must run before anything
+/// else opens `db_path`: the import only happens when the file is created.
+/// Default profile only: the python database it reads is the default one.
+pub(crate) fn legacy_import_if_fresh(db_path: &str, profile: &str, testing: bool) {
+    if profile != "default" || testing || Path::new(db_path).exists() {
+        return;
+    }
+    info!("Fresh database, checking for a python aw-server database to import");
+    let ds = aw_datastore::Datastore::new(db_path.to_string(), true);
+    // The import runs in the worker before it serves requests; wait for it.
+    let _ = ds.get_buckets();
+    ds.close();
+}
+
 /// Read `aw-notify.enabled` from the settings datastore.
 /// Opens a short-lived second connection to the same SQLite file (WAL mode; safe).
 /// Returns `false` on any error so aw-notify never autostarts by accident.
@@ -658,6 +673,7 @@ fn run_daemon() {
             std::process::exit(1);
         }
     };
+    legacy_import_if_fresh(&db_path, &cli_args.profile, testing);
     let daemon_notify_enabled = read_notify_enabled(&db_path);
     let device_id = aw_server::device_id::get_device_id();
 
@@ -759,6 +775,7 @@ pub(crate) fn prepare_aw_server(
         .to_str()
         .ok_or_else(|| "Database path is not valid UTF-8".to_string())?
         .to_string();
+    legacy_import_if_fresh(&db_path, &cli_args.profile, testing);
     let device_id = aw_server::device_id::get_device_id();
 
     let webui_var = std::env::var("AW_WEBUI_DIR");
@@ -1424,5 +1441,25 @@ mod tests {
         "#;
         let config: UserConfig = toml::from_str(toml_str).unwrap();
         assert!(config.updates.auto_download);
+    }
+}
+
+#[cfg(test)]
+mod legacy_import_tests {
+    use super::legacy_import_if_fresh;
+
+    #[test]
+    fn legacy_import_skips_named_profiles_and_testing() {
+        let dir = std::env::temp_dir().join(format!("aw-tauri-legacy-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("sqlite.db");
+        let db = db.to_str().unwrap();
+        legacy_import_if_fresh(db, "research", false);
+        legacy_import_if_fresh(db, "default", true);
+        assert!(
+            !std::path::Path::new(db).exists(),
+            "must not create (and so import into) a non-default profile's DB"
+        );
+        let _ = std::fs::remove_dir_all(dir);
     }
 }
