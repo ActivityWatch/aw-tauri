@@ -431,6 +431,14 @@ fn build_tray_menu(
         None::<&str>,
     )
     .expect("Failed to create notify toggle menu item");
+    let settings_item = MenuItem::with_id(
+        app,
+        crate::settings_ui::MENU_ID,
+        "Settings…",
+        true,
+        None::<&str>,
+    )
+    .expect("Failed to create settings menu item");
     let separator = PredefinedMenuItem::separator(app).expect("Failed to create separator");
     let menu = Menu::with_items(
         app,
@@ -441,6 +449,7 @@ fn build_tray_menu(
             &separator,
             &notify_toggle_item,
             &autostart_item,
+            &settings_item,
             &config_folder,
             &log_folder,
             &separator,
@@ -1289,6 +1298,11 @@ fn send_tauri_notification(title: &str, message: &str) {
             error!("Failed to send notification: {}", e);
         }
     }
+}
+
+/// Names of the modules found in the discovery paths, for the settings window.
+pub fn discover_module_names() -> Vec<String> {
+    discover_modules().into_keys().collect()
 }
 
 #[cfg(unix)]

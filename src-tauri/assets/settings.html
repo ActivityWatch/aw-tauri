@@ -1,0 +1,495 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>ActivityWatch Settings</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      --bg: #f5f5f7;
+      --fg: #1d1d1f;
+      --muted: #6e6e73;
+      --card: #ffffff;
+      --border: rgba(0, 0, 0, 0.08);
+      --input-bg: #ffffff;
+      --input-border: rgba(0, 0, 0, 0.16);
+      --accent: #0a66d8;
+      --accent-fg: #ffffff;
+      --danger: #c4271c;
+      --warn: #b25000;
+      --warn-bg: #fff4e5;
+      --ok: #1b7f3a;
+      --ok-bg: #e8f7ed;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #1c1c1e;
+        --fg: #f5f5f7;
+        --muted: #a1a1a6;
+        --card: #2c2c2e;
+        --border: rgba(255, 255, 255, 0.1);
+        --input-bg: #1c1c1e;
+        --input-border: rgba(255, 255, 255, 0.18);
+        --accent: #3d8bfd;
+        --danger: #ff6b5f;
+        --warn: #ffb340;
+        --warn-bg: #3a2a12;
+        --ok: #6dde8b;
+        --ok-bg: #1a3322;
+      }
+    }
+    * { box-sizing: border-box; }
+    html, body {
+      margin: 0;
+      height: 100%;
+      font: 13px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: var(--bg);
+      color: var(--fg);
+    }
+    body {
+      display: flex;
+      flex-direction: column;
+    }
+    main {
+      flex: 1;
+      min-height: 0;
+      overflow: auto;
+      padding: 16px 16px 8px;
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+    }
+    h1 {
+      margin: 0;
+      font-size: 15px;
+      font-weight: 600;
+      letter-spacing: -0.01em;
+    }
+    section {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 12px 14px;
+    }
+    h2 {
+      margin: 0 0 2px;
+      font-size: 13px;
+      font-weight: 600;
+    }
+    .hint {
+      margin: 0 0 10px;
+      color: var(--muted);
+      font-size: 12px;
+    }
+    label.check {
+      display: flex;
+      align-items: flex-start;
+      gap: 8px;
+      padding: 4px 0;
+      cursor: pointer;
+    }
+    label.check input { margin: 2px 0 0; }
+    label.check.disabled { color: var(--muted); cursor: default; }
+    .field {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    input[type="text"], input[type="number"] {
+      font: inherit;
+      color: inherit;
+      background: var(--input-bg);
+      border: 1px solid var(--input-border);
+      border-radius: 6px;
+      padding: 5px 8px;
+      min-width: 0;
+    }
+    input:focus-visible, button:focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: 1px;
+    }
+    input[type="number"] { width: 96px; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; }
+    ul.rows {
+      list-style: none;
+      margin: 0 0 8px;
+      padding: 0;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+    ul.rows li {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    ul.rows li .grow { flex: 1; }
+    ul.rows li .path {
+      flex: 1;
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      direction: rtl;
+      text-align: left;
+    }
+    .module-name { flex: 0 1 45%; }
+    .module-args { flex: 1 1 55%; }
+    .empty { color: var(--muted); font-size: 12px; }
+    button {
+      font: inherit;
+      color: inherit;
+      background: var(--input-bg);
+      border: 1px solid var(--input-border);
+      border-radius: 6px;
+      padding: 5px 12px;
+      cursor: pointer;
+      white-space: nowrap;
+    }
+    button:disabled { opacity: 0.5; cursor: default; }
+    button.primary {
+      background: var(--accent);
+      border-color: var(--accent);
+      color: var(--accent-fg);
+      font-weight: 600;
+    }
+    button.icon {
+      padding: 3px 8px;
+      color: var(--muted);
+      border-color: transparent;
+      background: transparent;
+    }
+    button.icon:hover { color: var(--danger); }
+    .add-row { display: flex; gap: 6px; }
+    .add-row input { flex: 1; }
+    footer {
+      border-top: 1px solid var(--border);
+      padding: 10px 16px 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+    .actions {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+    }
+    .actions .buttons { display: flex; gap: 8px; }
+    .config-path {
+      color: var(--muted);
+      font-size: 11px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      min-width: 0;
+    }
+    #status {
+      display: none;
+      border-radius: 8px;
+      padding: 8px 10px;
+      font-size: 12px;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+    }
+    #status.show { display: flex; }
+    #status.error { background: var(--warn-bg); color: var(--warn); }
+    #status.ok { background: var(--ok-bg); color: var(--ok); }
+    #status span { white-space: pre-wrap; word-break: break-word; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Settings</h1>
+
+    <section>
+      <h2>Startup</h2>
+      <p class="hint">Start at login applies immediately.</p>
+      <label class="check"><input type="checkbox" id="autostart-enabled" /> Start ActivityWatch at login</label>
+      <label class="check" id="minimized-label"><input type="checkbox" id="autostart-minimized" /> Start minimized to the tray, without opening the dashboard</label>
+    </section>
+
+    <section>
+      <h2>Modules started with ActivityWatch</h2>
+      <p class="hint">Watchers and other modules launched automatically. Arguments are optional.</p>
+      <ul class="rows" id="modules"></ul>
+      <div class="add-row">
+        <input type="text" id="new-module" class="mono" list="available-modules" placeholder="Module name, e.g. aw-watcher-input" spellcheck="false" autocomplete="off" />
+        <button type="button" id="add-module">Add</button>
+      </div>
+      <datalist id="available-modules"></datalist>
+    </section>
+
+    <section>
+      <h2>Module search folders</h2>
+      <p class="hint">Folders ActivityWatch looks in for <span class="mono">aw-*</span> modules.</p>
+      <ul class="rows" id="paths"></ul>
+      <button type="button" id="add-path">Add folder…</button>
+    </section>
+
+    <section>
+      <h2>Server</h2>
+      <div class="field">
+        <label for="port">Port</label>
+        <input type="number" id="port" min="1" max="65535" step="1" />
+      </div>
+    </section>
+
+    <section>
+      <h2>Updates</h2>
+      <label class="check"><input type="checkbox" id="auto-download" /> Download updates automatically</label>
+    </section>
+  </main>
+
+  <footer>
+    <div id="status" role="status"><span id="status-text"></span><button type="button" id="restart" hidden>Restart now</button></div>
+    <div class="actions">
+      <div class="config-path mono" id="config-path"></div>
+      <div class="buttons">
+        <button type="button" id="revert">Revert</button>
+        <button type="button" id="save" class="primary">Save</button>
+      </div>
+    </div>
+  </footer>
+
+  <script>
+    (function () {
+      function invoke(cmd, args) {
+        if (window.__TAURI_INTERNALS__ && typeof window.__TAURI_INTERNALS__.invoke === 'function') {
+          return window.__TAURI_INTERNALS__.invoke(cmd, args || {});
+        }
+        return Promise.reject(new Error('Tauri IPC is unavailable'));
+      }
+
+      var $ = function (id) { return document.getElementById(id); };
+      // Last config read from or written to disk; the form edits a copy.
+      var config = null;
+
+      function markDirty() {
+        $('save').disabled = false;
+        $('revert').disabled = false;
+      }
+
+      function setClean() {
+        $('save').disabled = true;
+        $('revert').disabled = true;
+      }
+
+      function showStatus(kind, message, offerRestart) {
+        var el = $('status');
+        el.className = 'show ' + kind;
+        $('status-text').textContent = message;
+        $('restart').hidden = !offerRestart;
+      }
+
+      function clearStatus() {
+        $('status').className = '';
+      }
+
+      function moduleName(entry) { return typeof entry === 'string' ? entry : entry.name; }
+      function moduleArgs(entry) { return typeof entry === 'string' ? '' : (entry.args || ''); }
+
+      function removeButton(label, onClick) {
+        var b = document.createElement('button');
+        b.type = 'button';
+        b.className = 'icon';
+        b.textContent = '✕';
+        b.title = label;
+        b.setAttribute('aria-label', label);
+        b.addEventListener('click', onClick);
+        return b;
+      }
+
+      function renderModules() {
+        var list = $('modules');
+        list.textContent = '';
+        var modules = config.autostart.modules;
+        if (!modules.length) {
+          var empty = document.createElement('li');
+          empty.className = 'empty';
+          empty.textContent = 'No modules start automatically.';
+          list.appendChild(empty);
+          return;
+        }
+        modules.forEach(function (entry, i) {
+          var li = document.createElement('li');
+          var name = document.createElement('input');
+          name.type = 'text';
+          name.className = 'mono module-name';
+          name.value = moduleName(entry);
+          name.spellcheck = false;
+          name.setAttribute('aria-label', 'Module name');
+          var args = document.createElement('input');
+          args.type = 'text';
+          args.className = 'mono module-args';
+          args.value = moduleArgs(entry);
+          args.placeholder = 'arguments';
+          args.spellcheck = false;
+          args.setAttribute('aria-label', 'Arguments for ' + moduleName(entry));
+          function update() {
+            var n = name.value.trim();
+            var a = args.value.trim();
+            modules[i] = a ? { name: n, args: a } : n;
+            markDirty();
+          }
+          name.addEventListener('input', update);
+          args.addEventListener('input', update);
+          li.appendChild(name);
+          li.appendChild(args);
+          li.appendChild(removeButton('Remove ' + moduleName(entry), function () {
+            modules.splice(i, 1);
+            markDirty();
+            renderModules();
+          }));
+          list.appendChild(li);
+        });
+      }
+
+      function renderPaths() {
+        var list = $('paths');
+        list.textContent = '';
+        var paths = config.discovery_paths;
+        if (!paths.length) {
+          var empty = document.createElement('li');
+          empty.className = 'empty';
+          empty.textContent = 'No extra folders. Modules next to ActivityWatch and on PATH are still found.';
+          list.appendChild(empty);
+          return;
+        }
+        paths.forEach(function (path, i) {
+          var li = document.createElement('li');
+          var text = document.createElement('span');
+          text.className = 'path mono';
+          // Wrap in LRM marks so rtl truncation keeps leading slashes in place.
+          text.textContent = '‎' + path + '‎';
+          text.title = path;
+          li.appendChild(text);
+          li.appendChild(removeButton('Remove ' + path, function () {
+            paths.splice(i, 1);
+            markDirty();
+            renderPaths();
+          }));
+          list.appendChild(li);
+        });
+      }
+
+      function renderAvailable(names) {
+        var list = $('available-modules');
+        list.textContent = '';
+        names.forEach(function (n) {
+          var opt = document.createElement('option');
+          opt.value = n;
+          list.appendChild(opt);
+        });
+      }
+
+      function syncMinimized() {
+        var enabled = $('autostart-enabled').checked;
+        $('autostart-minimized').disabled = !enabled;
+        $('minimized-label').classList.toggle('disabled', !enabled);
+      }
+
+      function render() {
+        $('autostart-enabled').checked = config.autostart.enabled;
+        $('autostart-minimized').checked = config.autostart.minimized;
+        $('port').value = config.port;
+        $('auto-download').checked = !!(config.updates && config.updates.auto_download);
+        syncMinimized();
+        renderModules();
+        renderPaths();
+      }
+
+      function load() {
+        return invoke('get_settings').then(function (payload) {
+          config = payload.config;
+          if (!config.updates) config.updates = { auto_download: true };
+          $('config-path').textContent = payload.config_path;
+          $('config-path').title = payload.config_path;
+          renderAvailable(payload.available_modules || []);
+          render();
+          setClean();
+        });
+      }
+
+      function addModule() {
+        var input = $('new-module');
+        var name = input.value.trim();
+        if (!name) return;
+        var exists = config.autostart.modules.some(function (m) { return moduleName(m) === name; });
+        if (exists) {
+          showStatus('error', name + ' is already in the list.');
+          return;
+        }
+        config.autostart.modules.push(name);
+        input.value = '';
+        markDirty();
+        renderModules();
+      }
+
+      function save() {
+        var port = Number($('port').value);
+        if (!Number.isInteger(port) || port < 1 || port > 65535) {
+          showStatus('error', 'Port must be a whole number between 1 and 65535.');
+          $('port').focus();
+          return;
+        }
+        config.port = port;
+        config.autostart.enabled = $('autostart-enabled').checked;
+        config.autostart.minimized = $('autostart-minimized').checked;
+        config.updates.auto_download = $('auto-download').checked;
+
+        $('save').disabled = true;
+        invoke('save_settings', { config: config })
+          .then(function () {
+            setClean();
+            showStatus('ok', 'Saved. Restart ActivityWatch to apply module, folder and port changes.', true);
+          })
+          .catch(function (e) {
+            $('save').disabled = false;
+            showStatus('error', 'Could not save: ' + e);
+          });
+      }
+
+      $('autostart-enabled').addEventListener('change', function () { syncMinimized(); markDirty(); });
+      ['autostart-minimized', 'auto-download'].forEach(function (id) {
+        $(id).addEventListener('change', markDirty);
+      });
+      $('port').addEventListener('input', markDirty);
+      $('add-module').addEventListener('click', addModule);
+      $('new-module').addEventListener('keydown', function (e) {
+        if (e.key === 'Enter') { e.preventDefault(); addModule(); }
+      });
+      $('add-path').addEventListener('click', function () {
+        invoke('pick_settings_directory').then(function (path) {
+          if (!path) return;
+          if (config.discovery_paths.indexOf(path) === -1) {
+            config.discovery_paths.push(path);
+            markDirty();
+            renderPaths();
+          }
+        }).catch(function (e) {
+          showStatus('error', 'Could not open the folder picker: ' + e);
+        });
+      });
+      $('save').addEventListener('click', save);
+      $('revert').addEventListener('click', function () {
+        clearStatus();
+        load().catch(function (e) { showStatus('error', String(e)); });
+      });
+      $('restart').addEventListener('click', function () {
+        invoke('restart_app').catch(function (e) {
+          showStatus('error', 'Could not restart: ' + e);
+        });
+      });
+
+      setClean();
+      load().catch(function (e) {
+        showStatus('error', String(e));
+        $('save').disabled = true;
+      });
+    })();
+  </script>
+</body>
+</html>

@@ -27,6 +27,7 @@ mod manager;
 mod mini;
 mod module_alert_ui;
 mod profile;
+mod settings_ui;
 mod updater_ui;
 
 pub use profile::{export_profile, is_testing, resolve_profile, DEFAULT_PROFILE, TESTING_PROFILE};
@@ -934,7 +935,7 @@ fn updates_disabled_via_env() -> bool {
 
 #[tauri::command]
 fn restart_app(app: AppHandle) {
-    info!("Restart requested from update progress dialog.");
+    info!("Restart requested from the UI.");
     app.restart();
 }
 
@@ -957,6 +958,31 @@ fn set_autostart_enabled(app: AppHandle, enabled: bool) -> Result<bool, String> 
     let actual = autostart::set_enabled(&app, enabled)?;
     autostart::sync_menu_item(actual);
     Ok(actual)
+}
+
+/// Opens (or focuses) the settings window.
+#[tauri::command]
+fn open_settings(app: AppHandle) {
+    settings_ui::show(&app);
+}
+
+/// Current settings for the settings window, read fresh from disk.
+#[tauri::command]
+fn get_settings(app: AppHandle) -> Result<settings_ui::SettingsPayload, String> {
+    settings_ui::load(&app)
+}
+
+/// Writes the settings window's config to disk and applies start-at-login.
+#[tauri::command]
+fn save_settings(app: AppHandle, config: UserConfig) -> Result<(), String> {
+    settings_ui::save(&app, config)
+}
+
+/// Native folder picker for adding a module search folder. Async so the
+/// blocking dialog runs off the main thread.
+#[tauri::command]
+async fn pick_settings_directory(app: AppHandle) -> Option<String> {
+    settings_ui::pick_directory(&app)
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -1030,6 +1056,13 @@ pub fn run() {
                 .status(200)
                 .header("Content-Type", "text/html; charset=utf-8")
                 .body(updater_ui::PROGRESS_HTML.as_bytes().to_vec())
+                .unwrap()
+        })
+        .register_uri_scheme_protocol(settings_ui::URI_SCHEME, |_ctx, _request| {
+            tauri::http::Response::builder()
+                .status(200)
+                .header("Content-Type", "text/html; charset=utf-8")
+                .body(settings_ui::SETTINGS_HTML.as_bytes().to_vec())
                 .unwrap()
         })
         .setup(|app| {
@@ -1131,11 +1164,19 @@ pub fn run() {
                 let quit = MenuItem::with_id(app, "quit", "Quit ActivityWatch", true, None::<&str>)
                     .expect("Failed to create quit menu item");
                 let autostart_item = autostart::build_menu_item(app.handle());
+                let settings_item = MenuItem::with_id(
+                    app,
+                    settings_ui::MENU_ID,
+                    "Settings…",
+                    true,
+                    None::<&str>,
+                )
+                .expect("Failed to create settings menu item");
 
                 // Placeholder tray menu, replaced by manager::build_tray_menu once
                 // modules are discovered. Kept in sync with it so the toggle is
                 // available even if no modules are ever found.
-                let menu = Menu::with_items(app, &[&open, &autostart_item, &quit])
+                let menu = Menu::with_items(app, &[&open, &autostart_item, &settings_item, &quit])
                     .expect("Failed to create tray menu");
 
                 #[cfg(not(target_os = "windows"))]
@@ -1200,6 +1241,8 @@ pub fn run() {
                         } else {
                             error!("Notify toggle aborted: datastore write failed; state unchanged");
                         }
+                    } else if event.id().0 == settings_ui::MENU_ID {
+                        settings_ui::show(app);
                     } else {
                         // Modules menu clicks
                         let mut state = manager_state
@@ -1324,7 +1367,11 @@ pub fn run() {
             restart_app,
             close_update_progress,
             get_autostart_enabled,
-            set_autostart_enabled
+            set_autostart_enabled,
+            open_settings,
+            get_settings,
+            save_settings,
+            pick_settings_directory
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
