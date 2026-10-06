@@ -1,0 +1,19 @@
+[[permission]]
+identifier = "allow-open-settings"
+description = "Allows opening the settings window."
+commands.allow = ["open_settings"]
+
+[[permission]]
+identifier = "allow-get-settings"
+description = "Allows the settings window to read the user config."
+commands.allow = ["get_settings"]
+
+[[permission]]
+identifier = "allow-save-settings"
+description = "Allows the settings window to write the user config."
+commands.allow = ["save_settings"]
+
+[[permission]]
+identifier = "allow-pick-settings-directory"
+description = "Allows the settings window to show a folder picker."
+commands.allow = ["pick_settings_directory"]

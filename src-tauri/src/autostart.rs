@@ -8,7 +8,7 @@
 
 use std::fs;
 use std::path::Path;
-use std::sync::Mutex;
+use std::sync::{Mutex, MutexGuard};
 
 use log::{error, info, warn};
 use tauri::menu::CheckMenuItem;
@@ -26,10 +26,11 @@ pub const MENU_ID: &str = "autostart";
 /// `set_autostart_enabled` command). Rebuilt whenever the tray menu is rebuilt.
 static MENU_ITEM: Mutex<Option<CheckMenuItem<Wry>>> = Mutex::new(None);
 
-/// Serializes read-modify-write cycles on the config file (here and in
-/// `crate::config_edit::persist_module_autostart`) so two concurrent
-/// toggles cannot interleave and lose one of the writes.
-pub(crate) static PERSIST_LOCK: Mutex<()> = Mutex::new(());
+/// Serializes read-modify-write cycles on the config file (here, in
+/// `crate::config_edit::persist_module_autostart` and in the settings window)
+/// so two concurrent writers cannot interleave and lose one of the writes.
+/// Take it through [`persist_lock`].
+static PERSIST_LOCK: Mutex<()> = Mutex::new(());
 
 /// Last autostart state read from or written to the OS. Querying the OS can be slow (the macOS
 /// AppleScript launcher runs `osascript` against System Events), and the tray menu is rebuilt
@@ -43,6 +44,12 @@ fn set_cached(registered: bool) {
 /// Forget the cached state so the next read goes back to the OS.
 fn clear_cached() {
     *REGISTERED.lock().unwrap_or_else(|e| e.into_inner()) = None;
+}
+
+/// Holds the config-file write lock, for other writers of the config file
+/// (e.g. the settings window) so they cannot interleave with a toggle.
+pub(crate) fn persist_lock() -> MutexGuard<'static, ()> {
+    PERSIST_LOCK.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 /// Whether the app is currently registered to start at login, according to the OS.
@@ -537,7 +544,7 @@ fn report_failure(app: &AppHandle, message: &str) {
 /// The file is re-read from disk rather than reusing the config loaded at
 /// startup, so a toggle doesn't revert edits made in the meantime.
 fn persist_enabled(enabled: bool) -> Result<(), String> {
-    let _guard = PERSIST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = persist_lock();
     persist_enabled_at(&get_config_path(), enabled)
 }
 
