@@ -38,9 +38,16 @@ Probe these locations in priority order.  Stop after the first match.
 
 | Priority | Location | Type | Notes |
 |---|---|---|---|
-| 1 | `$XDG_CONFIG_DIRS/autostart/*.desktop` (usually `/etc/xdg/autostart/`) | External | System-wide; `Exec` must target our binary. `Hidden=true` means disabled. |
-| 2 | `~/.config/autostart/<app>.desktop` (user-level XDG) | Own / External | Own if written by us; external if e.g. installed by a package. Match by `Exec` path. |
+| 1 | `~/.config/autostart/<app>.desktop` (user-level XDG) | Own / External | Highest priority; `Hidden=true` here suppresses any system-wide entry with the same name.  Own if written by us; external if e.g. installed by a package.  Match by `Exec` path. |
+| 2 | `$XDG_CONFIG_DIRS/autostart/*.desktop` (usually `/etc/xdg/autostart/`) | External | Only checked when no user-level file exists for `<app>`.  `Exec` must target our binary.  `Hidden=true` means disabled. |
 | 3 | `systemctl --user is-enabled <unit>` | External | `<unit>` = `aw-qt.service` or `aw-tauri.service` as appropriate. `enabled` / `enabled-runtime` = on. |
+
+**User-level override rule (XDG spec)**: a user-level `Hidden=true` file for a
+given app name suppresses the system-wide file of the same name.  A probe
+implementation must therefore check the user-level path first, and if that file
+carries `Hidden=true`, report autostart as disabled even when a system-wide
+enabled file also exists.  Failure to do this causes the toggle to show
+"enabled" when the user has disabled it through a standard XDG mechanism.
 
 **Exec matching rule**: the desktop `Exec` line targets us if it resolves to our
 binary path.  For AppImage installs use `$APPIMAGE` (set by the AppImage

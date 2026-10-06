@@ -128,17 +128,23 @@ pub fn set_enabled(app: &AppHandle, enabled: bool) -> Result<bool, String> {
 /// config value (`enabled = true`) is applied to the OS to set up the initial
 /// login entry.  After that first run the OS state takes precedence.
 pub fn sync_from_config(app: &AppHandle) {
-    // migrate_legacy_* return true when they removed an owned legacy entry,
-    // meaning autostart was previously on via the old mechanism.  Create the
-    // replacement entry in the new format before querying the OS below so the
-    // "OS wins" branch does not mistake a missing new entry for a user turning
-    // autostart off.
-    let legacy_was_enabled = migrate_legacy_named_profile_entry(&profile::current_profile());
+    // migrate_legacy_* return Some(was_enabled) when they removed an owned legacy
+    // entry: Some(true) = entry was active, Some(false) = entry was disabled in place.
+    // Create the replacement only when the legacy entry was actually active so we do
+    // not silently re-enable autostart that the user had turned off.
+    let migration = migrate_legacy_named_profile_entry(&profile::current_profile());
 
+    // Default-profile macOS LaunchAgent migration only applies to the default profile;
+    // running as a named profile must not remove the default entry and enable the
+    // named one instead.
     #[cfg(target_os = "macos")]
-    let legacy_was_enabled = legacy_was_enabled || migrate_legacy_default_macos_launch_agent();
+    let migration = if migration.is_none() && profile::is_default(&profile::current_profile()) {
+        migrate_legacy_default_macos_launch_agent().then_some(true)
+    } else {
+        migration
+    };
 
-    if legacy_was_enabled {
+    if migration == Some(true) {
         if let Err(e) = app.autolaunch().enable() {
             warn!("Failed to create replacement autostart entry after legacy migration: {e}");
         } else {
@@ -256,33 +262,41 @@ fn migrate_legacy_default_macos_launch_agent() -> bool {
 /// still owns that name, so we only remove the entry when its command
 /// contains `--profile <this>`.
 ///
-/// Returns `true` if an owned legacy entry was found and removed, indicating
-/// the caller should re-create autostart via the current method.
-fn migrate_legacy_named_profile_entry(profile: &str) -> bool {
+/// Returns `Some(was_enabled)` if an owned legacy entry was found and removed:
+/// `true` means the entry was active (caller should re-create it); `false`
+/// means the entry was disabled in place (e.g. `Hidden=true` in a desktop
+/// file) and the caller must not re-enable it.  Returns `None` when no owned
+/// legacy entry exists.
+fn migrate_legacy_named_profile_entry(profile: &str) -> Option<bool> {
     if profile::is_default(profile) {
-        return false;
+        return None;
     }
 
     #[cfg(target_os = "linux")]
     if let Some(path) = legacy_linux_desktop_path() {
-        if remove_legacy_file_if_owned(&path, profile) {
-            return true;
+        if let Some(was_enabled) = remove_legacy_file_if_owned(&path, profile) {
+            return Some(was_enabled);
         }
     }
 
     #[cfg(target_os = "macos")]
     if let Some(path) = legacy_macos_launch_agent_path() {
-        if remove_legacy_file_if_owned(&path, profile) {
-            return true;
+        if remove_legacy_file_if_owned(&path, profile).is_some() {
+            // A macOS LaunchAgent plist has no in-place "disabled" state;
+            // its presence means the entry was active.
+            return Some(true);
         }
     }
 
     #[cfg(windows)]
     if migrate_legacy_windows_run_value(profile) {
-        return true;
+        // A Windows Run registry value being present means autostart was enabled.
+        // (Checking StartupApproved for the finer-grained disabled state is
+        // not implemented; treat presence as enabled.)
+        return Some(true);
     }
 
-    false
+    None
 }
 
 #[cfg(target_os = "linux")]
@@ -301,29 +315,47 @@ fn legacy_macos_launch_agent_path() -> Option<std::path::PathBuf> {
     })
 }
 
-fn remove_legacy_file_if_owned(path: &Path, profile: &str) -> bool {
+/// Returns `Some(was_enabled)` when the file at `path` is owned by `profile`
+/// and was successfully removed: `true` means the entry was active, `false`
+/// means it was disabled in place (XDG desktop `Hidden=true`).  Returns
+/// `None` when the file does not exist, is not owned by this profile, or
+/// could not be removed.
+fn remove_legacy_file_if_owned(path: &Path, profile: &str) -> Option<bool> {
     let Ok(contents) = fs::read_to_string(path) else {
-        return false;
+        return None;
     };
     if !profile::command_targets_profile(&contents, profile) {
-        return false;
+        return None;
     }
+    // XDG desktop files can carry `Hidden=true` to disable the entry without
+    // deleting the file.  Preserve that intent rather than re-enabling.
+    let was_enabled = !is_entry_hidden(&contents);
     match fs::remove_file(path) {
         Ok(()) => {
             info!(
                 "Removed leftover autostart entry at {} owned by profile {profile}",
                 path.display()
             );
-            true
+            Some(was_enabled)
         }
         Err(e) => {
             warn!(
                 "Failed to remove leftover autostart entry {}: {e}",
                 path.display()
             );
-            false
+            None
         }
     }
+}
+
+/// Returns `true` when the file contents indicate the entry has been disabled
+/// in place via an XDG desktop `Hidden=true` line.  macOS plists and Windows
+/// registry values do not use this convention, so this always returns `false`
+/// for those formats.
+fn is_entry_hidden(contents: &str) -> bool {
+    contents
+        .lines()
+        .any(|line| line.trim().eq_ignore_ascii_case("hidden=true"))
 }
 
 #[cfg(windows)]
@@ -571,7 +603,7 @@ fn is_dotted_autostart_enabled(trimmed: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{patch_autostart_enabled, remove_legacy_file_if_owned};
+    use super::{is_entry_hidden, patch_autostart_enabled, remove_legacy_file_if_owned};
     use std::fs;
 
     const CONFIG: &str = r#"port = 5600
@@ -678,7 +710,11 @@ auto_download = true
             "owned",
             "Exec=/usr/bin/aw-tauri --profile research\nName=aw-tauri\n",
         );
-        assert!(remove_legacy_file_if_owned(&path, "research"));
+        assert_eq!(
+            remove_legacy_file_if_owned(&path, "research"),
+            Some(true),
+            "owned enabled entry should be removed and report was_enabled=true"
+        );
         assert!(!path.exists(), "owned leftover should be deleted");
     }
 
@@ -689,8 +725,8 @@ auto_download = true
             "other",
             "Exec=/usr/bin/aw-tauri --profile testing\nName=aw-tauri\n",
         );
-        assert!(!remove_legacy_file_if_owned(&default_path, "research"));
-        assert!(!remove_legacy_file_if_owned(&other_path, "research"));
+        assert_eq!(remove_legacy_file_if_owned(&default_path, "research"), None);
+        assert_eq!(remove_legacy_file_if_owned(&other_path, "research"), None);
         assert!(
             default_path.exists(),
             "default identity must be left intact"
@@ -701,5 +737,29 @@ auto_download = true
         );
         let _ = fs::remove_file(&default_path);
         let _ = fs::remove_file(&other_path);
+    }
+
+    #[test]
+    fn migrate_preserves_disabled_state_from_hidden_desktop_entry() {
+        let path = write_temp_entry(
+            "hidden",
+            "Exec=/usr/bin/aw-tauri --profile research\nName=aw-tauri\nHidden=true\n",
+        );
+        assert_eq!(
+            remove_legacy_file_if_owned(&path, "research"),
+            Some(false),
+            "owned disabled entry should be removed and report was_enabled=false"
+        );
+        assert!(!path.exists(), "disabled leftover should still be deleted");
+    }
+
+    #[test]
+    fn is_entry_hidden_detects_xdg_hidden_field() {
+        assert!(is_entry_hidden("Hidden=true\n"));
+        assert!(is_entry_hidden("Exec=aw-tauri\nHidden=true\n"));
+        assert!(is_entry_hidden("Exec=aw-tauri\nhidden=true\n")); // case-insensitive
+        assert!(!is_entry_hidden("Exec=aw-tauri\nName=aw-tauri\n"));
+        assert!(!is_entry_hidden("Hidden=false\n"));
+        assert!(!is_entry_hidden("")); // macOS plist, Windows value: no Hidden field
     }
 }
