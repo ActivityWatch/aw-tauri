@@ -128,10 +128,23 @@ pub fn set_enabled(app: &AppHandle, enabled: bool) -> Result<bool, String> {
 /// config value (`enabled = true`) is applied to the OS to set up the initial
 /// login entry.  After that first run the OS state takes precedence.
 pub fn sync_from_config(app: &AppHandle) {
-    migrate_legacy_named_profile_entry(&profile::current_profile());
+    // migrate_legacy_* return true when they removed an owned legacy entry,
+    // meaning autostart was previously on via the old mechanism.  Create the
+    // replacement entry in the new format before querying the OS below so the
+    // "OS wins" branch does not mistake a missing new entry for a user turning
+    // autostart off.
+    let legacy_was_enabled = migrate_legacy_named_profile_entry(&profile::current_profile());
 
     #[cfg(target_os = "macos")]
-    migrate_legacy_default_macos_launch_agent();
+    let legacy_was_enabled = legacy_was_enabled || migrate_legacy_default_macos_launch_agent();
+
+    if legacy_was_enabled {
+        if let Err(e) = app.autolaunch().enable() {
+            warn!("Failed to create replacement autostart entry after legacy migration: {e}");
+        } else {
+            set_cached(true);
+        }
+    }
 
     let config_enabled = get_config().autostart.enabled;
     let current = match is_registered(app) {
@@ -155,7 +168,13 @@ pub fn sync_from_config(app: &AppHandle) {
     // • Subsequent launch — config file exists: the user may have changed
     //   autostart outside the app.  Treat OS as the source of truth and persist
     //   its state into config so the next launch sees them in sync.
-    let is_first_run = !get_config_path().exists();
+    //
+    // Use crate::is_first_run() rather than get_config_path().exists(): by the
+    // time we reach this point get_config() has already been called, which
+    // writes the config file on a fresh install.  Checking the path here would
+    // always return false on a new machine (file was just created), preventing
+    // the initial autostart registration from ever running.
+    let is_first_run = *crate::is_first_run();
 
     if is_first_run {
         let manager = app.autolaunch();
@@ -199,52 +218,71 @@ pub fn sync_from_config(app: &AppHandle) {
 /// at login.  Named-profile plists that happen to have the same base name are
 /// identified by their `--profile` flag and left alone — they are cleaned up by
 /// [`migrate_legacy_named_profile_entry`] on that profile's own next run.
+/// Returns `true` if the legacy LaunchAgent was found and removed (i.e. the
+/// caller should re-create autostart via the new Login Items method).
 #[cfg(target_os = "macos")]
-fn migrate_legacy_default_macos_launch_agent() {
+fn migrate_legacy_default_macos_launch_agent() -> bool {
     let Some(path) = legacy_macos_launch_agent_path() else {
-        return;
+        return false;
     };
     let Ok(contents) = fs::read_to_string(&path) else {
-        return;
+        return false;
     };
     if contents.contains("--profile") {
         // Belongs to a named profile — leave it.
-        return;
+        return false;
     }
     match fs::remove_file(&path) {
-        Ok(()) => info!(
-            "Removed legacy default-profile macOS LaunchAgent at {} \
-             (app now uses Login Items via AppleScript)",
-            path.display()
-        ),
-        Err(e) => warn!(
-            "Failed to remove legacy macOS LaunchAgent {}: {e}",
-            path.display()
-        ),
+        Ok(()) => {
+            info!(
+                "Removed legacy default-profile macOS LaunchAgent at {} \
+                 (app now uses Login Items via AppleScript)",
+                path.display()
+            );
+            true
+        }
+        Err(e) => {
+            warn!(
+                "Failed to remove legacy macOS LaunchAgent {}: {e}",
+                path.display()
+            );
+            false
+        }
     }
 }
 
 /// Drop a leftover shared `aw-tauri` login entry if a previous release
-/// registered this named profile under that identity. The default profile
+/// registered this named profile under that identity.  The default profile
 /// still owns that name, so we only remove the entry when its command
 /// contains `--profile <this>`.
-fn migrate_legacy_named_profile_entry(profile: &str) {
+///
+/// Returns `true` if an owned legacy entry was found and removed, indicating
+/// the caller should re-create autostart via the current method.
+fn migrate_legacy_named_profile_entry(profile: &str) -> bool {
     if profile::is_default(profile) {
-        return;
+        return false;
     }
 
     #[cfg(target_os = "linux")]
     if let Some(path) = legacy_linux_desktop_path() {
-        remove_legacy_file_if_owned(&path, profile);
+        if remove_legacy_file_if_owned(&path, profile) {
+            return true;
+        }
     }
 
     #[cfg(target_os = "macos")]
     if let Some(path) = legacy_macos_launch_agent_path() {
-        remove_legacy_file_if_owned(&path, profile);
+        if remove_legacy_file_if_owned(&path, profile) {
+            return true;
+        }
     }
 
     #[cfg(windows)]
-    migrate_legacy_windows_run_value(profile);
+    if migrate_legacy_windows_run_value(profile) {
+        return true;
+    }
+
+    false
 }
 
 #[cfg(target_os = "linux")]
@@ -289,30 +327,39 @@ fn remove_legacy_file_if_owned(path: &Path, profile: &str) -> bool {
 }
 
 #[cfg(windows)]
-fn migrate_legacy_windows_run_value(profile: &str) {
+fn migrate_legacy_windows_run_value(profile: &str) -> bool {
     use winreg::enums::{HKEY_CURRENT_USER, KEY_READ, KEY_SET_VALUE};
     use winreg::RegKey;
 
     const RUN_KEY: &str = r"SOFTWARE\Microsoft\Windows\CurrentVersion\Run";
     let hkcu = RegKey::predef(HKEY_CURRENT_USER);
     let Ok(key) = hkcu.open_subkey_with_flags(RUN_KEY, KEY_READ) else {
-        return;
+        return false;
     };
     let Ok(value) = key.get_value::<String, _>(profile::LEGACY_AUTOSTART_APP_NAME) else {
-        return;
+        return false;
     };
     if !profile::command_targets_profile(&value, profile) {
-        return;
+        return false;
     }
     match hkcu.open_subkey_with_flags(RUN_KEY, KEY_SET_VALUE) {
         Ok(key) => match key.delete_value(profile::LEGACY_AUTOSTART_APP_NAME) {
-            Ok(()) => info!(
-                "Removed leftover Windows Run value {} owned by profile {profile}",
-                profile::LEGACY_AUTOSTART_APP_NAME
-            ),
-            Err(e) => warn!("Failed to remove leftover Windows Run value: {e}"),
+            Ok(()) => {
+                info!(
+                    "Removed leftover Windows Run value {} owned by profile {profile}",
+                    profile::LEGACY_AUTOSTART_APP_NAME
+                );
+                true
+            }
+            Err(e) => {
+                warn!("Failed to remove leftover Windows Run value: {e}");
+                false
+            }
         },
-        Err(e) => warn!("Failed to open Windows Run key for leftover removal: {e}"),
+        Err(e) => {
+            warn!("Failed to open Windows Run key for leftover removal: {e}");
+            false
+        }
     }
 }
 
