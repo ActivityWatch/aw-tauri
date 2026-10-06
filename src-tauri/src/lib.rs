@@ -269,22 +269,76 @@ fn write_formatted_config(config: &UserConfig, path: &Path) -> Result<(), std::i
     write(path, output)
 }
 
-/// Import python aw-server's database if `db_path` does not exist yet, as
-/// standalone aw-server-rust does on first start. Must run before anything
-/// else opens `db_path`: the import only happens when the file is created.
-/// Default profile only: the python database it reads is the default one.
-pub(crate) fn legacy_import_if_fresh(db_path: &str, profile: &str, testing: bool) {
-    if profile != "default" || testing || Path::new(db_path).exists() {
+/// When to run python aw-server's database import, as standalone
+/// aw-server-rust does (`aw-server/src/main.rs`). `None`: don't.
+/// `Some(force)`: import, with `force` bypassing the datastore's
+/// "freshly created" check.
+///
+/// Default profile only, never in testing mode: the python database it
+/// reads is the default one, so other profiles would copy in real data.
+/// - Fresh database: the normal first-start import.
+/// - Windows, database just migrated out of v0.14.0's Roaming location
+///   (`aw_server::dirs::migrated_v0140_default_database`): v0.14.0 created
+///   it while looking for the python database in the wrong place, so it
+///   never imported anything. Run the import once now. Once-only because
+///   the migration itself happens once; idempotent because events that are
+///   already present are skipped.
+fn legacy_import_mode(
+    profile: &str,
+    testing: bool,
+    db_exists: bool,
+    migrated_v0140: bool,
+) -> Option<bool> {
+    if !profile::is_default(profile) || testing {
+        None
+    } else if !db_exists {
+        Some(false)
+    } else if migrated_v0140 {
+        Some(true)
+    } else {
+        None
+    }
+}
+
+/// Run python aw-server's database import if [`legacy_import_mode`] says so.
+/// Must run after `aw_server::dirs::db_path` (which does the v0.14.0
+/// migration) and before anything else opens `db_path`: the unforced import
+/// only happens when the file is created. At most once per process.
+pub(crate) fn legacy_import_if_needed(db_path: &str, profile: &str, testing: bool) {
+    static DONE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    let Some(force) = legacy_import_mode(
+        profile,
+        testing,
+        Path::new(db_path).exists(),
+        aw_server::dirs::migrated_v0140_default_database(),
+    ) else {
+        return;
+    };
+    if DONE.swap(true, std::sync::atomic::Ordering::SeqCst) {
         return;
     }
-    info!("Fresh database, checking for a python aw-server database to import");
-    let ds = aw_datastore::Datastore::new(db_path.to_string(), true);
+    if force {
+        info!(
+            "Database was migrated from the v0.14.0 location; running the python \
+             aw-server import that v0.14.0 skipped (if a python database exists)"
+        );
+    } else {
+        info!("Fresh database, checking for a python aw-server database to import");
+    }
+    let ds = aw_datastore::Datastore::new_with_legacy_import_opts(
+        db_path.to_string(),
+        aw_datastore::LegacyImportOptions {
+            enabled: true,
+            force,
+            db_path_override: None,
+        },
+    );
     // The import runs in the worker before it serves requests; wait for it.
     // aw_datastore's own messages are filtered out at the default log level,
     // so report the outcome here.
     match ds.get_buckets() {
         Ok(buckets) => info!(
-            "Database created with {} buckets after import check",
+            "Database has {} buckets after the import check",
             buckets.len()
         ),
         Err(e) => warn!("Could not read buckets after import check: {e:?}"),
@@ -681,7 +735,7 @@ fn run_daemon() {
             std::process::exit(1);
         }
     };
-    legacy_import_if_fresh(&db_path, &cli_args.profile, testing);
+    legacy_import_if_needed(&db_path, &cli_args.profile, testing);
     let daemon_notify_enabled = read_notify_enabled(&db_path);
     let device_id = aw_server::device_id::get_device_id();
 
@@ -783,7 +837,7 @@ pub(crate) fn prepare_aw_server(
         .to_str()
         .ok_or_else(|| "Database path is not valid UTF-8".to_string())?
         .to_string();
-    legacy_import_if_fresh(&db_path, &cli_args.profile, testing);
+    legacy_import_if_needed(&db_path, &cli_args.profile, testing);
     let device_id = aw_server::device_id::get_device_id();
 
     let webui_var = std::env::var("AW_WEBUI_DIR");
@@ -1454,7 +1508,35 @@ mod tests {
 
 #[cfg(test)]
 mod legacy_import_tests {
-    use super::legacy_import_if_fresh;
+    use super::{legacy_import_if_needed, legacy_import_mode};
+
+    #[test]
+    fn legacy_import_mode_rules() {
+        // Fresh default-profile database: normal first-start import.
+        assert_eq!(
+            legacy_import_mode("default", false, false, false),
+            Some(false)
+        );
+        // Database migrated from v0.14.0's Roaming location: forced, once.
+        assert_eq!(legacy_import_mode("default", false, true, true), Some(true));
+        // Existing database, nothing migrated: no import (restarts).
+        assert_eq!(legacy_import_mode("default", false, true, false), None);
+        // Never for named profiles or testing mode, migrated or not.
+        for (db_exists, migrated) in [(false, false), (true, true)] {
+            assert_eq!(
+                legacy_import_mode("research", false, db_exists, migrated),
+                None
+            );
+            assert_eq!(
+                legacy_import_mode("testing", false, db_exists, migrated),
+                None
+            );
+            assert_eq!(
+                legacy_import_mode("default", true, db_exists, migrated),
+                None
+            );
+        }
+    }
 
     #[test]
     fn legacy_import_skips_named_profiles_and_testing() {
@@ -1462,8 +1544,8 @@ mod legacy_import_tests {
         std::fs::create_dir_all(&dir).unwrap();
         let db = dir.join("sqlite.db");
         let db = db.to_str().unwrap();
-        legacy_import_if_fresh(db, "research", false);
-        legacy_import_if_fresh(db, "default", true);
+        legacy_import_if_needed(db, "research", false);
+        legacy_import_if_needed(db, "default", true);
         assert!(
             !std::path::Path::new(db).exists(),
             "must not create (and so import into) a non-default profile's DB"
