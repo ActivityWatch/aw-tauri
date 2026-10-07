@@ -716,8 +716,10 @@ pub(crate) fn handle_module_menu_click(state: &Mutex<ManagerState>, db_path: &st
         }
         return;
     }
+    // Save while still holding the manager lock, so the order of saves always matches
+    // the order of toggles (lock order: manager state, then the config PERSIST_LOCK;
+    // nothing takes them the other way round).
     if let Some(enabled) = s.handle_system_click(name) {
-        drop(s);
         crate::config_edit::persist_module_click(name, enabled);
     }
 }

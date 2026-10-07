@@ -732,6 +732,30 @@ auto_download = true
         }
     }
 
+    /// The last entry has no args, so the effective inline args are an earlier
+    /// entry's (they still beat `[module_args]`); those are what removal saves.
+    #[test]
+    fn removing_duplicates_saves_last_entry_with_args() {
+        let source = r#"port = 5600
+discovery_paths = []
+
+[autostart]
+enabled = true
+minimized = true
+modules = [ { name = "aw-watcher-input", args = "--first" }, "aw-watcher-input" ]
+
+[module_args]
+aw-watcher-input = "--poll-time 60"
+"#;
+        let out = set(source, "aw-watcher-input", false);
+        assert!(modules_of(&out).is_empty(), "{out}");
+        assert_eq!(
+            parse(&out).module_args["aw-watcher-input"],
+            "--first",
+            "{out}"
+        );
+    }
+
     #[test]
     fn tray_toggle_leaves_malformed_config_alone() {
         assert!(set_module_autostart("port = \n[autostart", "aw-awatcher", true).is_err());
