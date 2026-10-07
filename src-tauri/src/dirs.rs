@@ -305,6 +305,12 @@ fn macos_install_discovery_paths(exe_path: Option<&Path>) -> Vec<PathBuf> {
     paths
 }
 
+/// User-level discovery paths, written into a new `config.toml` as defaults.
+///
+/// Install-relative paths (`get_install_discovery_paths`) are deliberately not
+/// included: they depend on where this binary runs from (and for an AppImage,
+/// a per-run mount point), so persisting them would pin a later install to an
+/// old one's modules. The module manager adds them at runtime instead.
 pub fn get_discovery_paths() -> Vec<PathBuf> {
     let mut discovery_paths = Vec::new();
 
@@ -332,9 +338,6 @@ pub fn get_discovery_paths() -> Vec<PathBuf> {
             // Legacy path for backward compatibility
             discovery_paths.push(home_path.join("aw-modules"));
         }
-
-        // Bundled modules next to the install (deb/rpm/AppImage)
-        discovery_paths.extend(get_install_discovery_paths());
     }
 
     #[cfg(target_os = "windows")]
@@ -359,7 +362,6 @@ pub fn get_discovery_paths() -> Vec<PathBuf> {
         if let Ok(home_dir) = std::env::var("HOME") {
             discovery_paths.push(PathBuf::from(home_dir).join("aw-modules"));
         }
-        discovery_paths.extend(get_install_discovery_paths());
     }
 
     #[cfg(target_os = "android")]
@@ -611,6 +613,16 @@ mod tests {
             );
             let home_path = PathBuf::from(home);
             assert!(paths.iter().any(|p| p.starts_with(&home_path)));
+        }
+    }
+
+    #[test]
+    fn test_discovery_defaults_exclude_install_paths() {
+        // Install-relative paths are runtime-only (added by the module manager),
+        // never part of the defaults that get written into config.toml.
+        let defaults = get_discovery_paths();
+        for p in get_install_discovery_paths() {
+            assert!(!defaults.contains(&p), "{:?} would be persisted", p);
         }
     }
 }
