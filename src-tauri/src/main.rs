@@ -34,6 +34,8 @@ struct Cli {
 }
 
 fn main() {
+    // Before anything spawns threads or initializes GTK/WebKit.
+    aw_tauri_lib::apply_webkit_env_workarounds();
     let cli = Cli::parse();
     let profile = match aw_tauri_lib::resolve_profile(cli.profile.as_deref(), cli.testing) {
         Ok(p) => p,
