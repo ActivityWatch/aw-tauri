@@ -616,13 +616,35 @@ mod tests {
         }
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn test_discovery_defaults_exclude_install_paths() {
         // Install-relative paths are runtime-only (added by the module manager),
-        // never part of the defaults that get written into config.toml.
+        // never part of the defaults that get written into config.toml. Fake an
+        // AppImage mount via APPDIR so there are install paths to leak; the
+        // exe's own dir is always one too.
+        let root = scratch_dir("defaults-exclude");
+        let resource = root.join("usr").join("lib").join("aw-tauri");
+        fs::create_dir_all(resource.join("modules")).unwrap();
+        let old_appdir = std::env::var_os("APPDIR");
+        std::env::set_var("APPDIR", &root);
+
+        let install = get_install_discovery_paths();
         let defaults = get_discovery_paths();
-        for p in get_install_discovery_paths() {
-            assert!(!defaults.contains(&p), "{:?} would be persisted", p);
+
+        match old_appdir {
+            Some(v) => std::env::set_var("APPDIR", v),
+            None => std::env::remove_var("APPDIR"),
+        }
+        let _ = fs::remove_dir_all(&root);
+
+        assert!(
+            install.contains(&resource.join("modules")),
+            "precondition: APPDIR install paths should be discovered, got {:?}",
+            install
+        );
+        for p in &install {
+            assert!(!defaults.contains(p), "{:?} would be persisted", p);
         }
     }
 }
