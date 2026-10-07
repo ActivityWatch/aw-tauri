@@ -649,7 +649,10 @@ mod tests {
             "precondition: APPDIR install paths should be discovered, got {:?}",
             install
         );
-        for p in &install {
+        // Only check what came from the fake APPDIR: the exe's own dir is also
+        // an install path, and could legitimately equal a user path such as
+        // ~/bin when the test binary is run from there.
+        for p in install.iter().filter(|p| p.starts_with(&root)) {
             assert!(!defaults.contains(p), "{:?} would be persisted", p);
         }
     }
