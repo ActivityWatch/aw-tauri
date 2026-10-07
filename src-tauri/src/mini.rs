@@ -141,8 +141,12 @@ pub fn run() {
                     }
                     _ => {
                         if let Some(module_name) = id.strip_prefix("module:") {
-                            if let Ok(mut state) = manager_state.lock() {
-                                state.handle_system_click(module_name);
+                            let enabled = manager_state
+                                .lock()
+                                .ok()
+                                .and_then(|mut state| state.handle_system_click(module_name));
+                            if let Some(enabled) = enabled {
+                                crate::persist_module_click(module_name, enabled);
                             }
                         }
                     }

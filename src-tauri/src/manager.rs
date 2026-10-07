@@ -243,9 +243,16 @@ impl ManagerState {
             self.stop_module(&name);
         }
     }
-    pub fn handle_system_click(&mut self, name: &str) {
+    /// Toggles module `name` from a tray click. Returns whether it is now meant to
+    /// be running, or `None` if `name` isn't a discovered module.
+    pub fn handle_system_click(&mut self, name: &str) -> Option<bool> {
+        if !self.modules.contains_key(name) {
+            warn!("Ignoring tray click for unknown module {name}");
+            return None;
+        }
         if self.is_module_running(name) {
             self.stop_module(name);
+            Some(false)
         } else {
             // A manual start is a fresh start: re-arm automatic restarts (even after the limit
             // was hit) and don't report it as a crash recovery.
@@ -253,6 +260,7 @@ impl ManagerState {
                 module.restart_count = 0;
             }
             self.start_module(name, None);
+            Some(true)
         }
     }
     fn is_module_running(&self, name: &str) -> bool {
@@ -1540,8 +1548,14 @@ mod tests {
     fn manual_start_resets_restart_count() {
         let mut state = state_with_module("aw-watcher", 3, None);
         state.stopped_module("aw-watcher", 1234);
-        state.handle_system_click("aw-watcher");
+        assert_eq!(state.handle_system_click("aw-watcher"), Some(true));
         assert_eq!(state.modules["aw-watcher"].restart_count, 0);
+    }
+
+    #[test]
+    fn tray_click_on_unknown_module_is_ignored() {
+        let mut state = state_with_module("aw-watcher", 0, None);
+        assert_eq!(state.handle_system_click("aw-not-discovered"), None);
     }
 
     #[test]

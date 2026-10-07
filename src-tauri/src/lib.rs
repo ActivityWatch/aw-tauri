@@ -348,6 +348,149 @@ pub(crate) fn legacy_import_if_needed(db_path: &str, profile: &str, testing: boo
     ds.close();
 }
 
+/// Adds `name` to, or removes it from, `[autostart] modules` in the config file,
+/// so a module started or stopped from the tray stays that way after a restart.
+///
+/// The file is re-read from disk (not the config cached at startup) and edited
+/// in place, so comments, formatting and hand edits made while the app runs are
+/// kept. A file that doesn't parse is left untouched.
+pub(crate) fn persist_module_autostart(name: &str, enabled: bool) -> Result<(), String> {
+    let _guard = autostart::PERSIST_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let path = get_config_path();
+    let source = read_to_string(&path)
+        .map_err(|e| format!("Failed to read config file {}: {e}", path.display()))?;
+    match set_module_autostart(&source, name, enabled)? {
+        Some(updated) => write(&path, updated)
+            .map_err(|e| format!("Failed to write config file {}: {e}", path.display())),
+        None => Ok(()),
+    }
+}
+
+/// Returns `source` with module `name` added to (`enabled`) or removed from
+/// `[autostart] modules`, or `None` if it is already in that state.
+///
+/// Removing an entry that carries inline args moves them to `[module_args]`
+/// (unless set there already), so starting it from the tray later still uses them.
+fn set_module_autostart(source: &str, name: &str, enabled: bool) -> Result<Option<String>, String> {
+    use toml_edit::{DocumentMut, Value};
+
+    toml::from_str::<UserConfig>(source)
+        .map_err(|e| format!("Config file is malformed, not updating it: {e}"))?;
+    let mut doc: DocumentMut = source
+        .parse()
+        .map_err(|e| format!("Config file is malformed, not updating it: {e}"))?;
+
+    let entry_name = |v: &Value| -> Option<String> {
+        match v {
+            Value::String(s) => Some(s.value().clone()),
+            Value::InlineTable(t) => t.get("name").and_then(Value::as_str).map(str::to_owned),
+            _ => None,
+        }
+    };
+
+    let mut moved_args = None;
+    {
+        let modules = doc
+            .get_mut("autostart")
+            .and_then(|item| item.get_mut("modules"))
+            .and_then(|item| item.as_array_mut())
+            .ok_or("Config file has no [autostart] modules list")?;
+        let present = modules
+            .iter()
+            .any(|v| entry_name(v).as_deref() == Some(name));
+
+        if enabled {
+            if present {
+                return Ok(None);
+            }
+            // Match the layout of the existing entries (one per line as written by
+            // write_formatted_config), falling back to one per line for an empty list.
+            let prefix = modules
+                .iter()
+                .last()
+                .and_then(|v| v.decor().prefix())
+                .and_then(|p| p.as_str())
+                .unwrap_or("\n  ")
+                .to_owned();
+            let multiline = modules.is_empty() || prefix.contains('\n');
+            // The newline before `]` may be stored as the old last entry's suffix;
+            // clear it so the new entry's comma doesn't land on its own line.
+            if multiline {
+                let len = modules.len();
+                if let Some(last) = len.checked_sub(1).and_then(|i| modules.get_mut(i)) {
+                    last.decor_mut().set_suffix("");
+                }
+            }
+            modules.push(name);
+            if multiline {
+                let last = modules.len() - 1;
+                if let Some(v) = modules.get_mut(last) {
+                    v.decor_mut().set_prefix(prefix);
+                    v.decor_mut().set_suffix("");
+                }
+                if !modules
+                    .trailing()
+                    .as_str()
+                    .is_some_and(|t| t.contains('\n'))
+                {
+                    modules.set_trailing("\n");
+                }
+            }
+        } else {
+            if !present {
+                return Ok(None);
+            }
+            let mut i = 0;
+            while i < modules.len() {
+                let v = modules.get(i).expect("index in bounds");
+                if entry_name(v).as_deref() == Some(name) {
+                    if let Value::InlineTable(t) = v {
+                        if let Some(args) = t.get("args").and_then(Value::as_str) {
+                            if !args.is_empty() {
+                                moved_args = Some(args.to_owned());
+                            }
+                        }
+                    }
+                    modules.remove(i);
+                } else {
+                    i += 1;
+                }
+            }
+        }
+    }
+
+    if let Some(args) = moved_args {
+        let module_args = doc
+            .entry("module_args")
+            .or_insert(toml_edit::table())
+            .as_table_like_mut()
+            .ok_or("Config file has a non-table module_args")?;
+        if !module_args.contains_key(name) {
+            module_args.insert(name, toml_edit::value(args));
+        }
+    }
+
+    let updated = doc.to_string();
+    toml::from_str::<UserConfig>(&updated)
+        .map_err(|e| format!("Updated config did not parse, not writing it: {e}"))?;
+    Ok(Some(updated))
+}
+
+/// Persists a tray module click (see [`persist_module_autostart`]), logging
+/// instead of failing: the module has already been started/stopped either way.
+pub(crate) fn persist_module_click(name: &str, enabled: bool) {
+    match persist_module_autostart(name, enabled) {
+        Ok(()) => info!(
+            "{} {name} {} autostart modules",
+            if enabled { "Added" } else { "Removed" },
+            if enabled { "to" } else { "from" }
+        ),
+        Err(e) => warn!("Could not save autostart change for {name}: {e}"),
+    }
+}
+
 /// Read `aw-notify.enabled` from the settings datastore.
 /// Opens a short-lived second connection to the same SQLite file (WAL mode; safe).
 /// Returns `false` on any error so aw-notify never autostarts by accident.
@@ -1287,7 +1430,11 @@ pub fn run() {
                         let mut state = manager_state
                             .lock()
                             .expect("Failed to acquire manager_state lock");
-                        state.handle_system_click(&event.id().0);
+                        let name = &event.id().0;
+                        if let Some(enabled) = state.handle_system_click(name) {
+                            drop(state);
+                            persist_module_click(name, enabled);
+                        }
                     }
                 });
                 if user_config.autostart.enabled && !user_config.autostart.minimized {
@@ -1506,6 +1653,131 @@ mod tests {
         "#;
         let config: UserConfig = toml::from_str(toml_str).unwrap();
         assert!(config.updates.auto_download);
+    }
+
+    /// A config as written on first run by `write_formatted_config` (Python
+    /// watchers, e.g. an X11 session without aw-awatcher installed).
+    fn first_run_config() -> String {
+        use super::{
+            write_formatted_config, AutostartConfig, ModuleEntry, UpdatesConfig, UserConfig,
+        };
+        let config = UserConfig {
+            port: 5600,
+            discovery_paths: vec!["/home/u/aw-modules".into()],
+            autostart: AutostartConfig {
+                enabled: true,
+                minimized: true,
+                modules: vec![
+                    ModuleEntry::Simple("aw-watcher-afk".into()),
+                    ModuleEntry::Simple("aw-watcher-window".into()),
+                ],
+            },
+            module_args: Default::default(),
+            updates: UpdatesConfig::default(),
+        };
+        let dir = std::env::temp_dir().join(format!("aw-tauri-cfg-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        write_formatted_config(&config, &path).unwrap();
+        let s = std::fs::read_to_string(&path).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        s
+    }
+
+    fn modules_of(source: &str) -> Vec<String> {
+        toml::from_str::<super::UserConfig>(source)
+            .unwrap()
+            .autostart
+            .modules
+            .iter()
+            .map(|m| m.name().to_string())
+            .collect()
+    }
+
+    #[test]
+    fn tray_toggles_persist_to_autostart_modules() {
+        use super::set_module_autostart;
+        let source = first_run_config();
+
+        // Enabling aw-awatcher from the tray adds it, in the file's one-per-line layout.
+        let added = set_module_autostart(&source, "aw-awatcher", true)
+            .unwrap()
+            .expect("aw-awatcher should be added");
+        assert_eq!(
+            modules_of(&added),
+            ["aw-watcher-afk", "aw-watcher-window", "aw-awatcher"]
+        );
+        assert!(
+            added.contains("  \"aw-watcher-window\",\n  \"aw-awatcher\"\n]"),
+            "{added}"
+        );
+
+        // Disabling the Python watchers removes them; nothing else changes.
+        let removed = set_module_autostart(&added, "aw-watcher-afk", false)
+            .unwrap()
+            .unwrap();
+        let removed = set_module_autostart(&removed, "aw-watcher-window", false)
+            .unwrap()
+            .unwrap();
+        assert_eq!(modules_of(&removed), ["aw-awatcher"]);
+        assert_eq!(
+            removed,
+            source.replace(
+                "  \"aw-watcher-afk\",\n  \"aw-watcher-window\"\n",
+                "  \"aw-awatcher\"\n"
+            ),
+            "only the modules list should change"
+        );
+
+        // Already in the requested state: no write.
+        assert!(set_module_autostart(&removed, "aw-awatcher", true)
+            .unwrap()
+            .is_none());
+        assert!(set_module_autostart(&removed, "aw-watcher-afk", false)
+            .unwrap()
+            .is_none());
+
+        // Re-enabling into an empty list still parses.
+        let empty = set_module_autostart(&removed, "aw-awatcher", false)
+            .unwrap()
+            .unwrap();
+        assert!(modules_of(&empty).is_empty());
+        let readded = set_module_autostart(&empty, "aw-watcher-afk", true)
+            .unwrap()
+            .unwrap();
+        assert_eq!(modules_of(&readded), ["aw-watcher-afk"]);
+    }
+
+    #[test]
+    fn tray_toggle_keeps_comments_and_moves_inline_args() {
+        use super::set_module_autostart;
+        let source = r#"# my config
+port = 5600
+discovery_paths = []
+
+[autostart]
+enabled = true
+minimized = true
+# watchers to start
+modules = [
+  "aw-awatcher",
+  { name = "aw-watcher-input", args = "--poll-time 5" }
+]
+"#;
+        let out = set_module_autostart(source, "aw-watcher-input", false)
+            .unwrap()
+            .unwrap();
+        assert!(out.contains("# my config") && out.contains("# watchers to start"));
+        let config: super::UserConfig = toml::from_str(&out).unwrap();
+        assert_eq!(modules_of(&out), ["aw-awatcher"]);
+        // The args survive so a later manual start from the tray still uses them.
+        assert_eq!(config.module_args["aw-watcher-input"], "--poll-time 5");
+    }
+
+    #[test]
+    fn tray_toggle_leaves_malformed_config_alone() {
+        use super::set_module_autostart;
+        assert!(set_module_autostart("port = \n[autostart", "aw-awatcher", true).is_err());
     }
 }
 
