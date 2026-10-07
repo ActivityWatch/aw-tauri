@@ -8,7 +8,7 @@
 use log::{info, warn};
 use std::fs;
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use toml_edit::{Array, ArrayOfTables, DocumentMut, Item, Table, Value};
 
 use crate::{autostart, get_config_path, UserConfig};
@@ -18,7 +18,7 @@ use crate::{autostart, get_config_path, UserConfig};
 /// target on Windows too). The original's permissions are kept, and a symlinked
 /// config is written through to its target rather than replaced by a file.
 pub(crate) fn write_atomic(path: &Path, contents: impl AsRef<[u8]>) -> std::io::Result<()> {
-    let target = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let target = resolve_symlinks(path);
     let dir = target
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
@@ -43,6 +43,28 @@ pub(crate) fn write_atomic(path: &Path, contents: impl AsRef<[u8]>) -> std::io::
         let _ = fs::remove_file(&tmp);
     }
     result
+}
+
+/// Follows `path` through any chain of symlinks to the file it names, whether or
+/// not that file exists yet (unlike `canonicalize`), so writing a config whose
+/// link target hasn't been created yet creates the target and keeps the link.
+fn resolve_symlinks(path: &Path) -> PathBuf {
+    let mut current = path.to_path_buf();
+    // Bounded, like the OS's own limit, so a symlink loop can't spin forever.
+    for _ in 0..40 {
+        let is_link = fs::symlink_metadata(&current)
+            .map(|m| m.file_type().is_symlink())
+            .unwrap_or(false);
+        if !is_link {
+            break;
+        }
+        match fs::read_link(&current) {
+            Ok(link) if link.is_absolute() => current = link,
+            Ok(link) => current = current.parent().map(|dir| dir.join(&link)).unwrap_or(link),
+            Err(_) => break,
+        }
+    }
+    current
 }
 
 /// Adds `name` to, or removes it from, `[autostart] modules` in the config file,
@@ -248,7 +270,8 @@ fn tables_push(modules: &mut ArrayOfTables, name: &str) {
 ///
 /// Both forms the config accepts are edited: an inline `modules = [...]` array
 /// (of names and/or `{ name, args }` tables) and `[[autostart.modules]]`
-/// tables. Removing an entry that carries args moves them to `[module_args]`,
+/// tables. Removing an entry that carries args (the last such entry, if the
+/// module is listed more than once) moves them to `[module_args]`,
 /// replacing any value there: the entry's args are what was in effect (they win
 /// over `[module_args]` when both are set), so a later start from the tray keeps
 /// using them.
@@ -284,8 +307,10 @@ pub(crate) fn set_module_autostart(
                         return Ok(None);
                     }
                     for &i in matches.iter().rev() {
-                        if let Some(args) = modules.get(i).and_then(value_args) {
-                            moved_args = Some(args);
+                        // Reverse order: the first args seen are the last entry's,
+                        // which are the effective ones (see `configured_modules_args`).
+                        if moved_args.is_none() {
+                            moved_args = modules.get(i).and_then(value_args);
                         }
                         array_remove(modules, i);
                     }
@@ -315,8 +340,8 @@ pub(crate) fn set_module_autostart(
                             .get(i)
                             .and_then(|t| t.get("args"))
                             .and_then(Item::as_str);
-                        if let Some(args) = args_of(args) {
-                            moved_args = Some(args);
+                        if moved_args.is_none() {
+                            moved_args = args_of(args);
                         }
                         modules.remove(i);
                     }
@@ -684,6 +709,29 @@ auto_download = true
         assert_eq!(modules_of(&readded), ["aw-awatcher"]);
     }
 
+    /// A module listed twice: the last entry's args are the effective ones, so
+    /// those are what removal saves, for both list forms.
+    #[test]
+    fn removing_duplicate_entries_keeps_effective_args() {
+        let head =
+            "port = 5600\ndiscovery_paths = []\n\n[autostart]\nenabled = true\nminimized = true\n";
+        let inline = format!(
+            "{head}modules = [\n  {{ name = \"aw-watcher-input\", args = \"--first\" }},\n  \"aw-awatcher\",\n  {{ name = \"aw-watcher-input\", args = \"--last\" }},\n  \"aw-watcher-input\"\n]\n"
+        );
+        let tables = format!(
+            "{head}\n[[autostart.modules]]\nname = \"aw-watcher-input\"\nargs = \"--first\"\n\n[[autostart.modules]]\nname = \"aw-awatcher\"\n\n[[autostart.modules]]\nname = \"aw-watcher-input\"\nargs = \"--last\"\n"
+        );
+        for source in [inline, tables] {
+            let out = set(&source, "aw-watcher-input", false);
+            assert_eq!(modules_of(&out), ["aw-awatcher"], "{out}");
+            assert_eq!(
+                parse(&out).module_args["aw-watcher-input"],
+                "--last",
+                "{out}"
+            );
+        }
+    }
+
     #[test]
     fn tray_toggle_leaves_malformed_config_alone() {
         assert!(set_module_autostart("port = \n[autostart", "aw-awatcher", true).is_err());
@@ -720,6 +768,20 @@ auto_download = true
                 .file_type()
                 .is_symlink());
             assert_eq!(std::fs::read_to_string(&real).unwrap(), "via link");
+
+            // A dangling link (first run, target not created yet) keeps the link
+            // and creates its target, also through a relative link.
+            let link = dir.join("dangling.toml");
+            std::os::unix::fs::symlink("target.toml", &link).unwrap();
+            write_atomic(&link, "first run").unwrap();
+            assert!(std::fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink());
+            assert_eq!(
+                std::fs::read_to_string(dir.join("target.toml")).unwrap(),
+                "first run"
+            );
         }
         let _ = std::fs::remove_dir_all(&dir);
     }
