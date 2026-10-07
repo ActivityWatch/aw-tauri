@@ -28,8 +28,10 @@ mod mini;
 mod module_alert_ui;
 mod profile;
 mod updater_ui;
+mod webkit_env;
 
 pub use profile::{export_profile, is_testing, resolve_profile, DEFAULT_PROFILE, TESTING_PROFILE};
+pub use webkit_env::apply as apply_webkit_env_workarounds;
 
 /// CLI arguments passed from main()
 #[derive(Debug)]
@@ -1057,6 +1059,7 @@ pub fn run() {
         // Can't use log here since logging isn't initialized yet
         eprintln!("Failed to initialize logging: {}", e);
     }
+    webkit_env::log_applied();
 
     if cli_args.daemon {
         DAEMON_MODE.set(true).expect("DAEMON_MODE already set");
