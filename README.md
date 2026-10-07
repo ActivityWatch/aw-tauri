@@ -208,7 +208,7 @@ aw-tauri searches for `aw-*` executables in these locations:
 |----------|-------|
 | Linux    | `~/bin`, `~/.local/bin`, `$XDG_DATA_HOME/activitywatch/aw-tauri/modules`, `~/aw-modules`, install resources (`../lib/aw-tauri/modules` next to the binary; `$APPDIR/...` for AppImage), `$PATH` |
 | macOS    | `~/aw-modules`, app bundle `Contents/Resources[/modules]` (resolved from `current_exe()`), `$PATH` |
-| Windows  | `C:\Users\{user}\aw-modules`, `C:\Users\{user}\AppData\Local\Programs\ActivityWatch`, `%PATH%` |
+| Windows  | install dir of `aw-tauri.exe` (resolved from `current_exe()`, searched with highest priority), `C:\Users\{user}\aw-modules`, `C:\Users\{user}\AppData\Local\Programs\ActivityWatch-Tauri`, `C:\Users\{user}\AppData\Local\Programs\ActivityWatch` (classic aw-qt install), `%PATH%` |
 
 Install-relative paths are always searched at runtime (not only the snapshot written into `config.toml` on first run), so upgrades find modules bundled into the package.
 

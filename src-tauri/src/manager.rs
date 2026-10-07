@@ -1418,13 +1418,6 @@ fn discover_modules() -> BTreeMap<String, PathBuf> {
     let path = env::var_os("PATH").unwrap_or_default();
     let mut paths = env::split_paths(&path).collect::<Vec<_>>();
 
-    // Always include install-relative paths at runtime (see unix discover_modules).
-    for path in crate::dirs::get_install_discovery_paths() {
-        if !paths.contains(&path) {
-            paths.insert(0, path);
-        }
-    }
-
     // check each path in discovery_paths and add it to the start of the paths list if it's not already there
     for path in config.discovery_paths.iter() {
         if !paths.contains(path) {
@@ -1432,24 +1425,44 @@ fn discover_modules() -> BTreeMap<String, PathBuf> {
         }
     }
 
-    let new_paths = env::join_paths(paths).unwrap_or_default();
+    // Always include install-relative paths at runtime (see unix discover_modules),
+    // and give them the highest priority. Otherwise a same-named watcher in another
+    // discovery path wins over the one bundled with this aw-tauri, e.g. a stale
+    // classic (aw-qt) install in Programs\ActivityWatch, which is in the default
+    // discovery_paths (and in every config.toml written on first run).
+    for path in crate::dirs::get_install_discovery_paths() {
+        paths.retain(|p| p != &path);
+        paths.insert(0, path);
+    }
 
-    // Build a set of paths to search
+    find_windows_modules_in(&paths, &excluded)
+}
+
+/// Finds `aw-*.exe` modules in `roots` and their `aw-*` subdirectories.
+///
+/// `roots` is in priority order: when two roots provide the same module, the
+/// one from the earlier root wins. Roots are searched in that order and the
+/// first find of a name is kept, so a directory reachable from several roots
+/// (e.g. a bundled watcher dir that is also on `%PATH%`) is attributed to the
+/// highest-priority one.
+#[cfg(any(windows, test))]
+fn find_windows_modules_in(roots: &[PathBuf], excluded: &[&str]) -> BTreeMap<String, PathBuf> {
     let mut found_modules = BTreeMap::new();
     let mut visited_dirs = HashSet::new();
 
-    // Create a stack of directories to search, starting with PATH entries
-    let mut dirs_to_search: Vec<PathBuf> = env::split_paths(&new_paths).collect();
+    for root in roots {
+        // Depth-first within each root
+        let mut dirs_to_search = vec![root.clone()];
+        while let Some(dir) = dirs_to_search.pop() {
+            // Skip if already visited (from this or a higher-priority root)
+            if !visited_dirs.insert(dir.clone()) {
+                continue;
+            }
 
-    // Process directories in depth-first order
-    while let Some(dir) = dirs_to_search.pop() {
-        // Skip if already visited
-        if !visited_dirs.insert(dir.clone()) {
-            continue;
-        }
-
-        // Look for aw-* executables in this directory
-        if let Ok(entries) = fs::read_dir(&dir) {
+            // Look for aw-* executables in this directory
+            let Ok(entries) = fs::read_dir(&dir) else {
+                continue;
+            };
             for entry in entries.filter_map(Result::ok) {
                 // Filter by name before touching metadata: PATH holds thousands of entries and
                 // only a handful are aw-*, so this skips a stat call for almost all of them.
@@ -1459,27 +1472,27 @@ fn discover_modules() -> BTreeMap<String, PathBuf> {
                 };
                 let path = entry.path();
 
-                // Skip if not a file or directory
-                if let Ok(metadata) = fs::metadata(&path) {
-                    // If it's a directory starting with "aw-", add to search stack
-                    if metadata.is_dir() {
-                        dirs_to_search.push(path);
-                    }
-                    // If it's an executable file
-                    else if metadata.is_file() && file_name.ends_with(".exe") {
-                        // Extract name without .exe suffix
-                        let name = match file_name.strip_suffix(".exe") {
-                            Some(name) => name.to_lowercase(),
-                            None => continue,
-                        };
+                let Ok(metadata) = fs::metadata(&path) else {
+                    continue;
+                };
+                // If it's a directory starting with "aw-", add to search stack
+                if metadata.is_dir() {
+                    dirs_to_search.push(path);
+                }
+                // If it's an executable file
+                else if metadata.is_file() {
+                    // Extract name without .exe suffix
+                    let Some(name) = file_name.strip_suffix(".exe") else {
+                        continue;
+                    };
+                    let name = name.to_lowercase();
 
-                        // Skip if excluded
-                        if excluded.contains(&name.as_str()) {
-                            continue;
-                        }
-
-                        found_modules.insert(name, path);
+                    // Skip if excluded
+                    if excluded.contains(&name.as_str()) {
+                        continue;
                     }
+
+                    found_modules.entry(name).or_insert(path);
                 }
             }
         }
@@ -1610,6 +1623,70 @@ mod tests {
         assert!(output.status.success());
         assert!(output.stdout.len() <= OUTPUT_TAIL_BYTES);
         assert!(output.stdout.ends_with(b"tail-marker\n"));
+    }
+
+    #[test]
+    fn windows_discovery_prefers_earlier_roots() {
+        let dir = env::temp_dir().join(format!("aw-tauri-win-discover-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let bundled = dir.join("ActivityWatch-Tauri");
+        let classic = dir.join("ActivityWatch");
+        for root in [&bundled, &classic] {
+            for watcher in ["aw-watcher-window", "aw-watcher-afk"] {
+                fs::create_dir_all(root.join(watcher)).unwrap();
+                fs::write(root.join(watcher).join(format!("{watcher}.exe")), "").unwrap();
+            }
+        }
+        fs::create_dir_all(classic.join("aw-watcher-input")).unwrap();
+        fs::write(
+            classic
+                .join("aw-watcher-input")
+                .join("aw-watcher-input.exe"),
+            "",
+        )
+        .unwrap();
+        fs::write(bundled.join("aw-tauri.exe"), "").unwrap();
+
+        // The bundled watcher dir is also reachable as its own (lower-priority)
+        // root, e.g. via %PATH%: it must still count as bundled.
+        let roots = vec![
+            bundled.clone(),
+            classic.clone(),
+            bundled.join("aw-watcher-window"),
+        ];
+        let found = find_windows_modules_in(&roots, &["aw-tauri"]);
+        assert_eq!(
+            found,
+            BTreeMap::from([
+                (
+                    "aw-watcher-afk".to_string(),
+                    bundled.join("aw-watcher-afk").join("aw-watcher-afk.exe")
+                ),
+                (
+                    "aw-watcher-input".to_string(),
+                    classic
+                        .join("aw-watcher-input")
+                        .join("aw-watcher-input.exe")
+                ),
+                (
+                    "aw-watcher-window".to_string(),
+                    bundled
+                        .join("aw-watcher-window")
+                        .join("aw-watcher-window.exe")
+                ),
+            ])
+        );
+
+        // Reversed priority picks the classic copies instead.
+        let found = find_windows_modules_in(&[classic.clone(), bundled.clone()], &["aw-tauri"]);
+        assert_eq!(
+            found["aw-watcher-window"],
+            classic
+                .join("aw-watcher-window")
+                .join("aw-watcher-window.exe")
+        );
+
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[cfg(unix)]
