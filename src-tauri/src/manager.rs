@@ -1418,18 +1418,22 @@ fn discover_modules() -> BTreeMap<String, PathBuf> {
     let path = env::var_os("PATH").unwrap_or_default();
     let mut paths = env::split_paths(&path).collect::<Vec<_>>();
 
-    // Always include install-relative paths at runtime (see unix discover_modules).
-    for path in crate::dirs::get_install_discovery_paths() {
-        if !paths.contains(&path) {
-            paths.insert(0, path);
-        }
-    }
-
     // check each path in discovery_paths and add it to the start of the paths list if it's not already there
     for path in config.discovery_paths.iter() {
         if !paths.contains(path) {
             paths.insert(0, path.to_owned());
         }
+    }
+
+    // Always include install-relative paths at runtime (see unix discover_modules),
+    // and give them the highest priority: the front of the list is searched last,
+    // and a later find overwrites an earlier one. Otherwise a same-named watcher in
+    // another discovery path wins over the one bundled with this aw-tauri, e.g. a
+    // stale classic (aw-qt) install in Programs\ActivityWatch, which is in the
+    // default discovery_paths (and in every config.toml written on first run).
+    for path in crate::dirs::get_install_discovery_paths() {
+        paths.retain(|p| p != &path);
+        paths.insert(0, path);
     }
 
     let new_paths = env::join_paths(paths).unwrap_or_default();

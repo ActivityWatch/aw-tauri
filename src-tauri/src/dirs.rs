@@ -169,6 +169,8 @@ pub fn get_runtime_dir() -> PathBuf {
 /// - Linux deb/rpm: `/usr/lib/aw-tauri/modules/` (binary in `/usr/bin/`)
 /// - Linux AppImage: `$APPDIR/usr/lib/aw-tauri/modules/`
 /// - macOS: `Contents/Resources/modules/` (and legacy `Contents/Resources/`)
+/// - Windows: the install dir holding `aw-tauri.exe` and the `aw-watcher-*\`
+///   subdirs (the Inno installer also places a copy in `<app>\aw-tauri\`)
 pub fn get_install_discovery_paths() -> Vec<PathBuf> {
     #[cfg(target_os = "linux")]
     {
@@ -183,10 +185,41 @@ pub fn get_install_discovery_paths() -> Vec<PathBuf> {
         macos_install_discovery_paths(std::env::current_exe().ok().as_deref())
     }
 
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    #[cfg(target_os = "windows")]
+    {
+        windows_install_discovery_paths(std::env::current_exe().ok().as_deref())
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
     {
         Vec::new()
     }
+}
+
+/// Windows layout, split out from `get_install_discovery_paths` so it can be
+/// tested against a fake install tree.
+///
+/// The Inno installer (`aw-tauri.iss`) copies the bundle into `<app>\` (so
+/// `<app>\aw-tauri.exe` sits next to `<app>\aw-watcher-*\`) and also puts
+/// `aw-tauri.exe` in `<app>\aw-tauri\`. When running from that subdir, the
+/// bundled modules are in its parent.
+#[cfg(any(target_os = "windows", test))]
+fn windows_install_discovery_paths(exe_path: Option<&Path>) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+
+    if let Some(exe_dir) = exe_path.and_then(Path::parent) {
+        paths.push(exe_dir.to_path_buf());
+        let in_aw_tauri_subdir = exe_dir
+            .file_name()
+            .is_some_and(|n| n.eq_ignore_ascii_case("aw-tauri"));
+        if in_aw_tauri_subdir {
+            if let Some(app_dir) = exe_dir.parent() {
+                paths.push(app_dir.to_path_buf());
+            }
+        }
+    }
+
+    paths
 }
 
 /// Linux layout, split out from `get_install_discovery_paths` so it can be
@@ -465,9 +498,24 @@ mod tests {
     }
 
     #[test]
+    fn test_windows_install_paths_layout() {
+        let app = PathBuf::from("ActivityWatch-Tauri");
+
+        // <app>\aw-tauri.exe: modules are in subdirs of the exe's own dir.
+        let paths = windows_install_discovery_paths(Some(&app.join("aw-tauri.exe")));
+        assert_eq!(paths, vec![app.clone()]);
+
+        // <app>\aw-tauri\aw-tauri.exe: also search the parent install dir.
+        let exe_dir = app.join("aw-tauri");
+        let paths = windows_install_discovery_paths(Some(&exe_dir.join("aw-tauri.exe")));
+        assert_eq!(paths, vec![exe_dir, app]);
+    }
+
+    #[test]
     fn test_install_paths_without_exe() {
         assert!(linux_install_discovery_paths(None, None).is_empty());
         assert!(macos_install_discovery_paths(None).is_empty());
+        assert!(windows_install_discovery_paths(None).is_empty());
     }
 
     #[cfg(target_os = "linux")]
