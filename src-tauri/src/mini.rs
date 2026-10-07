@@ -141,13 +141,11 @@ pub fn run() {
                     }
                     _ => {
                         if let Some(module_name) = id.strip_prefix("module:") {
-                            let enabled = manager_state
-                                .lock()
-                                .ok()
-                                .and_then(|mut state| state.handle_system_click(module_name));
-                            if let Some(enabled) = enabled {
-                                crate::persist_module_click(module_name, enabled);
-                            }
+                            manager::handle_module_menu_click(
+                                &manager_state,
+                                &db_path,
+                                module_name,
+                            );
                         }
                     }
                 }

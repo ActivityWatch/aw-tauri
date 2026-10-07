@@ -27,7 +27,7 @@ pub const MENU_ID: &str = "autostart";
 static MENU_ITEM: Mutex<Option<CheckMenuItem<Wry>>> = Mutex::new(None);
 
 /// Serializes read-modify-write cycles on the config file (here and in
-/// `crate::persist_module_autostart`) so two concurrent
+/// `crate::config_edit::persist_module_autostart`) so two concurrent
 /// toggles cannot interleave and lose one of the writes.
 pub(crate) static PERSIST_LOCK: Mutex<()> = Mutex::new(());
 
@@ -478,7 +478,7 @@ fn persist_enabled(enabled: bool) -> Result<(), String> {
     let path = get_config_path();
 
     if let Some(updated) = read_and_patch(&path, enabled) {
-        return std::fs::write(&path, updated)
+        return crate::config_edit::write_atomic(&path, updated)
             .map_err(|e| format!("Failed to write config file {}: {e}", path.display()));
     }
 
