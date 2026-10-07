@@ -63,6 +63,12 @@ jobs:
       - name: Prebuild
         run: make prebuild
 
+      # Runs on every platform: includes dirs::test_default_paths_are_pinned,
+      # which guards where existing installs keep their data/config.
+      - name: Run tests
+        shell: bash
+        run: cd src-tauri && cargo test --lib
+
       - name: Add rust target
         if: matrix.args != null
         run: rustup target add $(echo "${{ matrix.args }}" | cut -d' ' -f2)

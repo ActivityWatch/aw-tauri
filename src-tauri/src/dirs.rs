@@ -43,12 +43,24 @@ lazy_static! {
 
 #[cfg(not(target_os = "android"))]
 pub fn get_config_dir() -> Result<PathBuf, ()> {
-    let dir = dirs::config_dir()
-        .ok_or(())?
-        .join(appname())
-        .join("aw-tauri");
-    fs::create_dir_all(&dir).expect("Unable to create config dir");
-    Ok(dir)
+    config_dir_in(&appname())
+}
+
+/// The dir aw-tauri's own config/data live in, under a platform root.
+#[cfg(not(target_os = "android"))]
+const MODULE: &str = "aw-tauri";
+
+/// `<config root>/<appname>/aw-tauri`. `%LOCALAPPDATA%` on Windows (not
+/// Roaming), first moving over anything v0.14.0 put under Roaming, with
+/// aw-server-rust's resolver so aw-tauri and aw-server follow one rule: see
+/// `aw_server::dirs::module_dir` / `choose_module_dir`.
+#[cfg(not(target_os = "android"))]
+fn config_dir_in(appname: &str) -> Result<PathBuf, ()> {
+    Ok(aw_server::dirs::module_dir(
+        aw_server::dirs::user_config_root().ok_or(())?,
+        appname,
+        MODULE,
+    ))
 }
 
 #[cfg(target_os = "android")]
@@ -59,9 +71,17 @@ pub fn get_config_dir() -> Result<PathBuf, ()> {
 #[cfg(not(target_os = "android"))]
 #[allow(dead_code)]
 pub fn get_data_dir() -> Result<PathBuf, ()> {
-    let dir = dirs::data_dir().ok_or(())?.join(appname()).join("aw-tauri");
-    fs::create_dir_all(&dir).expect("Unable to create data dir");
-    Ok(dir)
+    data_dir_in(&appname())
+}
+
+/// `<data root>/<appname>/aw-tauri`; Windows handling as in [`config_dir_in`].
+#[cfg(not(target_os = "android"))]
+fn data_dir_in(appname: &str) -> Result<PathBuf, ()> {
+    Ok(aw_server::dirs::module_dir(
+        aw_server::dirs::user_data_root().ok_or(())?,
+        appname,
+        MODULE,
+    ))
 }
 
 #[cfg(target_os = "android")]
@@ -72,12 +92,17 @@ pub fn get_data_dir() -> Result<PathBuf, ()> {
         .to_path_buf())
 }
 
-#[cfg(all(not(target_os = "android"), target_os = "linux"))]
+#[cfg(not(target_os = "android"))]
 pub fn get_log_dir() -> Result<PathBuf, ()> {
+    log_dir_in(&appname())
+}
+
+#[cfg(target_os = "linux")]
+fn log_dir_in(appname: &str) -> Result<PathBuf, ()> {
     // Linux uses cache dir for logs
     let dir = dirs::cache_dir()
         .ok_or(())?
-        .join(appname())
+        .join(appname)
         .join("aw-tauri")
         .join("log");
     fs::create_dir_all(&dir).expect("Unable to create log dir");
@@ -85,11 +110,11 @@ pub fn get_log_dir() -> Result<PathBuf, ()> {
 }
 
 #[cfg(target_os = "windows")]
-pub fn get_log_dir() -> Result<PathBuf, ()> {
+fn log_dir_in(appname: &str) -> Result<PathBuf, ()> {
     // Windows: %LOCALAPPDATA%\<appname>\Logs\aw-tauri
     let dir = dirs::data_local_dir()
         .ok_or(())?
-        .join(appname())
+        .join(appname)
         .join("Logs")
         .join("aw-tauri");
     fs::create_dir_all(&dir).expect("Unable to create log dir");
@@ -101,13 +126,13 @@ pub fn get_log_dir() -> Result<PathBuf, ()> {
     not(target_os = "linux"),
     not(target_os = "windows")
 ))]
-pub fn get_log_dir() -> Result<PathBuf, ()> {
+fn log_dir_in(appname: &str) -> Result<PathBuf, ()> {
     // macOS: ~/Library/Logs/<appname>/aw-tauri
     let dir = dirs::home_dir()
         .ok_or(())?
         .join("Library")
         .join("Logs")
-        .join(appname())
+        .join(appname)
         .join("aw-tauri");
     fs::create_dir_all(&dir).expect("Unable to create log dir");
     Ok(dir)
@@ -370,6 +395,62 @@ mod tests {
         // any other profile gets its own sibling root
         assert_eq!(appname_for("research"), "activitywatch-research");
         assert_eq!(appname_for("my-profile"), "activitywatch-my-profile");
+    }
+
+    /// Pins aw-tauri's on-disk locations per platform, derived from env vars
+    /// rather than the `dirs` crate, so a dependency change that moves them
+    /// (as #203 did on Windows: %LOCALAPPDATA% -> Roaming %APPDATA%) fails here.
+    /// Matches <https://docs.activitywatch.net/en/latest/directories.html>;
+    /// change together with the sibling pins in aw-server-rust
+    /// (`aw-server/src/dirs.rs` `test_default_paths_are_pinned`) and aw-core
+    /// (`tests/test_dirs_pinned.py`).
+    /// Do not update these without a migration for existing installs.
+    #[test]
+    #[cfg(not(target_os = "android"))]
+    fn test_default_paths_are_pinned() {
+        let env = |v: &str| PathBuf::from(std::env::var(v).unwrap());
+        #[cfg(target_os = "windows")]
+        let (data, config, log) = {
+            let app = env("LOCALAPPDATA").join("activitywatch");
+            (app.clone(), app.clone(), app.join("Logs").join("aw-tauri"))
+        };
+        #[cfg(target_os = "macos")]
+        let (data, config, log) = {
+            let support = env("HOME").join("Library/Application Support/activitywatch");
+            (
+                support.clone(),
+                support,
+                env("HOME").join("Library/Logs/activitywatch/aw-tauri"),
+            )
+        };
+        #[cfg(target_os = "linux")]
+        let (data, config, log) = {
+            let xdg = |var: &str, fallback: &str| {
+                std::env::var(var)
+                    .ok()
+                    .map(PathBuf::from)
+                    .filter(|p| p.is_absolute())
+                    .unwrap_or_else(|| env("HOME").join(fallback))
+                    .join("activitywatch")
+            };
+            (
+                xdg("XDG_DATA_HOME", ".local/share"),
+                xdg("XDG_CONFIG_HOME", ".config"),
+                xdg("XDG_CACHE_HOME", ".cache").join("aw-tauri").join("log"),
+            )
+        };
+        // Explicit default profile rather than the getters' AW_PROFILE, so a
+        // developer's exported profile cannot fail (or mask) the pins.
+        let app = appname_for(DEFAULT_PROFILE);
+        // The roots `config_dir_in`/`data_dir_in` build on, joined without
+        // calling `module_dir`: on a Windows machine with v0.14.0 data, that
+        // would migrate the real install from a test. (The server's own
+        // dirs, including `db_path`, are pinned in aw-server-rust.)
+        let config_root = aw_server::dirs::user_config_root().unwrap();
+        let data_root = aw_server::dirs::user_data_root().unwrap();
+        assert_eq!(config_root.join(&app).join(MODULE), config.join("aw-tauri"));
+        assert_eq!(data_root.join(&app).join(MODULE), data.join("aw-tauri"));
+        assert_eq!(log_dir_in(&app).unwrap(), log);
     }
 
     /// Fresh, empty scratch dir for building fake install trees.
