@@ -243,9 +243,16 @@ impl ManagerState {
             self.stop_module(&name);
         }
     }
-    pub fn handle_system_click(&mut self, name: &str) {
+    /// Toggles module `name` from a tray click. Returns whether it is now meant to
+    /// be running, or `None` if `name` isn't a discovered module.
+    pub fn handle_system_click(&mut self, name: &str) -> Option<bool> {
+        if !self.modules.contains_key(name) {
+            warn!("Ignoring tray click for unknown module {name}");
+            return None;
+        }
         if self.is_module_running(name) {
             self.stop_module(name);
+            Some(false)
         } else {
             // A manual start is a fresh start: re-arm automatic restarts (even after the limit
             // was hit) and don't report it as a crash recovery.
@@ -253,6 +260,7 @@ impl ManagerState {
                 module.restart_count = 0;
             }
             self.start_module(name, None);
+            Some(true)
         }
     }
     fn is_module_running(&self, name: &str) -> bool {
@@ -265,8 +273,9 @@ impl ManagerState {
         self.notify_enabled
     }
 
-    /// Write the new enabled state, update the tray CheckMenuItem, and start/stop aw-notify.
-    pub(crate) fn set_notify_enabled(&mut self, _app: &AppHandle, enabled: bool) {
+    /// Apply a new aw-notify opt-in (already written to the settings store by the caller):
+    /// update the tray CheckMenuItem, and start/stop aw-notify.
+    pub(crate) fn set_notify_enabled(&mut self, enabled: bool) {
         self.notify_enabled = enabled;
         NOTIFY_ENABLED_GLOBAL.store(enabled, AtomicOrdering::Relaxed);
         // Sync the tray checkmark via the cached item
@@ -662,6 +671,59 @@ pub(crate) fn start_manager_with_events(
     start_manager_inner(server_port, Some(event_tx), notify_opt_in)
 }
 
+/// The aw-notify module, whose autostart is governed by the `settings.aw-notify.enabled`
+/// opt-in flag (shared with aw-webui and the other managers) rather than by `[autostart]`.
+pub(crate) const NOTIFY_MODULE: &str = "aw-notify";
+
+/// Modules to start at launch: those listed in `[autostart] modules`, except that aw-notify
+/// follows its opt-in flag alone. It is skipped when the flag is off, even if listed, and
+/// started when the flag is on and it is installed, even if not listed (so enabling
+/// notifications from the tray or the webui sticks across restarts).
+fn autostart_names<'a>(
+    listed: &[&'a str],
+    notify_opt_in: bool,
+    notify_discovered: bool,
+) -> Vec<&'a str> {
+    let mut names: Vec<&'a str> = listed
+        .iter()
+        .copied()
+        .filter(|&name| name != NOTIFY_MODULE)
+        .collect();
+    if notify_opt_in && (notify_discovered || listed.contains(&NOTIFY_MODULE)) {
+        names.push(NOTIFY_MODULE);
+    }
+    names
+}
+
+/// Handles a click on a module in the tray's Modules menu (GUI and mini mode).
+///
+/// aw-notify is routed through its opt-in flag, exactly like the "Enable notifications"
+/// toggle: the flag is written to the settings store and the module started/stopped, and
+/// `[autostart]` is not touched. Other modules are toggled and the change is saved to
+/// `[autostart] modules` in the config file.
+pub(crate) fn handle_module_menu_click(state: &Mutex<ManagerState>, db_path: &str, name: &str) {
+    let mut s = state.lock().expect("Failed to acquire manager_state lock");
+    if name == NOTIFY_MODULE {
+        if !s.modules.contains_key(name) {
+            warn!("Ignoring tray click for unknown module {name}");
+            return;
+        }
+        let enable = !s.is_module_running(name);
+        if crate::write_notify_enabled(db_path, enable) {
+            s.set_notify_enabled(enable);
+        } else {
+            error!("aw-notify toggle aborted: datastore write failed; state unchanged");
+        }
+        return;
+    }
+    // Save while still holding the manager lock, so the order of saves always matches
+    // the order of toggles (lock order: manager state, then the config PERSIST_LOCK;
+    // nothing takes them the other way round).
+    if let Some(enabled) = s.handle_system_click(name) {
+        crate::config_edit::persist_module_click(name, enabled);
+    }
+}
+
 fn start_manager_inner(
     server_port: u16,
     event_tx: Option<Sender<ManagerEvent>>,
@@ -677,16 +739,16 @@ fn start_manager_inner(
 
     // Start the modules. Args come from the baseline computed in ManagerState::new().
     let config = get_config();
-    for module_entry in config.autostart.modules.iter() {
-        let name = module_entry.name();
-        if name == "aw-notify" && !notify_opt_in {
-            info!("Skipping aw-notify autostart: aw-notify.enabled is not true in settings");
-            continue;
+    let listed: Vec<&str> = config.autostart.modules.iter().map(|m| m.name()).collect();
+    if listed.contains(&NOTIFY_MODULE) && !notify_opt_in {
+        info!("Skipping aw-notify autostart: aw-notify.enabled is not true in settings");
+    }
+    {
+        let mut s = state.lock().expect("Failed to acquire manager_state lock");
+        let notify_discovered = s.modules.contains_key(NOTIFY_MODULE);
+        for name in autostart_names(&listed, notify_opt_in, notify_discovered) {
+            s.start_module(name, None);
         }
-        state
-            .lock()
-            .expect("Failed to acquire manager_state lock")
-            .start_module(name, None);
     }
 
     // Force an initial tray build even if no modules autostart (no Started message would arrive).
@@ -1540,8 +1602,42 @@ mod tests {
     fn manual_start_resets_restart_count() {
         let mut state = state_with_module("aw-watcher", 3, None);
         state.stopped_module("aw-watcher", 1234);
-        state.handle_system_click("aw-watcher");
+        assert_eq!(state.handle_system_click("aw-watcher"), Some(true));
         assert_eq!(state.modules["aw-watcher"].restart_count, 0);
+    }
+
+    #[test]
+    fn autostart_names_follow_notify_opt_in() {
+        let listed = ["aw-awatcher", "aw-notify", "aw-sync"];
+        // Listed but not opted in: skipped.
+        assert_eq!(
+            autostart_names(&listed, false, true),
+            ["aw-awatcher", "aw-sync"]
+        );
+        // Opted in: started once, whether listed or not.
+        assert_eq!(
+            autostart_names(&listed, true, true),
+            ["aw-awatcher", "aw-sync", "aw-notify"]
+        );
+        assert_eq!(
+            autostart_names(&["aw-awatcher"], true, true),
+            ["aw-awatcher", "aw-notify"]
+        );
+        // Opted in but not installed (and not listed): nothing to start.
+        assert_eq!(
+            autostart_names(&["aw-awatcher"], true, false),
+            ["aw-awatcher"]
+        );
+        assert_eq!(
+            autostart_names(&["aw-awatcher"], false, true),
+            ["aw-awatcher"]
+        );
+    }
+
+    #[test]
+    fn tray_click_on_unknown_module_is_ignored() {
+        let mut state = state_with_module("aw-watcher", 0, None);
+        assert_eq!(state.handle_system_click("aw-not-discovered"), None);
     }
 
     #[test]

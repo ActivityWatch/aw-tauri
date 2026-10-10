@@ -141,9 +141,11 @@ pub fn run() {
                     }
                     _ => {
                         if let Some(module_name) = id.strip_prefix("module:") {
-                            if let Ok(mut state) = manager_state.lock() {
-                                state.handle_system_click(module_name);
-                            }
+                            manager::handle_module_menu_click(
+                                &manager_state,
+                                &db_path,
+                                module_name,
+                            );
                         }
                     }
                 }

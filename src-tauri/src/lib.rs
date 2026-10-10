@@ -7,7 +7,7 @@ use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watche
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::env;
-use std::fs::{create_dir_all, read_to_string, remove_file, write, OpenOptions};
+use std::fs::{create_dir_all, read_to_string, remove_file, OpenOptions};
 use std::net::{SocketAddr, TcpListener};
 use std::path::{Path, PathBuf};
 use std::sync::{mpsc, Arc, Condvar, Mutex, OnceLock};
@@ -21,6 +21,7 @@ use tauri_plugin_opener::OpenerExt;
 use tauri_plugin_updater::UpdaterExt;
 
 mod autostart;
+mod config_edit;
 mod dirs;
 mod logging;
 mod manager;
@@ -268,7 +269,7 @@ fn write_formatted_config(config: &UserConfig, path: &Path) -> Result<(), std::i
         }
     }
 
-    write(path, output)
+    config_edit::write_atomic(path, output)
 }
 
 /// When to run python aw-server's database import, as standalone
@@ -1282,16 +1283,17 @@ pub fn run() {
                             .expect("Failed to acquire manager_state lock");
                         let now_enabled = !state.is_notify_enabled();
                         if write_notify_enabled(&db_path_arc, now_enabled) {
-                            state.set_notify_enabled(app, now_enabled);
+                            state.set_notify_enabled(now_enabled);
                         } else {
                             error!("Notify toggle aborted: datastore write failed; state unchanged");
                         }
                     } else {
                         // Modules menu clicks
-                        let mut state = manager_state
-                            .lock()
-                            .expect("Failed to acquire manager_state lock");
-                        state.handle_system_click(&event.id().0);
+                        manager::handle_module_menu_click(
+                            &manager_state,
+                            &db_path_arc,
+                            &event.id().0,
+                        );
                     }
                 });
                 if user_config.autostart.enabled && !user_config.autostart.minimized {

@@ -26,9 +26,10 @@ pub const MENU_ID: &str = "autostart";
 /// `set_autostart_enabled` command). Rebuilt whenever the tray menu is rebuilt.
 static MENU_ITEM: Mutex<Option<CheckMenuItem<Wry>>> = Mutex::new(None);
 
-/// Serializes read-modify-write cycles on the config file so two concurrent
+/// Serializes read-modify-write cycles on the config file (here and in
+/// `crate::config_edit::persist_module_autostart`) so two concurrent
 /// toggles cannot interleave and lose one of the writes.
-static PERSIST_LOCK: Mutex<()> = Mutex::new(());
+pub(crate) static PERSIST_LOCK: Mutex<()> = Mutex::new(());
 
 /// Last autostart state read from or written to the OS. Querying the OS can be slow (the macOS
 /// AppleScript launcher runs `osascript` against System Events), and the tray menu is rebuilt
@@ -477,7 +478,7 @@ fn persist_enabled(enabled: bool) -> Result<(), String> {
     let path = get_config_path();
 
     if let Some(updated) = read_and_patch(&path, enabled) {
-        return std::fs::write(&path, updated)
+        return crate::config_edit::write_atomic(&path, updated)
             .map_err(|e| format!("Failed to write config file {}: {e}", path.display()));
     }
 
