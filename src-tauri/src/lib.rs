@@ -604,10 +604,14 @@ impl Default for UserConfig {
                 .map(|s| s == "wayland")
                 .unwrap_or(false)
                 || env::var("WAYLAND_DISPLAY").is_ok();
-            default_linux_modules(
-                module_available("aw-awatcher", &discovery_paths),
-                is_wayland,
-            )
+            // Check install-relative paths too: they're searched at runtime
+            // even though they aren't persisted (see dirs::get_discovery_paths).
+            let search: Vec<PathBuf> = discovery_paths
+                .iter()
+                .cloned()
+                .chain(dirs::get_install_discovery_paths())
+                .collect();
+            default_linux_modules(module_available("aw-awatcher", &search), is_wayland)
         };
         // On non-Linux platforms, use traditional watchers
         #[cfg(not(target_os = "linux"))]

@@ -305,6 +305,12 @@ fn macos_install_discovery_paths(exe_path: Option<&Path>) -> Vec<PathBuf> {
     paths
 }
 
+/// User-level discovery paths, written into a new `config.toml` as defaults.
+///
+/// Install-relative paths (`get_install_discovery_paths`) are deliberately not
+/// included: they depend on where this binary runs from (and for an AppImage,
+/// a per-run mount point), so persisting them would pin a later install to an
+/// old one's modules. The module manager adds them at runtime instead.
 pub fn get_discovery_paths() -> Vec<PathBuf> {
     let mut discovery_paths = Vec::new();
 
@@ -332,9 +338,6 @@ pub fn get_discovery_paths() -> Vec<PathBuf> {
             // Legacy path for backward compatibility
             discovery_paths.push(home_path.join("aw-modules"));
         }
-
-        // Bundled modules next to the install (deb/rpm/AppImage)
-        discovery_paths.extend(get_install_discovery_paths());
     }
 
     #[cfg(target_os = "windows")]
@@ -359,7 +362,6 @@ pub fn get_discovery_paths() -> Vec<PathBuf> {
         if let Ok(home_dir) = std::env::var("HOME") {
             discovery_paths.push(PathBuf::from(home_dir).join("aw-modules"));
         }
-        discovery_paths.extend(get_install_discovery_paths());
     }
 
     #[cfg(target_os = "android")]
@@ -611,6 +613,47 @@ mod tests {
             );
             let home_path = PathBuf::from(home);
             assert!(paths.iter().any(|p| p.starts_with(&home_path)));
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_discovery_defaults_exclude_install_paths() {
+        // Install-relative paths are runtime-only (added by the module manager),
+        // never part of the defaults that get written into config.toml. Fake an
+        // AppImage mount via APPDIR so there are install paths to leak; the
+        // exe's own dir is always one too.
+        /// Restores APPDIR and removes the scratch tree even if the test panics.
+        struct AppDirGuard(Option<std::ffi::OsString>, PathBuf);
+        impl Drop for AppDirGuard {
+            fn drop(&mut self) {
+                match self.0.take() {
+                    Some(v) => std::env::set_var("APPDIR", v),
+                    None => std::env::remove_var("APPDIR"),
+                }
+                let _ = fs::remove_dir_all(&self.1);
+            }
+        }
+
+        let root = scratch_dir("defaults-exclude");
+        let _guard = AppDirGuard(std::env::var_os("APPDIR"), root.clone());
+        let resource = root.join("usr").join("lib").join("aw-tauri");
+        fs::create_dir_all(resource.join("modules")).unwrap();
+        std::env::set_var("APPDIR", &root);
+
+        let install = get_install_discovery_paths();
+        let defaults = get_discovery_paths();
+
+        assert!(
+            install.contains(&resource.join("modules")),
+            "precondition: APPDIR install paths should be discovered, got {:?}",
+            install
+        );
+        // Only check what came from the fake APPDIR: the exe's own dir is also
+        // an install path, and could legitimately equal a user path such as
+        // ~/bin when the test binary is run from there.
+        for p in install.iter().filter(|p| p.starts_with(&root)) {
+            assert!(!defaults.contains(p), "{:?} would be persisted", p);
         }
     }
 }
