@@ -1,0 +1,11 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "remote-open-settings",
+  "description": "Allow the embedded localhost dashboard to open the settings window",
+  "remote": {
+    "urls": ["http://localhost:*/*"]
+  },
+  "local": false,
+  "windows": ["main"],
+  "permissions": ["allow-open-settings"]
+}

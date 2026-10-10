@@ -8,7 +8,7 @@
 
 use std::fs;
 use std::path::Path;
-use std::sync::Mutex;
+use std::sync::{Mutex, MutexGuard};
 
 use log::{error, info, warn};
 use tauri::menu::CheckMenuItem;
@@ -42,6 +42,12 @@ fn set_cached(registered: bool) {
 /// Forget the cached state so the next read goes back to the OS.
 fn clear_cached() {
     *REGISTERED.lock().unwrap_or_else(|e| e.into_inner()) = None;
+}
+
+/// Holds the config-file write lock, for other writers of the config file
+/// (e.g. the settings window) so they cannot interleave with a toggle.
+pub(crate) fn persist_lock() -> MutexGuard<'static, ()> {
+    PERSIST_LOCK.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 /// Whether the app is currently registered to start at login, according to the OS.
@@ -473,7 +479,7 @@ fn report_failure(app: &AppHandle, message: &str) {
 /// The file is re-read from disk rather than reusing the config loaded at
 /// startup, so a toggle doesn't revert edits made in the meantime.
 fn persist_enabled(enabled: bool) -> Result<(), String> {
-    let _guard = PERSIST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = persist_lock();
     let path = get_config_path();
 
     if let Some(updated) = read_and_patch(&path, enabled) {
