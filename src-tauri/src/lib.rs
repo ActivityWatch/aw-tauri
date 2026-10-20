@@ -1161,6 +1161,7 @@ pub fn run() {
                 // browser via the open_external Tauri command. This approach works reliably for
                 // SPA-generated links where on_navigation (which only fires for top-level
                 // webview navigations) would miss JS-driven internal route changes.
+                let download_destinations = Mutex::new(downloads::Destinations::default());
                 let _main_window = WebviewWindowBuilder::new(
                     app,
                     "main",
@@ -1169,12 +1170,14 @@ pub fn run() {
                 .title(profile::window_title(&cli_args.profile))
                 .inner_size(800.0, 600.0)
                 .visible(false)
-                .on_download(|webview, event| {
+                .on_download(move |webview, event| {
                     match event {
                         tauri::webview::DownloadEvent::Requested { destination, .. } => {
                             let resolved = webview.app_handle().path().download_dir()
                                 .map_err(|error| error.to_string())
-                                .and_then(|dir| downloads::destination(&dir, destination));
+                                .and_then(|dir| download_destinations.lock()
+                                    .map_err(|_| "Download destination tracking unavailable".to_string())?
+                                    .destination(&dir, destination));
                             match resolved {
                                 Ok(path) => {
                                     info!("Saving download to {}", path.display());
@@ -1194,6 +1197,13 @@ pub fn run() {
                         }
                         tauri::webview::DownloadEvent::Finished { path, success, .. } => {
                             info!("Download finished: success={success} path={path:?}");
+                            if !success {
+                                webview.app_handle().dialog()
+                                    .message("The native downloader reported a failure. A complete backup could not be confirmed. Check Downloads and available disk space before retrying.")
+                                    .kind(MessageDialogKind::Error)
+                                    .title("Export failed")
+                                    .show(|_| {});
+                            }
                             true
                         }
                         _ => true,
