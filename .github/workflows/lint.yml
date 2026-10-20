@@ -31,6 +31,8 @@ jobs:
       run: |
         rustc --edition 2021 --test src-tauri/src/downloads.rs -o /tmp/aw-download-tests
         /tmp/aw-download-tests
+    - name: Test bundle release identity
+      run: python3 tests/test_release_version.py
 
   clippy:
     runs-on: ubuntu-latest
