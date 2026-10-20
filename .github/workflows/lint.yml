@@ -25,6 +25,8 @@ jobs:
         rustup component add --toolchain nightly rustfmt
     - name: Check formatting
       run: cd src-tauri; cargo fmt -- --check
+    - name: Test bundle release identity
+      run: python3 tests/test_release_version.py
 
   clippy:
     runs-on: ubuntu-latest
