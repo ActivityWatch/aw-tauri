@@ -23,6 +23,7 @@ use tauri_plugin_updater::UpdaterExt;
 mod autostart;
 mod config_edit;
 mod dirs;
+mod downloads;
 mod logging;
 mod manager;
 mod mini;
@@ -1168,11 +1169,44 @@ pub fn run() {
                 .title(profile::window_title(&cli_args.profile))
                 .inner_size(800.0, 600.0)
                 .visible(false)
+                .on_download(|webview, event| {
+                    match event {
+                        tauri::webview::DownloadEvent::Requested { destination, .. } => {
+                            let resolved = webview.app_handle().path().download_dir()
+                                .map_err(|error| error.to_string())
+                                .and_then(|dir| downloads::destination(&dir, destination));
+                            match resolved {
+                                Ok(path) => {
+                                    info!("Saving download to {}", path.display());
+                                    *destination = path;
+                                    true
+                                }
+                                Err(error) => {
+                                    warn!("Cannot save download: {error}");
+                                    webview.app_handle().dialog()
+                                        .message(format!("Cannot save export to Downloads: {error}"))
+                                        .kind(MessageDialogKind::Error)
+                                        .title("Export failed")
+                                        .show(|_| {});
+                                    false
+                                }
+                            }
+                        }
+                        tauri::webview::DownloadEvent::Finished { path, success, .. } => {
+                            info!("Download finished: success={success} path={path:?}");
+                            true
+                        }
+                        _ => true,
+                    }
+                })
                 .initialization_script(
                     r#"
                     document.addEventListener('click', function(e) {
                         var el = e.target;
                         while (el && el.tagName !== 'A') { el = el.parentElement; }
+                        // Blob exports belong to the webview's native download handler,
+                        // not the OS URL opener (which cannot resolve webview blob URLs).
+                        if (el && el.href && el.href.startsWith('blob:') && el.hasAttribute('download')) { return; }
                         if (el && el.href && !/^(https?:\/\/(localhost|127\.0\.0\.1)|tauri:|about:)/.test(el.href)) {
                             e.preventDefault();
                             e.stopPropagation();

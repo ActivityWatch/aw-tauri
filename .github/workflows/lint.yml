@@ -25,6 +25,8 @@ jobs:
         rustup component add --toolchain nightly rustfmt
     - name: Check formatting
       run: cd src-tauri; cargo fmt -- --check
+    - name: Test external-link and blob-export routing
+      run: node src-tauri/src/external_links.test.cjs
 
   clippy:
     runs-on: ubuntu-latest
