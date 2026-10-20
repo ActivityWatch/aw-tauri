@@ -107,16 +107,25 @@ mod tests {
         for name in [
             "..",
             "bad:stream.json",
-            "bad\\name.json",
             "bad\nname.json",
             "NUL.json",
             "COM1.csv",
             "trailing.",
             "trailing ",
         ] {
-            assert!(destinations
-                .destination(&std::env::temp_dir(), Path::new(name))
-                .is_err());
+            assert!(
+                destinations
+                    .destination(&std::env::temp_dir(), Path::new(name))
+                    .is_err(),
+                "accepted unsafe filename: {name:?}"
+            );
         }
+        // Backslash is a filename character on Unix, but a directory separator
+        // on Windows: file_name() must strip it there, just like a forward slash.
+        let result = destinations.destination(&std::env::temp_dir(), Path::new("bad\\name.json"));
+        #[cfg(not(windows))]
+        assert!(result.is_err());
+        #[cfg(windows)]
+        assert_eq!(result.unwrap(), std::env::temp_dir().join("name.json"));
     }
 }
