@@ -475,6 +475,7 @@ dependencies = [
 name = "aw-tauri"
 version = "0.1.0"
 dependencies = [
+ "auto-launch",
  "aw-datastore",
  "aw-server",
  "chrono",
