@@ -145,9 +145,12 @@ fn single_instance_plugin<R: tauri::Runtime>(profile: &str) -> tauri::plugin::Ta
 /// should quit first.
 fn notify_already_running<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
     let version = aw_server::version::version_string();
-    let executable = std::env::current_exe()
+    // `current_exe()` is a temporary mount for an AppImage run
+    // (`/tmp/.mount_*/aw-tauri`), which says nothing about which build is
+    // running; the registered path is the image the user launched.
+    let executable = crate::autostart_entry::expected_registered_path()
         .map(|path| path.display().to_string())
-        .unwrap_or_else(|_| "(unknown path)".to_string());
+        .unwrap_or_else(|| "(unknown path)".to_string());
     let body = already_running_message(&version, &executable);
     if let Err(e) = app
         .notification()

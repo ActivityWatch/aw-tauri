@@ -5,9 +5,10 @@
 //! end up with an entry that runs a path which no longer exists: login boots
 //! nothing, and the app has no way to tell the user why.
 //!
-//! These helpers read the registered command and compare it with the path the
-//! app *would* register right now, so [`crate::autostart::refresh_registered_path`]
-//! can rewrite the entry in place.
+//! These helpers read the registered executable and compare it with the path
+//! the app *would* register right now, so
+//! [`crate::autostart::refresh_registered_path`] can rewrite the entry in
+//! place.
 
 use std::path::{Path, PathBuf};
 
@@ -17,6 +18,10 @@ use std::path::{Path, PathBuf};
 /// run registers the image path (`$APPIMAGE`), not the extracted binary
 /// inside the mount point, so comparing against `current_exe()` alone would
 /// report a mismatch for every AppImage install.
+///
+/// It is also the path worth showing the user: for an AppImage run,
+/// `current_exe()` is a temporary mount (`/tmp/.mount_*/aw-tauri`) that says
+/// nothing about which build is running.
 pub fn expected_registered_path() -> Option<PathBuf> {
     #[cfg(target_os = "linux")]
     let appimage = std::env::var_os("APPIMAGE")
@@ -37,23 +42,23 @@ pub fn expected_registered_path_with(
     appimage.or(current_exe)
 }
 
-/// The command the OS autostart entry runs, or `None` when it cannot be read.
+/// The executable the OS autostart entry runs, as a path string.
 ///
 /// `None` means "unknown", not "not registered": an unsupported platform, an
 /// unreadable file, or an entry the user disabled in place. Callers must not
 /// treat that as a mismatch.
-pub fn registered_command(app_name: &str) -> Option<String> {
+pub fn registered_executable(app_name: &str) -> Option<String> {
     #[cfg(target_os = "linux")]
     {
-        linux_registered_command(app_name)
+        linux_registered_executable(app_name)
     }
     #[cfg(target_os = "macos")]
     {
-        macos_registered_command(app_name)
+        macos_registered_executable(app_name)
     }
     #[cfg(windows)]
     {
-        windows_registered_command(app_name)
+        windows_registered_executable(app_name)
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
     {
@@ -62,7 +67,7 @@ pub fn registered_command(app_name: &str) -> Option<String> {
     }
 }
 
-/// The executable token of a registered command.
+/// The executable token of a command line.
 ///
 /// Handles the quoting used by desktop entries (`Exec="/path with spaces/x"`).
 pub fn command_executable(command: &str) -> Option<String> {
@@ -76,17 +81,14 @@ pub fn command_executable(command: &str) -> Option<String> {
     trimmed.split_whitespace().next().map(|s| s.to_string())
 }
 
-/// Whether `command` runs the executable at `expected`.
+/// Whether the executable `executable` is the one at `expected`.
 ///
 /// Paths are compared literally first, then canonically (so a symlinked
 /// install still matches). A path that no longer exists — the stale AppImage
 /// this whole module exists for — canonicalizes to an error, and the literal
 /// comparison already failed, so it counts as a mismatch.
-pub fn command_matches_path(command: &str, expected: &Path) -> bool {
-    let Some(executable) = command_executable(command) else {
-        return false;
-    };
-    let executable = Path::new(&executable);
+pub fn executable_matches_path(executable: &str, expected: &Path) -> bool {
+    let executable = Path::new(executable);
     if executable == expected {
         return true;
     }
@@ -121,14 +123,14 @@ fn plist_program_arguments(contents: &str) -> Option<String> {
 }
 
 #[cfg(target_os = "linux")]
-fn linux_registered_command(app_name: &str) -> Option<String> {
+fn linux_registered_executable(app_name: &str) -> Option<String> {
     let home = dirs::home_dir()?;
-    linux_registered_command_in(&home, app_name)
+    linux_registered_executable_in(&home, app_name)
 }
 
-/// Read the XDG autostart entry of `app_name` below `home`.
+/// Read the executable of the XDG autostart entry of `app_name` below `home`.
 #[cfg(target_os = "linux")]
-pub fn linux_registered_command_in(home: &Path, app_name: &str) -> Option<String> {
+pub fn linux_registered_executable_in(home: &Path, app_name: &str) -> Option<String> {
     let path = home
         .join(".config/autostart")
         .join(format!("{app_name}.desktop"));
@@ -138,11 +140,12 @@ pub fn linux_registered_command_in(home: &Path, app_name: &str) -> Option<String
     if crate::autostart::is_entry_hidden(&contents) {
         return None;
     }
-    desktop_exec(&contents)
+    // The `Exec=` line is a command line: the executable comes first.
+    command_executable(&desktop_exec(&contents)?)
 }
 
 #[cfg(target_os = "macos")]
-fn macos_registered_command(app_name: &str) -> Option<String> {
+fn macos_registered_executable(app_name: &str) -> Option<String> {
     // Only the LaunchAgent launcher writes a readable file. The default
     // profile uses AppleScript login items, which cannot be read back, so
     // there is nothing to compare and the entry is left alone.
@@ -150,23 +153,26 @@ fn macos_registered_command(app_name: &str) -> Option<String> {
         .join("Library/LaunchAgents")
         .join(format!("{app_name}.plist"));
     let contents = std::fs::read_to_string(path).ok()?;
+    // `ProgramArguments[0]` is the executable itself, not a command line, so
+    // it is used verbatim: splitting it would break on a path with spaces.
     plist_program_arguments(&contents)
 }
 
 #[cfg(windows)]
-fn windows_registered_command(app_name: &str) -> Option<String> {
+fn windows_registered_executable(app_name: &str) -> Option<String> {
     use winreg::enums::HKEY_CURRENT_USER;
     use winreg::RegKey;
     let key = RegKey::predef(HKEY_CURRENT_USER)
         .open_subkey(r"SOFTWARE\Microsoft\Windows\CurrentVersion\Run")
         .ok()?;
-    key.get_value::<String, _>(app_name).ok()
+    // The `Run` value is a command line: the executable comes first.
+    command_executable(&key.get_value::<String, _>(app_name).ok()?)
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        command_executable, command_matches_path, desktop_exec, expected_registered_path_with,
+        command_executable, desktop_exec, executable_matches_path, expected_registered_path_with,
         plist_program_arguments,
     };
     use std::path::{Path, PathBuf};
@@ -206,22 +212,19 @@ mod tests {
     }
 
     #[test]
-    fn command_matches_path_compares_the_executable_only() {
+    fn executable_matches_path_compares_the_executable_only() {
         let expected = Path::new("/opt/aw-tauri");
-        assert!(command_matches_path("/opt/aw-tauri --profile x", expected));
-        assert!(!command_matches_path(
-            "/opt/aw-tauri-old --profile x",
-            expected
-        ));
-        assert!(!command_matches_path("", expected));
+        assert!(executable_matches_path("/opt/aw-tauri", expected));
+        assert!(!executable_matches_path("/opt/aw-tauri-old", expected));
+        assert!(!executable_matches_path("", expected));
     }
 
     #[test]
-    fn command_matches_path_detects_a_moved_install() {
+    fn executable_matches_path_detects_a_moved_install() {
         // The old AppImage path is gone, so only a literal comparison can
         // decide — and it must report a mismatch.
         let expected = Path::new("/home/user/Downloads/aw-v0.14.2.AppImage");
-        assert!(!command_matches_path(
+        assert!(!executable_matches_path(
             "/home/user/Downloads/aw-v0.14.0.AppImage",
             expected
         ));
@@ -246,6 +249,7 @@ mod tests {
         assert_eq!(expected, Some(PathBuf::from("/usr/bin/aw-tauri")));
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn a_stale_entry_is_read_and_detected() {
         // A moved AppImage: the entry still runs the old image while the build
@@ -259,12 +263,14 @@ mod tests {
         )
         .expect("write desktop entry");
 
-        let command = linux_command_in(&home, "aw-tauri");
-        assert_eq!(command, Some("/home/user/aw-v0.14.0.AppImage".to_string()));
+        let executable =
+            super::linux_registered_executable_in(&home, "aw-tauri").expect("entry should be read");
+        assert_eq!(executable, "/home/user/aw-v0.14.0.AppImage");
         let expected = PathBuf::from("/home/user/aw-v0.14.2.AppImage");
-        assert!(!command_matches_path(&command.unwrap(), &expected));
+        assert!(!executable_matches_path(&executable, &expected));
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn a_hidden_entry_is_not_read() {
         // A hidden entry is one the user disabled in place: it must not be
@@ -277,7 +283,10 @@ mod tests {
             "[Desktop Entry]\nType=Application\nName=aw-tauri\nExec=/opt/aw-tauri\nHidden=true\n",
         )
         .expect("write desktop entry");
-        assert_eq!(linux_command_in(&home, "aw-tauri"), None);
+        assert_eq!(
+            super::linux_registered_executable_in(&home, "aw-tauri"),
+            None
+        );
     }
 
     #[test]
@@ -299,6 +308,20 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_plist_path_with_spaces_is_kept_whole() {
+        // `ProgramArguments[0]` is a path, not a command line: splitting it
+        // would make every install with a space in its path look moved.
+        let plist = "<key>ProgramArguments</key><array><string>/Applications/Activity Watch/aw-tauri</string></array>";
+        let executable = plist_program_arguments(plist).expect("path");
+        assert_eq!(executable, "/Applications/Activity Watch/aw-tauri");
+        assert!(executable_matches_path(
+            &executable,
+            Path::new("/Applications/Activity Watch/aw-tauri")
+        ));
+    }
+
+    #[cfg(target_os = "linux")]
     fn temp_home() -> PathBuf {
         let path = std::env::temp_dir().join(format!(
             "aw-tauri-autostart-entry-{}-{}",
@@ -310,18 +333,5 @@ mod tests {
         ));
         std::fs::create_dir_all(&path).expect("create temp home");
         path
-    }
-
-    /// The Linux reader, or a stub on other platforms so the tests above still
-    /// exercise the comparison logic everywhere.
-    #[cfg(target_os = "linux")]
-    fn linux_command_in(home: &Path, app_name: &str) -> Option<String> {
-        super::linux_registered_command_in(home, app_name)
-    }
-
-    #[cfg(not(target_os = "linux"))]
-    fn linux_command_in(home: &Path, app_name: &str) -> Option<String> {
-        let _ = (home, app_name);
-        None
     }
 }

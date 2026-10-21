@@ -243,17 +243,18 @@ pub fn refresh_registered_path(app: &AppHandle) -> bool {
     let Some(expected) = crate::autostart_entry::expected_registered_path() else {
         return false;
     };
-    let Some(command) = crate::autostart_entry::registered_command(&autostart_entry_name(app))
+    let Some(executable) =
+        crate::autostart_entry::registered_executable(&autostart_entry_name(app))
     else {
         // Unknown (unsupported platform, hidden entry, unreadable file): there
         // is nothing to compare against, so leave the entry alone.
         return false;
     };
-    if crate::autostart_entry::command_matches_path(&command, &expected) {
+    if crate::autostart_entry::executable_matches_path(&executable, &expected) {
         return false;
     }
     info!(
-        "Autostart entry runs '{command}' but this build is '{}'; re-registering",
+        "Autostart entry runs '{executable}' but this build is '{}'; re-registering",
         expected.display()
     );
     match app.autolaunch().enable() {
