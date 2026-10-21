@@ -1527,7 +1527,8 @@ mod tests {
         let message = rejected_launch_message("/home/u/aw-v0.14.0.AppImage");
         assert!(message.contains("/home/u/aw-v0.14.0.AppImage"));
         assert!(message.contains("Quit the running instance"));
-        assert!(!message.contains("0.14.1"));
+        assert!(message.contains("Requested launch: /home/u/aw-v0.14.0.AppImage"));
+        assert!(!message.contains("/home/u/aw-v0.14.0.AppImage is already running"));
     }
 
     #[test]

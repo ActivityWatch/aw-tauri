@@ -81,10 +81,21 @@ pub fn command_executable(command: &str) -> Option<String> {
     trimmed.split_whitespace().next().map(|s| s.to_string())
 }
 
+// Refuse wrappers rather than guessing which later argument is ActivityWatch.
+// Split both path separators so the same guard can be regression-tested on Linux.
+fn is_activitywatch_executable(executable: &str) -> bool {
+    let name = executable.rsplit(['/', '\\']).next().unwrap_or("");
+    matches!(name, "aw-tauri" | "aw-tauri.exe" | "aw" | "aw.AppImage")
+        || (name.starts_with("aw-") && name.ends_with(".AppImage"))
+}
+
 /// Replace only the executable token, retaining the original argument suffix.
 #[cfg(any(target_os = "linux", windows, test))]
 fn replace_command_executable(command: &str, expected: &str) -> Option<String> {
     let trimmed = command.trim_start();
+    if !is_activitywatch_executable(&command_executable(trimmed)?) {
+        return None;
+    }
     let end = if let Some(rest) = trimmed.strip_prefix('"') {
         rest.find('"')? + 2
     } else if let Some(rest) = trimmed.strip_prefix('\'') {
@@ -115,16 +126,7 @@ fn replace_desktop_executable(contents: &str, expected: &str) -> Option<String> 
             let start = offset + line.find('=')? + 1;
             let end = offset + line.trim_end_matches(['\r', '\n']).len();
             let original = &contents[start..end];
-            let executable = command_executable(original)?;
-            let name = Path::new(&executable).file_name()?.to_str()?;
-            // Only rewrite a direct ActivityWatch launch. A wrapper's first
-            // token (env, sh, a custom launcher) is not the executable to move.
-            // Unknown/custom AppImage names are deliberately left untouched.
-            if !matches!(name, "aw-tauri" | "aw" | "aw.AppImage")
-                && !(name.starts_with("aw-") && name.ends_with(".AppImage"))
-            {
-                return None;
-            }
+
             let command = replace_command_executable(original, expected)?;
             return Some(format!(
                 "{}{command}{}",
@@ -144,6 +146,9 @@ fn replace_plist_executable(contents: &str, expected: &str) -> Option<String> {
     let end_array = array + contents[array..].find("</array>")?;
     let start = array + contents[array..end_array].find("<string>")? + "<string>".len();
     let end = start + contents[start..end_array].find("</string>")?;
+    if !is_activitywatch_executable(&contents[start..end]) {
+        return None;
+    }
     let escaped = expected
         .replace('&', "&amp;")
         .replace('<', "&lt;")
@@ -370,6 +375,24 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&path).unwrap(), disabled);
         assert!(super::refresh_file(&home.join("missing.desktop"), "/new/aw").is_err());
         assert!(!home.join("missing.desktop").exists());
+    }
+
+    #[test]
+    fn refreshing_commands_and_plists_refuses_wrappers_on_every_platform() {
+        for command in [
+            r#""C:\tools\launcher.exe" "C:\old\aw-tauri.exe" --mini"#,
+            "/usr/bin/env /old/aw-tauri --mini",
+        ] {
+            assert_eq!(super::replace_command_executable(command, "/new/aw"), None);
+        }
+        let plist = "<key>ProgramArguments</key><array><string>/usr/bin/env</string><string>/old/aw-tauri</string></array>";
+        assert_eq!(super::replace_plist_executable(plist, "/new/aw"), None);
+        let direct = super::replace_command_executable(
+            r#""C:\old\aw-tauri.exe" --mini --port 5700"#,
+            r"C:\new\aw-tauri.exe",
+        )
+        .expect("direct Windows launch must be refreshable");
+        assert!(direct.ends_with(" --mini --port 5700"));
     }
 
     #[test]
