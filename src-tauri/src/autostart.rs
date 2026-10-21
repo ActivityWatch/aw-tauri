@@ -475,10 +475,12 @@ fn report_failure(app: &AppHandle, message: &str) {
 /// startup, so a toggle doesn't revert edits made in the meantime.
 fn persist_enabled(enabled: bool) -> Result<(), String> {
     let _guard = PERSIST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let path = get_config_path();
+    persist_enabled_at(&get_config_path(), enabled)
+}
 
-    if let Some(updated) = read_and_patch(&path, enabled) {
-        return crate::config_edit::write_atomic(&path, updated)
+fn persist_enabled_at(path: &Path, enabled: bool) -> Result<(), String> {
+    if let Some(updated) = read_and_patch(path, enabled) {
+        return crate::config_edit::write_atomic(path, updated)
             .map_err(|e| format!("Failed to write config file {}: {e}", path.display()));
     }
 
@@ -487,7 +489,7 @@ fn persist_enabled(enabled: bool) -> Result<(), String> {
     // rewrite. If the file exists but is malformed we return an error rather
     // than silently overwriting it with the startup-cached values — that would
     // discard edits the user made to unrelated fields after startup.
-    let mut config = match std::fs::read_to_string(&path) {
+    let mut config = match std::fs::read_to_string(path) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             // New install: no file yet, safe to seed from startup defaults.
             get_config().clone()
@@ -510,7 +512,7 @@ fn persist_enabled(enabled: bool) -> Result<(), String> {
         std::fs::create_dir_all(parent)
             .map_err(|e| format!("Failed to create config dir {}: {e}", parent.display()))?;
     }
-    write_formatted_config(&config, &path)
+    write_formatted_config(&config, path)
         .map_err(|e| format!("Failed to write config file {}: {e}", path.display()))
 }
 
@@ -604,7 +606,10 @@ fn is_dotted_autostart_enabled(trimmed: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_entry_hidden, patch_autostart_enabled, remove_legacy_file_if_owned};
+    use super::{
+        is_entry_hidden, patch_autostart_enabled, persist_enabled_at, read_and_patch,
+        remove_legacy_file_if_owned,
+    };
     use std::fs;
 
     const CONFIG: &str = r#"port = 5600
@@ -621,6 +626,38 @@ modules = [
 [updates]
 auto_download = true
 "#;
+
+    #[test]
+    fn fallback_preserves_escaped_control_characters() {
+        let source = r#"port = 5601
+discovery_paths = ["/tmp/a\tb"]
+
+["autostart"]
+enabled = true
+minimized = false
+modules = ["aw-watcher-afk", { name = "aw-test", args = "--label='one\ntwo'" }]
+
+[updates]
+auto_download = false
+
+[module_args]
+"aw-test" = "--label='one\ntwo' --path='C:\\Data\\\"quoted\"'"
+"aw-\ntest" = "\b\t\n\f\r\u0000\u001F\u007F café 🦀"
+"#;
+        let path = write_temp_entry("config-fallback", source);
+        let mut expected: toml::Value = toml::from_str(source).expect("valid original TOML");
+        assert!(
+            read_and_patch(&path, false).is_none(),
+            "must exercise fallback"
+        );
+
+        persist_enabled_at(&path, false).expect("persist through full rewrite");
+        let rewritten = fs::read_to_string(&path).unwrap();
+        fs::remove_file(&path).unwrap();
+        let actual: toml::Value = toml::from_str(&rewritten).expect("rewritten config must parse");
+        expected["autostart"]["enabled"] = toml::Value::Boolean(false);
+        assert_eq!(actual, expected, "only autostart.enabled may change");
+    }
 
     #[test]
     fn patch_flips_the_value_and_keeps_everything_else() {
