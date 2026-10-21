@@ -93,7 +93,9 @@ fn is_activitywatch_executable(executable: &str) -> bool {
 #[cfg(any(target_os = "linux", windows, test))]
 fn replace_command_executable(command: &str, expected: &str) -> Option<String> {
     let trimmed = command.trim_start();
-    if !is_activitywatch_executable(&command_executable(trimmed)?) {
+    if !is_activitywatch_executable(&command_executable(trimmed)?)
+        || !is_activitywatch_executable(expected)
+    {
         return None;
     }
     let end = if let Some(rest) = trimmed.strip_prefix('"') {
@@ -146,7 +148,8 @@ fn replace_plist_executable(contents: &str, expected: &str) -> Option<String> {
     let end_array = array + contents[array..].find("</array>")?;
     let start = array + contents[array..end_array].find("<string>")? + "<string>".len();
     let end = start + contents[start..end_array].find("</string>")?;
-    if !is_activitywatch_executable(&contents[start..end]) {
+    if !is_activitywatch_executable(&contents[start..end]) || !is_activitywatch_executable(expected)
+    {
         return None;
     }
     let escaped = expected
@@ -318,9 +321,36 @@ mod tests {
         assert_eq!(
             super::replace_command_executable(
                 "\"/old/aw.AppImage\" --mini --port 5700",
+                "/new/aw-Activity Watch.AppImage"
+            ),
+            Some("\"/new/aw-Activity Watch.AppImage\" --mini --port 5700".to_string())
+        );
+    }
+
+    #[test]
+    fn refreshing_supported_renames_remains_refreshable() {
+        let first = super::replace_command_executable(
+            "/old/aw.AppImage --mini",
+            "/new/aw-Activity Watch.AppImage",
+        )
+        .unwrap();
+        assert_eq!(
+            super::replace_command_executable(&first, "/next/aw.AppImage"),
+            Some("\"/next/aw.AppImage\" --mini".to_string())
+        );
+        // Do not create a registration that the ownership guard cannot later
+        // recognize. Arbitrary renamed images are intentionally unsupported.
+        assert_eq!(
+            super::replace_command_executable(
+                "/old/aw.AppImage --mini",
                 "/new/Activity Watch.AppImage"
             ),
-            Some("\"/new/Activity Watch.AppImage\" --mini --port 5700".to_string())
+            None
+        );
+        let plist = "<key>ProgramArguments</key><array><string>/old/aw-tauri</string></array>";
+        assert_eq!(
+            super::replace_plist_executable(plist, "/new/custom-launcher"),
+            None
         );
     }
 
@@ -363,11 +393,11 @@ mod tests {
         let path = home.join("custom.desktop");
         let entry = "[Desktop Entry]\nName=Custom\nExec=/old/aw --mini --port 5700\nHidden=false\n";
         std::fs::write(&path, entry).unwrap();
-        super::refresh_file(&path, "/new/Activity Watch.AppImage").unwrap();
+        super::refresh_file(&path, "/new/aw-Activity Watch.AppImage").unwrap();
         let updated = std::fs::read_to_string(&path).unwrap();
         assert_eq!(
             updated,
-            entry.replace("/old/aw", "\"/new/Activity Watch.AppImage\"")
+            entry.replace("/old/aw", "\"/new/aw-Activity Watch.AppImage\"")
         );
         let disabled = entry.replace("Hidden=false", "Hidden=true");
         std::fs::write(&path, &disabled).unwrap();
@@ -412,8 +442,8 @@ mod tests {
     fn refreshing_plist_keeps_arguments_and_escapes_path() {
         let entry = "<key>ProgramArguments</key><array><string>/old/aw</string><string>--mini</string></array>";
         assert_eq!(
-            super::replace_plist_executable(entry, "/new/A&B"),
-            Some(entry.replace("/old/aw", "/new/A&amp;B"))
+            super::replace_plist_executable(entry, "/new/A&B/aw-tauri"),
+            Some(entry.replace("/old/aw", "/new/A&amp;B/aw-tauri"))
         );
     }
 
