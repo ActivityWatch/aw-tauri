@@ -4,7 +4,8 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "test": "node --test tests/*.test.mjs"
   },
   "devDependencies": {
     "@tauri-apps/cli": "2.12.1"

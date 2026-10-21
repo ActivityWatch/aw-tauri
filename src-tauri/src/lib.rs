@@ -1173,7 +1173,12 @@ pub fn run() {
                     document.addEventListener('click', function(e) {
                         var el = e.target;
                         while (el && el.tagName !== 'A') { el = el.parentElement; }
-                        if (el && el.href && !/^(https?:\/\/(localhost|127\.0\.0\.1)|tauri:|about:)/.test(el.href)) {
+                        if (!el || !el.href) { return; }
+                        // Use parsed hosts: localhost.example.com and localhost@evil.example
+                        // are external even though their URLs start with a local-looking prefix.
+                        var localHttp = (el.protocol === 'http:' || el.protocol === 'https:') &&
+                            (el.hostname === 'localhost' || el.hostname === '127.0.0.1');
+                        if (!localHttp && el.protocol !== 'tauri:' && el.protocol !== 'about:') {
                             e.preventDefault();
                             e.stopPropagation();
                             window.__TAURI_INTERNALS__.invoke('open_external', { url: el.href });
