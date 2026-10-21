@@ -512,6 +512,7 @@ dependencies = [
  "tray-icon 0.21.3",
  "winapi",
  "winreg 0.55.0",
+ "zbus",
 ]
 
 [[package]]

@@ -257,7 +257,7 @@ pub fn refresh_registered_path(app: &AppHandle) -> bool {
         "Autostart entry runs '{executable}' but this build is '{}'; re-registering",
         expected.display()
     );
-    match app.autolaunch().enable() {
+    match crate::autostart_entry::refresh_executable(&autostart_entry_name(app), &expected) {
         Ok(()) => {
             set_cached(true);
             info!("Autostart entry now runs '{}'", expected.display());

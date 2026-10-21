@@ -81,6 +81,126 @@ pub fn command_executable(command: &str) -> Option<String> {
     trimmed.split_whitespace().next().map(|s| s.to_string())
 }
 
+/// Replace only the executable token, retaining the original argument suffix.
+#[cfg(any(target_os = "linux", windows, test))]
+fn replace_command_executable(command: &str, expected: &str) -> Option<String> {
+    let trimmed = command.trim_start();
+    let end = if let Some(rest) = trimmed.strip_prefix('"') {
+        rest.find('"')? + 2
+    } else if let Some(rest) = trimmed.strip_prefix('\'') {
+        rest.find('\'')? + 2
+    } else {
+        trimmed.find(char::is_whitespace).unwrap_or(trimmed.len())
+    };
+    if end == 0
+        || !trimmed[end..].starts_with(char::is_whitespace) && end != trimmed.len()
+        || expected.contains(['"', '\n', '\r'])
+    {
+        return None;
+    }
+    #[cfg(target_os = "linux")]
+    let expected = expected
+        .replace('\\', "\\\\\\\\")
+        .replace('$', "\\\\$")
+        .replace('`', "\\\\`")
+        .replace('%', "%%");
+    Some(format!("\"{expected}\"{}", &trimmed[end..]))
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn replace_desktop_executable(contents: &str, expected: &str) -> Option<String> {
+    let mut offset = 0;
+    for line in contents.split_inclusive('\n') {
+        if line.trim_start().starts_with("Exec=") {
+            let start = offset + line.find('=')? + 1;
+            let end = offset + line.trim_end_matches(['\r', '\n']).len();
+            let command = replace_command_executable(&contents[start..end], expected)?;
+            return Some(format!(
+                "{}{command}{}",
+                &contents[..start],
+                &contents[end..]
+            ));
+        }
+        offset += line.len();
+    }
+    None
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn replace_plist_executable(contents: &str, expected: &str) -> Option<String> {
+    let array = contents.find("<key>ProgramArguments</key>")?;
+    let array = array + contents[array..].find("<array>")?;
+    let end_array = array + contents[array..].find("</array>")?;
+    let start = array + contents[array..end_array].find("<string>")? + "<string>".len();
+    let end = start + contents[start..end_array].find("</string>")?;
+    let escaped = expected
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;");
+    Some(format!(
+        "{}{escaped}{}",
+        &contents[..start],
+        &contents[end..]
+    ))
+}
+
+/// Refresh in place, rather than re-registering and losing user arguments.
+pub fn refresh_executable(app_name: &str, expected: &Path) -> std::io::Result<()> {
+    let expected = expected
+        .to_str()
+        .ok_or_else(|| std::io::Error::other("non-UTF-8 executable path"))?;
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        let home =
+            dirs::home_dir().ok_or_else(|| std::io::Error::other("home directory unavailable"))?;
+        #[cfg(target_os = "linux")]
+        let path = home
+            .join(".config/autostart")
+            .join(format!("{app_name}.desktop"));
+        #[cfg(target_os = "macos")]
+        let path = home
+            .join("Library/LaunchAgents")
+            .join(format!("{app_name}.plist"));
+        refresh_file(&path, expected)
+    }
+    #[cfg(windows)]
+    {
+        use winreg::{
+            enums::{HKEY_CURRENT_USER, KEY_READ, KEY_WRITE},
+            RegKey,
+        };
+        let key = RegKey::predef(HKEY_CURRENT_USER).open_subkey_with_flags(
+            r"SOFTWARE\Microsoft\Windows\CurrentVersion\Run",
+            KEY_READ | KEY_WRITE,
+        )?;
+        let command: String = key.get_value(app_name)?;
+        let updated = replace_command_executable(&command, expected)
+            .ok_or_else(|| std::io::Error::other("unrecognized autostart command"))?;
+        key.set_value(app_name, &updated)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+    {
+        let _ = (app_name, expected);
+        Err(std::io::Error::other("unsupported platform"))
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn refresh_file(path: &Path, expected: &str) -> std::io::Result<()> {
+    let contents = std::fs::read_to_string(path)?;
+    #[cfg(target_os = "linux")]
+    let updated = if crate::autostart::is_entry_hidden(&contents) {
+        None
+    } else {
+        replace_desktop_executable(&contents, expected)
+    };
+    #[cfg(target_os = "macos")]
+    let updated = replace_plist_executable(&contents, expected);
+    let updated =
+        updated.ok_or_else(|| std::io::Error::other("unrecognized or disabled autostart entry"))?;
+    crate::config_edit::write_atomic(path, updated)
+}
+
 /// Whether the executable `executable` is the one at `expected`.
 ///
 /// Paths are compared literally first, then canonically (so a symlinked
@@ -176,6 +296,74 @@ mod tests {
         plist_program_arguments,
     };
     use std::path::{Path, PathBuf};
+
+    #[test]
+    fn refreshing_command_preserves_custom_arguments() {
+        assert_eq!(
+            super::replace_command_executable(
+                "\"/old/aw.AppImage\" --mini --port 5700",
+                "/new/Activity Watch.AppImage"
+            ),
+            Some("\"/new/Activity Watch.AppImage\" --mini --port 5700".to_string())
+        );
+    }
+
+    #[test]
+    fn refreshing_desktop_entry_keeps_other_fields_and_arguments() {
+        let entry =
+            "[Desktop Entry]\r\nName=Custom\r\nExec=/old/aw --mini --port 5700\r\nHidden=false\r\n";
+        assert_eq!(
+            super::replace_desktop_executable(entry, "/new/aw"),
+            Some(entry.replace("Exec=/old/aw", "Exec=\"/new/aw\""))
+        );
+        assert_eq!(
+            super::replace_desktop_executable("[Desktop Entry]\n", "/new/aw"),
+            None
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn refreshing_file_preserves_arguments_and_disabled_entries() {
+        let home = temp_home();
+        let path = home.join("custom.desktop");
+        let entry = "[Desktop Entry]\nName=Custom\nExec=/old/aw --mini --port 5700\nHidden=false\n";
+        std::fs::write(&path, entry).unwrap();
+        super::refresh_file(&path, "/new/Activity Watch.AppImage").unwrap();
+        let updated = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            updated,
+            entry.replace("/old/aw", "\"/new/Activity Watch.AppImage\"")
+        );
+        let disabled = entry.replace("Hidden=false", "Hidden=true");
+        std::fs::write(&path, &disabled).unwrap();
+        assert!(super::refresh_file(&path, "/new/aw").is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), disabled);
+        assert!(super::refresh_file(&home.join("missing.desktop"), "/new/aw").is_err());
+        assert!(!home.join("missing.desktop").exists());
+    }
+
+    #[test]
+    fn refreshing_refuses_malformed_commands() {
+        assert_eq!(
+            super::replace_command_executable("\"/old/aw\"broken --mini", "/new/aw"),
+            None
+        );
+        assert_eq!(
+            super::replace_command_executable("\"/old/aw", "/new/aw"),
+            None
+        );
+        assert_eq!(super::replace_command_executable("  ", "/new/aw"), None);
+    }
+
+    #[test]
+    fn refreshing_plist_keeps_arguments_and_escapes_path() {
+        let entry = "<key>ProgramArguments</key><array><string>/old/aw</string><string>--mini</string></array>";
+        assert_eq!(
+            super::replace_plist_executable(entry, "/new/A&B"),
+            Some(entry.replace("/old/aw", "/new/A&amp;B"))
+        );
+    }
 
     #[test]
     fn desktop_exec_reads_the_exec_line() {
