@@ -114,7 +114,18 @@ fn replace_desktop_executable(contents: &str, expected: &str) -> Option<String> 
         if line.trim_start().starts_with("Exec=") {
             let start = offset + line.find('=')? + 1;
             let end = offset + line.trim_end_matches(['\r', '\n']).len();
-            let command = replace_command_executable(&contents[start..end], expected)?;
+            let original = &contents[start..end];
+            let executable = command_executable(original)?;
+            let name = Path::new(&executable).file_name()?.to_str()?;
+            // Only rewrite a direct ActivityWatch launch. A wrapper's first
+            // token (env, sh, a custom launcher) is not the executable to move.
+            // Unknown/custom AppImage names are deliberately left untouched.
+            if !matches!(name, "aw-tauri" | "aw" | "aw.AppImage")
+                && !(name.starts_with("aw-") && name.ends_with(".AppImage"))
+            {
+                return None;
+            }
+            let command = replace_command_executable(original, expected)?;
             return Some(format!(
                 "{}{command}{}",
                 &contents[..start],
@@ -320,6 +331,24 @@ mod tests {
             super::replace_desktop_executable("[Desktop Entry]\n", "/new/aw"),
             None
         );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn refreshing_file_leaves_wrapped_commands_untouched() {
+        let home = temp_home();
+        let path = home.join("custom.desktop");
+        for command in [
+            "env WEBKIT_DISABLE_DMABUF_RENDERER=1 /old/aw.AppImage --mini",
+            "/usr/bin/env WEBKIT_DISABLE_DMABUF_RENDERER=1 /old/aw.AppImage --mini",
+            "/bin/sh -c '/old/aw.AppImage --mini'",
+            "/opt/custom-launcher /old/aw.AppImage --mini",
+        ] {
+            let entry = format!("[Desktop Entry]\nExec={command}\nHidden=false\n");
+            std::fs::write(&path, &entry).unwrap();
+            assert!(super::refresh_file(&path, "/new/aw.AppImage").is_err());
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), entry);
+        }
     }
 
     #[cfg(target_os = "linux")]

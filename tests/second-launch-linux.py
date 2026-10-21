@@ -66,6 +66,7 @@ def main():
             XDG_DATA_HOME=home + "/.local/share",
             XDG_CACHE_HOME=home + "/.cache",
             APPIMAGE=home + "/new-aw.AppImage",
+            AW_PROFILE="default",
         )
         # A file, rather than a pipe, cannot fill and deadlock the child.
         with tempfile.TemporaryFile(mode="w+") as output:
