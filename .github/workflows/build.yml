@@ -73,7 +73,17 @@ jobs:
       # which guards where existing installs keep their data/config.
       - name: Run tests
         shell: bash
-        run: cd src-tauri && cargo test --lib
+        run: |
+          if [[ "$RUNNER_OS" == Windows ]]; then
+            # Tauri embeds its manifest in app binaries, not the lib test harness.
+            # rfd's TaskDialogIndirect import requires Common Controls v6 at load time.
+            # Encoded flags preserve the spaces in the single linker argument.
+            export CARGO_ENCODED_RUSTFLAGS
+            CARGO_ENCODED_RUSTFLAGS=$(printf '%s\x1f%s' \
+              '-Clink-arg=/MANIFEST:EMBED' \
+              "-Clink-arg=/MANIFESTDEPENDENCY:type='win32' name='Microsoft.Windows.Common-Controls' version='6.0.0.0' processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'")
+          fi
+          cd src-tauri && cargo test --lib
 
       - name: Add rust target
         if: matrix.args != null

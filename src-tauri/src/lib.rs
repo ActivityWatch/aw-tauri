@@ -197,7 +197,23 @@ pub(crate) fn get_tray_id() -> &'static TrayIconId {
 
 // Escapes a value for use inside a double-quoted TOML basic string.
 fn toml_escape(value: &str) -> String {
-    value.replace('\\', "\\\\").replace('"', "\\\"")
+    let mut escaped = String::with_capacity(value.len());
+    for c in value.chars() {
+        match c {
+            '\\' => escaped.push_str("\\\\"),
+            '"' => escaped.push_str("\\\""),
+            '\u{08}' => escaped.push_str("\\b"),
+            '\t' => escaped.push_str("\\t"),
+            '\n' => escaped.push_str("\\n"),
+            '\u{0c}' => escaped.push_str("\\f"),
+            '\r' => escaped.push_str("\\r"),
+            '\u{00}'..='\u{1f}' | '\u{7f}' => {
+                escaped.push_str(&format!("\\u{:04X}", c as u32));
+            }
+            _ => escaped.push(c),
+        }
+    }
+    escaped
 }
 
 fn write_formatted_config(config: &UserConfig, path: &Path) -> Result<(), std::io::Error> {
@@ -1421,6 +1437,17 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::{build_dashboard_url, default_linux_modules};
+
+    #[test]
+    fn toml_escape_roundtrips_all_control_characters() {
+        let original: String = (0u8..=0x1f)
+            .chain(std::iter::once(0x7f))
+            .map(char::from)
+            .collect();
+        let source = format!("value = \"{}\"", super::toml_escape(&original));
+        let parsed: toml::Value = toml::from_str(&source).expect("escaped controls must parse");
+        assert_eq!(parsed["value"].as_str(), Some(original.as_str()));
+    }
 
     #[test]
     fn default_linux_modules_prefers_awatcher_when_installed() {
