@@ -256,8 +256,8 @@ fn replace_plist_executable(contents: &str, expected: &str) -> Option<String> {
     let end_array = array + contents[array..].find("</array>")?;
     let start = array + contents[array..end_array].find("<string>")? + "<string>".len();
     let end = start + contents[start..end_array].find("</string>")?;
-    if !is_activitywatch_executable(&contents[start..end]) || !is_activitywatch_executable(expected)
-    {
+    let executable = plist_program_arguments(contents)?;
+    if !is_activitywatch_executable(&executable) || !is_activitywatch_executable(expected) {
         return None;
     }
     let escaped = expected
@@ -363,7 +363,11 @@ fn plist_program_arguments(contents: &str) -> Option<String> {
     let array = array.split_once("</array>")?.0;
     let first = array.split_once("<string>")?.1;
     let value = first.split_once("</string>")?.0;
-    Some(value.trim().to_string())
+    // XML escaping belongs to the file representation, not the filesystem path.
+    // Decode once (including numeric references); malformed entities are unknown.
+    quick_xml::escape::unescape(value)
+        .ok()
+        .map(|path| path.into_owned())
 }
 
 #[cfg(target_os = "linux")]
@@ -643,6 +647,46 @@ mod tests {
             super::replace_plist_executable(entry, "/new/A&B/aw-tauri"),
             Some(entry.replace("/old/aw", "/new/A&amp;B/aw-tauri"))
         );
+    }
+
+    #[test]
+    fn plist_entities_decode_before_comparing_and_after_refresh() {
+        for (encoded, decoded) in [
+            ("A&amp;B", "A&B"),
+            ("A&lt;B&gt;C", "A<B>C"),
+            ("A&quot;B&apos;C", "A\"B'C"),
+            ("A&#38;B&#x26;C", "A&B&C"),
+            ("A&amp;lt;B", "A&lt;B"),
+            ("A&#x1F980;B", "A🦀B"),
+        ] {
+            let path = format!("/Applications/{decoded}/aw-tauri");
+            let entry = format!("<key>ProgramArguments</key><array><string>/Applications/{encoded}/aw-tauri</string><string>--mini</string></array>");
+            let executable = plist_program_arguments(&entry).expect("decoded path");
+            assert!(executable_matches_path(&executable, Path::new(&path)));
+
+            let moved = format!("/Moved/{decoded}/aw-tauri");
+            let refreshed = super::replace_plist_executable(&entry, &moved).expect("refresh");
+            assert!(refreshed.ends_with("<string>--mini</string></array>"));
+            assert_eq!(plist_program_arguments(&refreshed), Some(moved));
+        }
+    }
+
+    #[test]
+    fn plist_refresh_checks_the_decoded_executable_name() {
+        let entry = "<key>ProgramArguments</key><array><string>/old/&#97;w-tauri</string><string>--mini</string></array>";
+        let refreshed = super::replace_plist_executable(entry, "/new/aw-tauri").expect("refresh");
+        assert_eq!(
+            refreshed,
+            entry.replace("/old/&#97;w-tauri", "/new/aw-tauri")
+        );
+        for invalid in ["A&unknown;B", "A&amp", "A&#x110000;B"] {
+            let malformed = entry.replace("/old/&#97;w-tauri", &format!("/{invalid}/aw-tauri"));
+            assert_eq!(plist_program_arguments(&malformed), None);
+            assert_eq!(
+                super::replace_plist_executable(&malformed, "/new/aw-tauri"),
+                None
+            );
+        }
     }
 
     #[test]

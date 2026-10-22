@@ -490,6 +490,7 @@ dependencies = [
  "notify-rust",
  "open",
  "png 0.17.16",
+ "quick-xml",
  "rust-embed",
  "rust-embed-impl",
  "rust-embed-utils",
