@@ -251,11 +251,7 @@ fn replace_desktop_executable(contents: &str, expected: &str) -> Option<String> 
 
 #[cfg(any(target_os = "macos", test))]
 fn replace_plist_executable(contents: &str, expected: &str) -> Option<String> {
-    let array = contents.find("<key>ProgramArguments</key>")?;
-    let array = array + contents[array..].find("<array>")?;
-    let end_array = array + contents[array..].find("</array>")?;
-    let start = array + contents[array..end_array].find("<string>")? + "<string>".len();
-    let end = start + contents[start..end_array].find("</string>")?;
+    let span = plist_executable_span(contents)?;
     let executable = plist_program_arguments(contents)?;
     if !is_activitywatch_executable(&executable) || !is_activitywatch_executable(expected) {
         return None;
@@ -268,8 +264,8 @@ fn replace_plist_executable(contents: &str, expected: &str) -> Option<String> {
         .replace('\r', "&#13;");
     Some(format!(
         "{}{escaped}{}",
-        &contents[..start],
-        &contents[end..]
+        &contents[..span.start],
+        &contents[span.end..]
     ))
 }
 
@@ -357,14 +353,53 @@ fn desktop_exec(contents: &str) -> Option<String> {
     })
 }
 
+/// Locate the active first argument using XML events, not tag-shaped text in
+/// comments. Reader and writer share the same source span to preserve all other
+/// bytes of a user's LaunchAgent.
+#[cfg(any(target_os = "macos", test))]
+fn plist_executable_span(contents: &str) -> Option<std::ops::Range<usize>> {
+    use quick_xml::{events::Event, Reader};
+
+    let mut reader = Reader::from_str(contents);
+    let mut found_key = false;
+    let mut found_array = false;
+    loop {
+        match reader.read_event().ok()? {
+            Event::Comment(_) => {}
+            Event::Text(text) if text.as_ref().bytes().all(|byte| byte.is_ascii_whitespace()) => {}
+            Event::Start(tag) if found_array => {
+                if tag.name().as_ref() != "string" {
+                    return None;
+                }
+                let span = reader.read_to_end(tag.name()).ok()?;
+                let span = span.start as usize..span.end as usize;
+                // Nested markup is not a plain executable path.
+                if contents[span.clone()].contains('<') {
+                    return None;
+                }
+                return Some(span);
+            }
+            Event::Start(tag) if found_key => {
+                if tag.name().as_ref() != "array" {
+                    return None;
+                }
+                found_array = true;
+            }
+            Event::Start(tag) if tag.name().as_ref() == "key" => {
+                let key = reader.read_text(tag.name()).ok()?;
+                found_key = key.as_ref() == "ProgramArguments";
+            }
+            Event::Eof => return None,
+            _ if found_key => return None,
+            _ => {}
+        }
+    }
+}
+
 /// The first `<string>` of the `ProgramArguments` array of a launchd plist.
 #[cfg(any(target_os = "macos", test))]
 fn plist_program_arguments(contents: &str) -> Option<String> {
-    let array = contents.split_once("<key>ProgramArguments</key>")?.1;
-    let array = array.split_once("<array>")?.1;
-    let array = array.split_once("</array>")?.0;
-    let first = array.split_once("<string>")?.1;
-    let value = first.split_once("</string>")?.0;
+    let value = &contents[plist_executable_span(contents)?];
     // XML escaping belongs to the file representation, not the filesystem path.
     // Decode once (including numeric references); malformed entities are unknown.
     quick_xml::escape::unescape(value)
@@ -643,6 +678,41 @@ mod tests {
     }
 
     #[test]
+    fn plist_refresh_ignores_commented_out_arguments() {
+        let commented =
+            "<!-- <key>ProgramArguments</key><array><string>/comment/aw</string></array> -->";
+        for between in ["", "<!-- <array><string>/comment/aw</string></array> -->"] {
+            let entry = format!("<plist><dict>{commented}<key>ProgramArguments</key>{between}<array><!-- <string>/comment/aw</string> --><string>/old/aw</string><string>--mini</string></array></dict></plist>");
+            assert_eq!(plist_program_arguments(&entry), Some("/old/aw".to_string()));
+            let refreshed = super::replace_plist_executable(&entry, "/new/aw-tauri")
+                .expect("active argument must refresh");
+            assert_eq!(refreshed, entry.replace("/old/aw", "/new/aw-tauri"));
+            assert_eq!(
+                plist_program_arguments(&refreshed),
+                Some("/new/aw-tauri".to_string())
+            );
+        }
+        assert_eq!(plist_program_arguments(commented), None);
+        assert_eq!(super::replace_plist_executable(commented, "/new/aw"), None);
+    }
+
+    #[test]
+    fn plist_refresh_refuses_missing_or_non_string_first_arguments() {
+        for value in [
+            "<array/>",
+            "<array></array><string>/old/aw</string>",
+            "<array><integer>1</integer><string>/old/aw</string></array>",
+            "<array><string>/old/aw</array>",
+            "<array><string><!-- /old/aw --></string></array>",
+            "<string>/old/aw</string><array><string>/other/aw</string></array>",
+        ] {
+            let entry = format!("<key>ProgramArguments</key>{value}");
+            assert_eq!(plist_program_arguments(&entry), None, "{entry}");
+            assert_eq!(super::replace_plist_executable(&entry, "/new/aw"), None);
+        }
+    }
+
+    #[test]
     fn refreshing_plist_keeps_arguments_and_escapes_path() {
         let entry = "<key>ProgramArguments</key><array><string>/old/aw</string><string>--mini</string></array>";
         assert_eq!(
@@ -743,21 +813,37 @@ mod tests {
 
     #[test]
     fn executable_matches_path_compares_the_executable_only() {
-        let expected = Path::new("/opt/aw-tauri");
-        assert!(executable_matches_path("/opt/aw-tauri", expected));
-        assert!(!executable_matches_path("/opt/aw-tauri-old", expected));
-        assert!(!executable_matches_path("", expected));
+        let home = temp_home();
+        let expected = home.join("aw-tauri");
+        let other = home.join("aw-tauri-old");
+        std::fs::write(&expected, "current").unwrap();
+        std::fs::write(&other, "old").unwrap();
+        assert!(executable_matches_path(
+            expected.to_str().unwrap(),
+            &expected
+        ));
+        assert!(!executable_matches_path(other.to_str().unwrap(), &expected));
+        assert!(!executable_matches_path("", &expected));
+        #[cfg(unix)]
+        {
+            let link = home.join("aw-tauri-link");
+            std::os::unix::fs::symlink(&expected, &link).unwrap();
+            assert!(executable_matches_path(link.to_str().unwrap(), &expected));
+        }
+        std::fs::remove_dir_all(home).unwrap();
     }
 
     #[test]
     fn executable_matches_path_detects_a_moved_install() {
         // The old AppImage path is gone, so only a literal comparison can
         // decide — and it must report a mismatch.
-        let expected = Path::new("/home/user/Downloads/aw-v0.14.2.AppImage");
-        assert!(!executable_matches_path(
-            "/home/user/Downloads/aw-v0.14.0.AppImage",
-            expected
-        ));
+        let home = temp_home();
+        let expected = home.join("aw-v0.14.2.AppImage");
+        let old = home.join("aw-v0.14.0.AppImage");
+        std::fs::write(&expected, "current").unwrap();
+        assert!(!old.exists());
+        assert!(!executable_matches_path(old.to_str().unwrap(), &expected));
+        std::fs::remove_dir_all(home).unwrap();
     }
 
     #[test]
@@ -851,7 +937,6 @@ mod tests {
         ));
     }
 
-    #[cfg(target_os = "linux")]
     fn temp_home() -> PathBuf {
         let path = std::env::temp_dir().join(format!(
             "aw-tauri-autostart-entry-{}-{}",
