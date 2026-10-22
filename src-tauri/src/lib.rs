@@ -1167,6 +1167,7 @@ pub fn run() {
                 )
                 .title(profile::window_title(&cli_args.profile))
                 .inner_size(800.0, 600.0)
+                .zoom_hotkeys_enabled(true)
                 .visible(false)
                 .initialization_script(
                     r#"
