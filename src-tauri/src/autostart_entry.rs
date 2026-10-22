@@ -263,7 +263,9 @@ fn replace_plist_executable(contents: &str, expected: &str) -> Option<String> {
     let escaped = expected
         .replace('&', "&amp;")
         .replace('<', "&lt;")
-        .replace('>', "&gt;");
+        .replace('>', "&gt;")
+        // XML normalizes literal CR/CRLF; references retain the path's bytes.
+        .replace('\r', "&#13;");
     Some(format!(
         "{}{escaped}{}",
         &contents[..start],
@@ -647,6 +649,22 @@ mod tests {
             super::replace_plist_executable(entry, "/new/A&B/aw-tauri"),
             Some(entry.replace("/old/aw", "/new/A&amp;B/aw-tauri"))
         );
+    }
+
+    #[test]
+    fn refreshing_plist_preserves_carriage_returns_through_xml_parsing() {
+        let entry = "<key>ProgramArguments</key><array><string>/old/aw</string><string>--mini</string></array>";
+        for directory in ["A\rB", "A\r\nB", "A&B\rC"] {
+            let moved = format!("/Applications/{directory}/aw-tauri");
+            let refreshed = super::replace_plist_executable(entry, &moved).expect("refresh");
+            assert!(
+                !refreshed.contains('\r'),
+                "literal carriage returns are normalized by XML parsers"
+            );
+            assert!(refreshed.contains("&#13;"));
+            assert!(refreshed.ends_with("<string>--mini</string></array>"));
+            assert_eq!(plist_program_arguments(&refreshed), Some(moved));
+        }
     }
 
     #[test]
