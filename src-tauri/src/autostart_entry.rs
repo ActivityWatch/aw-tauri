@@ -69,16 +69,122 @@ pub fn registered_executable(app_name: &str) -> Option<String> {
 
 /// The executable token of a command line.
 ///
-/// Handles the quoting used by desktop entries (`Exec="/path with spaces/x"`).
+/// Linux desktop entries have two escaping layers; Windows Run values do not.
 pub fn command_executable(command: &str) -> Option<String> {
+    #[cfg(target_os = "linux")]
+    return desktop_command_token(command).map(|(executable, _)| executable);
+    #[cfg(not(target_os = "linux"))]
+    windows_command_token(command).map(|(executable, _)| executable)
+}
+
+#[cfg(any(not(target_os = "linux"), test))]
+fn windows_command_token(command: &str) -> Option<(String, usize)> {
     let trimmed = command.trim_start();
-    if let Some(rest) = trimmed.strip_prefix('"') {
-        return rest.split('"').next().map(|s| s.to_string());
+    let start = command.len() - trimmed.len();
+    let (executable, end) = if let Some(rest) = trimmed.strip_prefix('"') {
+        let end = rest.find('"')?;
+        (rest[..end].to_string(), end + 2)
+    } else {
+        let end = trimmed.find(char::is_whitespace).unwrap_or(trimmed.len());
+        (trimmed[..end].to_string(), end)
+    };
+    if executable.is_empty()
+        || end < trimmed.len() && !trimmed[end..].starts_with(char::is_whitespace)
+    {
+        return None;
     }
-    if let Some(rest) = trimmed.strip_prefix('\'') {
-        return rest.split('\'').next().map(|s| s.to_string());
+    Some((executable, start + end))
+}
+
+/// Decode the desktop string layer, then the Exec quoting layer. Keep original
+/// byte offsets so replacement never changes the argument suffix.
+#[cfg(any(target_os = "linux", test))]
+fn desktop_command_token(command: &str) -> Option<(String, usize)> {
+    let mut decoded = Vec::new();
+    let mut raw = command.char_indices();
+    while let Some((offset, ch)) = raw.next() {
+        let (ch, end) = if ch == '\\' {
+            let (offset, escaped) = raw.next()?;
+            let ch = match escaped {
+                '\\' => '\\',
+                's' => ' ',
+                'n' => '\n',
+                'r' => '\r',
+                't' => '\t',
+                _ => return None,
+            };
+            (ch, offset + escaped.len_utf8())
+        } else {
+            (ch, offset + ch.len_utf8())
+        };
+        decoded.push((ch, end));
     }
-    trimmed.split_whitespace().next().map(|s| s.to_string())
+    let mut chars = decoded.into_iter().peekable();
+    while chars.peek().is_some_and(|(ch, _)| ch.is_whitespace()) {
+        chars.next();
+    }
+    let quoted = chars.peek()?.0 == '"';
+    if quoted {
+        chars.next();
+    }
+    let mut executable = String::new();
+    let mut end = 0;
+    let mut closed = !quoted;
+    while let Some((ch, offset)) = chars.next() {
+        if quoted && ch == '"' {
+            end = offset;
+            closed = true;
+            if chars.peek().is_some_and(|(ch, _)| !ch.is_whitespace()) {
+                return None;
+            }
+            break;
+        }
+        if !quoted && ch.is_whitespace() {
+            break;
+        }
+        end = offset;
+        let ch = if quoted && ch == '\\' {
+            let (escaped, offset) = chars.next()?;
+            if !matches!(escaped, '"' | '\\' | '$' | '`') {
+                return None;
+            }
+            end = offset;
+            escaped
+        } else if ch == '%' {
+            // Field codes cannot identify a literal executable path.
+            let (escaped, offset) = chars.next()?;
+            if escaped != '%' {
+                return None;
+            }
+            end = offset;
+            '%'
+        } else {
+            if !quoted && matches!(ch, '"' | '\\' | '$' | '`' | '\'') {
+                return None;
+            }
+            ch
+        };
+        executable.push(ch);
+    }
+    (closed && !executable.is_empty()).then_some((executable, end))
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn replace_desktop_command(command: &str, expected: &str) -> Option<String> {
+    let (executable, end) = desktop_command_token(command)?;
+    if !is_activitywatch_executable(&executable)
+        || !is_activitywatch_executable(expected)
+        || expected.contains(['\n', '\r', '\t'])
+    {
+        return None;
+    }
+    let expected = expected
+        .replace('\\', "\\\\\\\\")
+        .replace('"', "\\\\\"")
+        .replace('$', "\\\\$")
+        .replace('`', "\\\\`")
+        .replace('%', "%%");
+    Some(format!("\"{expected}\"{}", &command[end..]))
 }
 
 // Refuse wrappers rather than guessing which later argument is ActivityWatch.
@@ -90,34 +196,24 @@ fn is_activitywatch_executable(executable: &str) -> bool {
 }
 
 /// Replace only the executable token, retaining the original argument suffix.
-#[cfg(any(target_os = "linux", windows, test))]
+#[cfg(any(windows, test))]
 fn replace_command_executable(command: &str, expected: &str) -> Option<String> {
-    let trimmed = command.trim_start();
-    if !is_activitywatch_executable(&command_executable(trimmed)?)
+    #[cfg(target_os = "linux")]
+    return replace_desktop_command(command, expected);
+    #[cfg(not(target_os = "linux"))]
+    replace_windows_command(command, expected)
+}
+
+#[cfg(any(windows, test))]
+fn replace_windows_command(command: &str, expected: &str) -> Option<String> {
+    let (executable, end) = windows_command_token(command)?;
+    if !is_activitywatch_executable(&executable)
         || !is_activitywatch_executable(expected)
-    {
-        return None;
-    }
-    let end = if let Some(rest) = trimmed.strip_prefix('"') {
-        rest.find('"')? + 2
-    } else if let Some(rest) = trimmed.strip_prefix('\'') {
-        rest.find('\'')? + 2
-    } else {
-        trimmed.find(char::is_whitespace).unwrap_or(trimmed.len())
-    };
-    if end == 0
-        || !trimmed[end..].starts_with(char::is_whitespace) && end != trimmed.len()
         || expected.contains(['"', '\n', '\r'])
     {
         return None;
     }
-    #[cfg(target_os = "linux")]
-    let expected = expected
-        .replace('\\', "\\\\\\\\")
-        .replace('$', "\\\\$")
-        .replace('`', "\\\\`")
-        .replace('%', "%%");
-    Some(format!("\"{expected}\"{}", &trimmed[end..]))
+    Some(format!("\"{expected}\"{}", &command[end..]))
 }
 
 /// Whether a desktop-entry line is `Key=value`, allowing spaces around '='.
@@ -141,7 +237,7 @@ fn replace_desktop_executable(contents: &str, expected: &str) -> Option<String> 
             let end = offset + line.trim_end_matches(['\r', '\n']).len();
             let original = &contents[start..end];
 
-            let command = replace_command_executable(original, expected)?;
+            let command = replace_desktop_command(original, expected)?;
             return Some(format!(
                 "{}{command}{}",
                 &contents[..start],
@@ -377,6 +473,77 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn refreshing_desktop_entry_decodes_escaped_quotes_and_remains_refreshable() {
+        let home = temp_home();
+        let path = home.join(".config/autostart/aw-tauri.desktop");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let entry = concat!(
+            "[Desktop Entry]\nName=Custom\n",
+            r#"Exec="/old/A\\"B/aw.AppImage" --mini --port 5700"#,
+            "\nHidden=false\n"
+        );
+        std::fs::write(&path, entry).unwrap();
+        assert_eq!(
+            super::linux_registered_executable_in(&home, "aw-tauri"),
+            Some("/old/A\"B/aw.AppImage".to_string())
+        );
+        let expected = "/new/A\"B/aw.AppImage";
+        super::refresh_file(&path, expected).unwrap();
+        assert_eq!(
+            super::linux_registered_executable_in(&home, "aw-tauri"),
+            Some(expected.to_string())
+        );
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            entry.replace("/old/", "/new/")
+        );
+        super::refresh_file(&path, "/next/aw.AppImage").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            entry.replace(r#"/old/A\\"B/aw.AppImage"#, "/next/aw.AppImage")
+        );
+    }
+
+    #[test]
+    fn desktop_escaping_round_trips_without_touching_arguments() {
+        for expected in [
+            "/new/A\"B/aw.AppImage",
+            "/new/A\\B/aw.AppImage",
+            "/new/A$B/aw.AppImage",
+            "/new/A`B/aw.AppImage",
+            "/new/A%B/aw.AppImage",
+            "/new/A'B/aw.AppImage",
+            "/new/Å B/aw.AppImage",
+        ] {
+            let command = super::replace_desktop_command(
+                "/old/aw.AppImage --mini --title=\"unchanged\" %u",
+                expected,
+            )
+            .unwrap();
+            assert_eq!(
+                super::desktop_command_token(&command).map(|(path, _)| path),
+                Some(expected.to_string()),
+                "{command}"
+            );
+            assert!(command.ends_with(" --mini --title=\"unchanged\" %u"));
+            assert_eq!(
+                super::replace_desktop_command(&command, "/next/aw.AppImage"),
+                Some("\"/next/aw.AppImage\" --mini --title=\"unchanged\" %u".to_string())
+            );
+        }
+        let windows = r#""C:\new\aw-tauri.exe" --mini --port 5700"#;
+        assert_eq!(
+            super::windows_command_token(windows),
+            Some((r"C:\new\aw-tauri.exe".to_string(), 21))
+        );
+        assert_eq!(
+            super::replace_windows_command(windows, r"C:\next\aw-tauri.exe"),
+            Some(r#""C:\next\aw-tauri.exe" --mini --port 5700"#.to_string())
+        );
+    }
+
     #[test]
     fn refreshing_desktop_entry_accepts_spaces_around_equals() {
         // The Desktop Entry Spec permits spaces around '='. desktop_exec already
@@ -448,7 +615,7 @@ mod tests {
         }
         let plist = "<key>ProgramArguments</key><array><string>/usr/bin/env</string><string>/old/aw-tauri</string></array>";
         assert_eq!(super::replace_plist_executable(plist, "/new/aw"), None);
-        let direct = super::replace_command_executable(
+        let direct = super::replace_windows_command(
             r#""C:\old\aw-tauri.exe" --mini --port 5700"#,
             r"C:\new\aw-tauri.exe",
         )
