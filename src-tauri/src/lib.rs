@@ -386,6 +386,22 @@ pub(crate) fn write_notify_enabled(ds: &aw_datastore::Datastore, enabled: bool) 
     }
 }
 
+/// Flush the shared worker before exit, without trapping Quit behind another writer.
+pub(crate) fn close_datastore(datastore: &aw_datastore::Datastore) -> bool {
+    let datastore = datastore.clone();
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
+        datastore.close();
+        let _ = tx.send(());
+    });
+    if let Err(err) = rx.recv_timeout(Duration::from_secs(5)) {
+        error!("Database shutdown did not finish: {err}; pending writes may be lost");
+        false
+    } else {
+        true
+    }
+}
+
 pub fn is_port_available(port: u16) -> std::io::Result<bool> {
     let addr = format!("127.0.0.1:{}", port)
         .parse::<SocketAddr>()
@@ -811,7 +827,7 @@ fn run_daemon() {
         .expect("Failed to lock manager state")
         .stop_modules();
 
-    shutdown_datastore.close();
+    close_datastore(&shutdown_datastore);
 
     if exit_error {
         std::process::exit(1);
@@ -1213,7 +1229,7 @@ pub fn run() {
                     if let Ok(mut state) = server_manager_state.lock() {
                         state.stop_modules();
                     }
-                    shutdown_datastore.close();
+                    close_datastore(&shutdown_datastore);
                     server_app.exit(exit_code);
                 });
 
@@ -1266,7 +1282,8 @@ pub fn run() {
                             .lock()
                             .expect("Failed to acquire manager_state lock");
                         state.stop_modules();
-                        notify_datastore.close();
+                        drop(state);
+                        close_datastore(&notify_datastore);
                         app.exit(0);
                     } else if event.id().0 == "config_folder" {
                         let config_path = get_config_path();
@@ -1477,6 +1494,36 @@ mod tests {
         // A settings helper must not close the shared server worker.
         assert!(server.get_buckets().is_ok());
         server.close();
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn notify_settings_shutdown_is_bounded_under_write_contention() {
+        let path = std::env::temp_dir().join(format!(
+            "aw-tauri-notify-shutdown-{}-{}.db",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let writer = aw_datastore::Datastore::new(path.to_str().unwrap().to_string(), false);
+        writer
+            .set_key_value("test", "holds the write lock")
+            .unwrap();
+        let blocked = aw_datastore::Datastore::new(path.to_str().unwrap().to_string(), false);
+        let blocked_probe = blocked.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let closer = std::thread::spawn(move || {
+            let _ = tx.send(super::close_datastore(&blocked));
+        });
+        assert!(!rx
+            .recv_timeout(std::time::Duration::from_secs(8))
+            .expect("shutdown must return even when the worker cannot acquire its writer"));
+        writer.close();
+        closer.join().unwrap();
+        // The queued close finishes once the competing writer releases its lock.
+        assert!(blocked_probe.get_key_value("test").is_err());
         std::fs::remove_file(path).unwrap();
     }
 

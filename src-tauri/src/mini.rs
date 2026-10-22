@@ -128,7 +128,7 @@ pub fn run() {
                         if let Ok(mut state) = manager_state.lock() {
                             state.stop_modules();
                         }
-                        notify_datastore.close();
+                        crate::close_datastore(&notify_datastore);
                         *control_flow = ControlFlow::Exit;
                     }
                     "config_folder" => {
@@ -157,7 +157,7 @@ pub fn run() {
                 if let Ok(mut state) = manager_state.lock() {
                     state.stop_modules();
                 }
-                notify_datastore.close();
+                crate::close_datastore(&notify_datastore);
                 *control_flow = ControlFlow::Exit;
             }
             Event::UserEvent(MiniEvent::ServerFailed(msg)) => {
@@ -165,7 +165,7 @@ pub fn run() {
                 if let Ok(mut state) = manager_state.lock() {
                     state.stop_modules();
                 }
-                notify_datastore.close();
+                crate::close_datastore(&notify_datastore);
                 std::process::exit(1);
             }
             Event::UserEvent(MiniEvent::Manager(event)) => match event {
