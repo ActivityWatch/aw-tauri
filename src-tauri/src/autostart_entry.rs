@@ -120,11 +120,23 @@ fn replace_command_executable(command: &str, expected: &str) -> Option<String> {
     Some(format!("\"{expected}\"{}", &trimmed[end..]))
 }
 
+/// Whether a desktop-entry line is `Key=value`, allowing spaces around '='.
+///
+/// The [Desktop Entry Spec] permits those spaces; the reader already trims
+/// them, so refresh must use the same rule or a moved install stays stale.
+///
+/// [Desktop Entry Spec]: https://specifications.freedesktop.org/desktop-entry/latest/basic-format.html
+fn desktop_line_key_is(line: &str, expected: &str) -> bool {
+    line.trim()
+        .split_once('=')
+        .is_some_and(|(key, _)| key.trim() == expected)
+}
+
 #[cfg(any(target_os = "linux", test))]
 fn replace_desktop_executable(contents: &str, expected: &str) -> Option<String> {
     let mut offset = 0;
     for line in contents.split_inclusive('\n') {
-        if line.trim_start().starts_with("Exec=") {
+        if desktop_line_key_is(line, "Exec") {
             let start = offset + line.find('=')? + 1;
             let end = offset + line.trim_end_matches(['\r', '\n']).len();
             let original = &contents[start..end];
@@ -240,13 +252,10 @@ pub fn executable_matches_path(executable: &str, expected: &Path) -> bool {
 /// The `Exec=` value of an XDG desktop entry.
 fn desktop_exec(contents: &str) -> Option<String> {
     contents.lines().find_map(|line| {
-        let line = line.trim();
-        let (key, value) = line.split_once('=')?;
-        if key.trim() == "Exec" {
-            Some(value.trim().to_string())
-        } else {
-            None
+        if !desktop_line_key_is(line, "Exec") {
+            return None;
         }
+        Some(line.split_once('=')?.1.trim().to_string())
     })
 }
 
@@ -366,6 +375,28 @@ mod tests {
             super::replace_desktop_executable("[Desktop Entry]\n", "/new/aw"),
             None
         );
+    }
+
+    #[test]
+    fn refreshing_desktop_entry_accepts_spaces_around_equals() {
+        // The Desktop Entry Spec permits spaces around '='. desktop_exec already
+        // reads those keys; refresh must rewrite them too, or a moved AppImage
+        // stays registered at the deleted path.
+        let entry = "[Desktop Entry]\nName=Custom\nExec = /old/aw.AppImage --mini\nHidden=false\n";
+        assert_eq!(
+            desktop_exec(entry),
+            Some("/old/aw.AppImage --mini".to_string())
+        );
+        let updated = super::replace_desktop_executable(entry, "/new/aw.AppImage")
+            .expect("spec-legal Exec key with spaces around '=' must refresh");
+        assert_eq!(
+            command_executable(&desktop_exec(&updated).unwrap()),
+            Some("/new/aw.AppImage".to_string())
+        );
+        assert!(updated.contains("--mini"), "{updated}");
+        assert!(updated.contains("Name=Custom"), "{updated}");
+        assert!(updated.contains("Hidden=false"), "{updated}");
+        assert!(!updated.contains("/old/aw.AppImage"), "{updated}");
     }
 
     #[cfg(target_os = "linux")]
