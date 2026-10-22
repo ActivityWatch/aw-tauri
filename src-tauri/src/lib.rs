@@ -1444,6 +1444,21 @@ pub fn run() {
 mod tests {
     use super::{build_dashboard_url, default_linux_modules};
 
+    fn remove_database_after_close(path: &std::path::Path) {
+        // Close acknowledges the final commit before the worker drops its SQLite
+        // connection. Windows will not unlink the file until that handle is gone.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            match std::fs::remove_file(path) {
+                Ok(()) => return,
+                Err(_) if std::time::Instant::now() < deadline => {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                Err(err) => panic!("failed to remove closed test database: {err}"),
+            }
+        }
+    }
+
     fn notify_settings_with_live_server(write: bool) {
         let path = std::env::temp_dir().join(format!(
             "aw-tauri-notify-settings-{}-{}-{}.db",
@@ -1494,7 +1509,7 @@ mod tests {
         // A settings helper must not close the shared server worker.
         assert!(server.get_buckets().is_ok());
         server.close();
-        std::fs::remove_file(path).unwrap();
+        remove_database_after_close(&path);
     }
 
     #[test]
@@ -1522,9 +1537,17 @@ mod tests {
             .expect("shutdown must return even when the worker cannot acquire its writer"));
         writer.close();
         closer.join().unwrap();
-        // The queued close finishes once the competing writer releases its lock.
-        assert!(blocked_probe.get_key_value("test").is_err());
-        std::fs::remove_file(path).unwrap();
+        // The bounded caller can return before its detached close thread runs.
+        // Wait for that close to reach the worker after releasing the writer.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while blocked_probe.get_key_value("test").is_ok() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "datastore must eventually reject requests after close"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        remove_database_after_close(&path);
     }
 
     #[test]
