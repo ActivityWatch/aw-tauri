@@ -162,6 +162,15 @@ pub fn sync_from_config(app: &AppHandle) {
         }
     };
 
+    if current {
+        // The entry records the executable that registered it.  A moved install
+        // (a new AppImage path) leaves it pointing at a binary that no longer
+        // exists, so login would start nothing.  Rewrite it to point at this
+        // build; the enabled state is untouched because we only refresh an
+        // entry that is already registered.
+        refresh_registered_path(app);
+    }
+
     if current == config_enabled {
         info!("Registered for autostart: {current} (in sync)");
         return;
@@ -216,6 +225,55 @@ pub fn sync_from_config(app: &AppHandle) {
             warn!("Failed to persist OS autostart state to config: {e}");
         }
     }
+}
+
+/// Rewrite the OS autostart entry when it points at a different executable.
+///
+/// The registered command names the binary that created the entry.  Linux
+/// AppImage users download a new image to a new path, so the entry keeps
+/// running the old (now deleted) image and login starts nothing.  When the
+/// registered command does not match the executable this build would register
+/// now, the entry is rewritten in place.
+///
+/// Only an already-registered entry is refreshed, so the enabled bit is kept.
+/// An entry the user disabled in place (XDG `Hidden=true`) is left alone.
+///
+/// Returns `true` when the entry was rewritten.
+pub fn refresh_registered_path(app: &AppHandle) -> bool {
+    let Some(expected) = crate::autostart_entry::expected_registered_path() else {
+        return false;
+    };
+    let Some(executable) =
+        crate::autostart_entry::registered_executable(&autostart_entry_name(app))
+    else {
+        // Unknown (unsupported platform, hidden entry, unreadable file): there
+        // is nothing to compare against, so leave the entry alone.
+        return false;
+    };
+    if crate::autostart_entry::executable_matches_path(&executable, &expected) {
+        return false;
+    }
+    info!(
+        "Autostart entry runs '{executable}' but this build is '{}'; re-registering",
+        expected.display()
+    );
+    match crate::autostart_entry::refresh_executable(&autostart_entry_name(app), &expected) {
+        Ok(()) => {
+            set_cached(true);
+            info!("Autostart entry now runs '{}'", expected.display());
+            true
+        }
+        Err(e) => {
+            warn!("Failed to refresh the autostart entry: {e}");
+            false
+        }
+    }
+}
+
+/// Name of the OS autostart entry, matching the one the plugin registered.
+fn autostart_entry_name(app: &AppHandle) -> String {
+    profile::autostart_app_name(&profile::current_profile())
+        .unwrap_or_else(|| app.package_info().name.clone())
 }
 
 /// Remove `~/Library/LaunchAgents/aw-tauri.plist` if it belongs to the default
@@ -353,7 +411,7 @@ fn remove_legacy_file_if_owned(path: &Path, profile: &str) -> Option<bool> {
 /// in place via an XDG desktop `Hidden=true` line.  macOS plists and Windows
 /// registry values do not use this convention, so this always returns `false`
 /// for those formats.
-fn is_entry_hidden(contents: &str) -> bool {
+pub(crate) fn is_entry_hidden(contents: &str) -> bool {
     contents
         .lines()
         .any(|line| line.trim().eq_ignore_ascii_case("hidden=true"))

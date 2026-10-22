@@ -21,6 +21,7 @@ use tauri_plugin_opener::OpenerExt;
 use tauri_plugin_updater::UpdaterExt;
 
 mod autostart;
+mod autostart_entry;
 mod config_edit;
 mod dirs;
 mod logging;
@@ -104,7 +105,7 @@ fn log_profile_startup(profile: &str, port: u16) {
 /// slot until the plugin grows an identifier override.
 fn single_instance_plugin<R: tauri::Runtime>(profile: &str) -> tauri::plugin::TauriPlugin<R> {
     let lock_name = profile::lockfile_name(profile);
-    let callback = move |_app: &tauri::AppHandle<R>, _args: Vec<String>, _cwd: String| {
+    let callback = move |app: &tauri::AppHandle<R>, _args: Vec<String>, _cwd: String| {
         let lock_path = get_runtime_path().join(&lock_name);
         if let Some(parent) = lock_path.parent() {
             if !parent.exists() {
@@ -118,6 +119,10 @@ fn single_instance_plugin<R: tauri::Runtime>(profile: &str) -> tauri::plugin::Ta
             .open(&lock_path)
             .expect("Failed to open lock file");
         info!("Another instance is running, quitting!");
+        #[cfg(not(target_os = "linux"))]
+        notify_already_running(app);
+        #[cfg(target_os = "linux")]
+        let _ = app;
     };
 
     #[cfg(target_os = "linux")]
@@ -131,6 +136,88 @@ fn single_instance_plugin<R: tauri::Runtime>(profile: &str) -> tauri::plugin::Ta
     #[cfg(not(target_os = "linux"))]
     {
         tauri_plugin_single_instance::init(callback)
+    }
+}
+
+/// Tell the user why their launch did nothing: an instance is already running
+/// and holds the single-instance slot, so the new process was closed.
+///
+/// Without this the second launch is silent, which is indistinguishable from
+/// a broken install — the user has no way to learn that the running
+/// instance is an older build (for example an old AppImage path) that they
+/// should quit first.
+#[cfg(not(target_os = "linux"))]
+fn notify_already_running<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
+    let version = aw_server::version::version_string();
+    // `current_exe()` is a temporary mount for an AppImage run
+    // (`/tmp/.mount_*/aw-tauri`), which says nothing about which build is
+    // running; the registered path is the image the user launched.
+    let executable = crate::autostart_entry::expected_registered_path()
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|| "(unknown path)".to_string());
+    let body = already_running_message(&version, &executable);
+    if let Err(e) = app
+        .notification()
+        .builder()
+        .title("ActivityWatch is already running")
+        .body(body)
+        .show()
+    {
+        warn!("Failed to show the already-running notification: {e}");
+    }
+}
+
+/// The body of the already-running notification.
+///
+/// It has to name the running version *and* the executable it runs from: when
+/// a user launches a newer AppImage, the older instance keeps the slot, and
+/// the executable path is what tells them which build is still in the way.
+#[cfg(any(not(target_os = "linux"), test))]
+fn already_running_message(version: &str, executable: &str) -> String {
+    format!(
+        "ActivityWatch {version} is already running.\n\nRunning from: {executable}\n\n\
+         The instance you just started was closed. Quit the running one first \
+         if you meant to start the new version."
+    )
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn rejected_launch_message(executable: &str) -> String {
+    format!(
+        "Another ActivityWatch instance is already running.\n\nRequested launch: {executable}\n\n\
+         Quit the running instance first if you meant to start this version."
+    )
+}
+
+/// Warn from the new process: an older primary does not have our notification
+/// callback. Leave arbitration and focus forwarding to the single-instance plugin.
+#[cfg(target_os = "linux")]
+fn warn_before_second_launch(profile: &str) {
+    let owned = (|| -> Result<bool, Box<dyn std::error::Error>> {
+        let connection = zbus::blocking::connection::Builder::session()?
+            .method_timeout(std::time::Duration::from_secs(2))
+            .build()?;
+        let proxy = zbus::blocking::fdo::DBusProxy::new(&connection)?;
+        let name = format!(
+            "{}.SingleInstance",
+            profile::single_instance_dbus_id(profile)
+        );
+        Ok(proxy.name_has_owner(name.as_str().try_into()?)?)
+    })();
+    if !matches!(owned, Ok(true)) {
+        return;
+    }
+    let executable = autostart_entry::expected_registered_path()
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|| "(unknown path)".to_string());
+    let message = rejected_launch_message(&executable);
+    warn!("{message}");
+    if let Err(error) = notify_rust::Notification::new()
+        .summary("ActivityWatch is already running")
+        .body(&message)
+        .show()
+    {
+        warn!("Failed to show the second-launch warning: {error}");
     }
 }
 
@@ -1077,6 +1164,9 @@ pub fn run() {
         return;
     }
 
+    #[cfg(target_os = "linux")]
+    warn_before_second_launch(&cli_args.profile);
+
     tauri::Builder::default()
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_opener::init())
@@ -1420,7 +1510,26 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_dashboard_url, default_linux_modules};
+    use super::{
+        already_running_message, build_dashboard_url, default_linux_modules,
+        rejected_launch_message,
+    };
+
+    #[test]
+    fn already_running_message_names_the_version_and_the_executable() {
+        let message = already_running_message("v0.14.0 (rust)", "/home/u/aw-v0.14.0.AppImage");
+        assert!(message.contains("v0.14.0 (rust)"), "{message}");
+        assert!(message.contains("/home/u/aw-v0.14.0.AppImage"), "{message}");
+    }
+
+    #[test]
+    fn second_launch_warning_does_not_claim_the_new_version_is_running() {
+        let message = rejected_launch_message("/home/u/aw-v0.14.0.AppImage");
+        assert!(message.contains("/home/u/aw-v0.14.0.AppImage"));
+        assert!(message.contains("Quit the running instance"));
+        assert!(message.contains("Requested launch: /home/u/aw-v0.14.0.AppImage"));
+        assert!(!message.contains("/home/u/aw-v0.14.0.AppImage is already running"));
+    }
 
     #[test]
     fn default_linux_modules_prefers_awatcher_when_installed() {
