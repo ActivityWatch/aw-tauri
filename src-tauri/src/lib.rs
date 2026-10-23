@@ -28,6 +28,7 @@ mod manager;
 mod mini;
 mod module_alert_ui;
 mod profile;
+mod release_version;
 mod updater_ui;
 mod webkit_env;
 
@@ -1047,6 +1048,11 @@ fn set_autostart_enabled(app: AppHandle, enabled: bool) -> Result<bool, String> 
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Apply the bundle identity before GUI, mini or headless server startup.
+    if let Some(version) = release_version::bundle_version() {
+        aw_server::version::set_version_override(version);
+    }
+
     // Rotate log if needed (before initializing logging)
     if let Err(e) = logging::rotate_log_if_needed() {
         eprintln!("Failed to rotate log: {}", e);
