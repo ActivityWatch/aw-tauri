@@ -7,7 +7,7 @@ pub struct Destinations {
     // Keep reservations for the window lifetime: completion may have no path (macOS,
     // or failed transfers), and multiple transfers can share a URL. Never release
     // another transfer's reservation based on an ambiguous completion event.
-    reserved: HashSet<PathBuf>,
+    reserved: HashSet<String>,
 }
 
 impl Destinations {
@@ -48,13 +48,39 @@ impl Destinations {
             .map(|s| format!(".{}", s.to_string_lossy()))
             .unwrap_or_default();
         let mut index = 1u32;
-        // symlink_metadata also detects dangling symlinks; don't replace an existing entry.
-        while self.reserved.contains(&path) || path.symlink_metadata().is_ok() {
-            path = downloads.join(format!("{stem} ({index}){extension}"));
+        loop {
+            // Conservatively reserve case variants on every platform, including
+            // case-insensitive Windows/macOS Downloads filesystems. No file need
+            // exist yet for an earlier transfer to own this filename.
+            let key = path.file_name().unwrap().to_string_lossy().to_uppercase();
+            // symlink_metadata also detects dangling symlinks. Only NotFound
+            // means absence; permission/length errors must cancel the request.
+            let exists = match path.symlink_metadata() {
+                Ok(_) => true,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+                Err(error) => return Err(error.to_string()),
+            };
+            if !self.reserved.contains(&key) && !exists {
+                self.reserved.insert(key);
+                return Ok(path);
+            }
+            let suffix = format!(" ({index}){extension}");
+            // 255 UTF-8 bytes also fit Windows' 255 UTF-16-unit component
+            // limit. Trim only the stem, at a character boundary, not the
+            // extension or the collision number.
+            let budget = 255usize
+                .checked_sub(suffix.len())
+                .ok_or("Download extension is too long")?;
+            let mut end = stem.len().min(budget);
+            while !stem.is_char_boundary(end) {
+                end -= 1;
+            }
+            if end == 0 {
+                return Err("Download filename has no room for a collision suffix".into());
+            }
+            path = downloads.join(format!("{}{suffix}", &stem[..end]));
             index = index.checked_add(1).ok_or("Too many existing downloads")?;
         }
-        self.reserved.insert(path.clone());
-        Ok(path)
     }
 }
 
@@ -99,6 +125,62 @@ mod tests {
     }
 
     #[test]
+    fn case_variant_requests_do_not_share_a_destination() {
+        let dir = std::env::temp_dir().join(format!("aw-case-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut destinations = Destinations::default();
+        let first = destinations
+            .destination(&dir, Path::new("export.json"))
+            .unwrap();
+        let second = destinations
+            .destination(&dir, Path::new("EXPORT.json"))
+            .unwrap();
+        assert_ne!(
+            first.to_string_lossy().to_uppercase(),
+            second.to_string_lossy().to_uppercase()
+        );
+        assert!(!first.exists());
+        assert!(!second.exists());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn long_collision_names_remain_writable() {
+        let dir = std::env::temp_dir().join(format!("aw-long-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut destinations = Destinations::default();
+        for stem in ["a".repeat(250), "日".repeat(83)] {
+            let name = format!("{stem}.json");
+            let first = destinations.destination(&dir, Path::new(&name)).unwrap();
+            std::fs::write(&first, "original").unwrap();
+            let second = destinations.destination(&dir, Path::new(&name)).unwrap();
+            std::fs::write(&second, "copy").unwrap();
+            assert_ne!(first, second);
+            assert!(second.file_name().unwrap().to_str().unwrap().len() <= 255);
+            assert!(second
+                .file_name()
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .ends_with(" (1).json"));
+            assert_eq!(std::fs::read_to_string(first).unwrap(), "original");
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn metadata_errors_do_not_return_a_destination() {
+        let dir = std::env::temp_dir().join(format!("aw-metadata-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut destinations = Destinations::default();
+        let name = format!("{}.json", "a".repeat(256));
+        assert!(destinations.destination(&dir, Path::new(&name)).is_err());
+        assert!(destinations.reserved.is_empty());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn refuses_relative_directory_and_unsafe_names() {
         let mut destinations = Destinations::default();
         assert!(destinations
@@ -122,10 +204,15 @@ mod tests {
         }
         // Backslash is a filename character on Unix, but a directory separator
         // on Windows: file_name() must strip it there, just like a forward slash.
-        let result = destinations.destination(&std::env::temp_dir(), Path::new("bad\\name.json"));
+        let dir = std::env::temp_dir().join(format!("aw-unsafe-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let result = destinations.destination(&dir, Path::new("bad\\name.json"));
         #[cfg(not(windows))]
         assert!(result.is_err());
         #[cfg(windows)]
-        assert_eq!(result.unwrap(), std::env::temp_dir().join("name.json"));
+        assert_eq!(result.unwrap(), dir.join("name.json"));
+        if dir.exists() {
+            std::fs::remove_dir_all(dir).unwrap();
+        }
     }
 }
