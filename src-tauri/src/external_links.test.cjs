@@ -13,7 +13,8 @@ vm.runInNewContext(script, {
 function click(href, download) {
   calls.length = 0;
   let prevented = false;
-  listener({ target: { tagName: 'A', href, hasAttribute: name => name === 'download' && download !== undefined }, preventDefault() { prevented = true; }, stopPropagation() {} });
+  const url = new URL(href, 'http://localhost:5600/');
+  listener({ target: { tagName: 'A', href: url.href, protocol: url.protocol, hostname: url.hostname, hasAttribute: name => name === 'download' && download !== undefined }, preventDefault() { prevented = true; }, stopPropagation() {} });
   return { prevented, calls: calls.length };
 }
 assert.deepEqual(click('blob:http://localhost:5600/synthetic', 'aw-bucket-export.json'), { prevented: false, calls: 0 });
