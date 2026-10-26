@@ -1,11 +1,11 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "remote-external-links",
-  "description": "Allow the embedded localhost dashboard to open external links in the system browser",
+  "description": "Allow the embedded localhost dashboard to open external links and adjust its zoom",
   "remote": {
     "urls": ["http://localhost:*/*"]
   },
   "local": false,
   "windows": ["main"],
-  "permissions": ["allow-open-external"]
+  "permissions": ["allow-open-external", "core:webview:allow-set-webview-zoom"]
 }

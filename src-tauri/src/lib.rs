@@ -1169,6 +1169,7 @@ pub fn run() {
                 )
                 .title(profile::window_title(&cli_args.profile))
                 .inner_size(800.0, 600.0)
+                .zoom_hotkeys_enabled(true)
                 .visible(false)
                 .on_download(move |webview, event| {
                     match event {
