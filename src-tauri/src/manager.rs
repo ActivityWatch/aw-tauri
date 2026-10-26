@@ -709,7 +709,11 @@ fn autostart_names<'a>(
 /// toggle: the flag is written to the settings store and the module started/stopped, and
 /// `[autostart]` is not touched. Other modules are toggled and the change is saved to
 /// `[autostart] modules` in the config file.
-pub(crate) fn handle_module_menu_click(state: &Mutex<ManagerState>, db_path: &str, name: &str) {
+pub(crate) fn handle_module_menu_click(
+    state: &Mutex<ManagerState>,
+    datastore: &aw_datastore::Datastore,
+    name: &str,
+) {
     let mut s = state.lock().expect("Failed to acquire manager_state lock");
     if name == NOTIFY_MODULE {
         if !s.modules.contains_key(name) {
@@ -717,7 +721,7 @@ pub(crate) fn handle_module_menu_click(state: &Mutex<ManagerState>, db_path: &st
             return;
         }
         let enable = !s.is_module_running(name);
-        if crate::write_notify_enabled(db_path, enable) {
+        if crate::write_notify_enabled(datastore, enable) {
             s.set_notify_enabled(enable);
         } else {
             error!("aw-notify toggle aborted: datastore write failed; state unchanged");

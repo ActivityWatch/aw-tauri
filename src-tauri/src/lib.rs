@@ -10,7 +10,7 @@ use std::env;
 use std::fs::{create_dir_all, read_to_string, remove_file, OpenOptions};
 use std::net::{SocketAddr, TcpListener};
 use std::path::{Path, PathBuf};
-use std::sync::{mpsc, Arc, Condvar, Mutex, OnceLock};
+use std::sync::{mpsc, Condvar, Mutex, OnceLock};
 use std::thread;
 use std::time::Duration;
 #[cfg(target_os = "macos")]
@@ -351,10 +351,9 @@ pub(crate) fn legacy_import_if_needed(db_path: &str, profile: &str, testing: boo
 }
 
 /// Read `aw-notify.enabled` from the settings datastore.
-/// Opens a short-lived second connection to the same SQLite file (WAL mode; safe).
+/// Uses the server worker so settings never compete with its SQLite writer.
 /// Returns `false` on any error so aw-notify never autostarts by accident.
-pub(crate) fn read_notify_enabled(db_path: &str) -> bool {
-    let ds = aw_datastore::Datastore::new(db_path.to_string(), false);
+pub(crate) fn read_notify_enabled(ds: &aw_datastore::Datastore) -> bool {
     match ds.get_key_value("settings.aw-notify") {
         Ok(val) => serde_json::from_str::<serde_json::Value>(&val)
             .ok()
@@ -366,8 +365,7 @@ pub(crate) fn read_notify_enabled(db_path: &str) -> bool {
 
 /// Write `aw-notify.enabled` to the settings datastore, preserving all other keys.
 /// Returns `true` if the write succeeded, `false` on any datastore error.
-pub(crate) fn write_notify_enabled(db_path: &str, enabled: bool) -> bool {
-    let ds = aw_datastore::Datastore::new(db_path.to_string(), false);
+pub(crate) fn write_notify_enabled(ds: &aw_datastore::Datastore, enabled: bool) -> bool {
     // Preserve existing keys in the aw-notify settings object.
     let existing: serde_json::Value = match ds.get_key_value("settings.aw-notify") {
         Ok(val) => {
@@ -381,8 +379,24 @@ pub(crate) fn write_notify_enabled(db_path: &str, enabled: bool) -> bool {
     };
     obj.insert("enabled".to_string(), serde_json::Value::Bool(enabled));
     let new_val = serde_json::Value::Object(obj).to_string();
-    if let Err(e) = ds.set_key_value("settings.aw-notify", &new_val) {
+    if let Err(e) = ds.set_key_value_and_commit("settings.aw-notify", &new_val) {
         error!("Failed to write aw-notify.enabled: {:?}", e);
+        false
+    } else {
+        true
+    }
+}
+
+/// Flush the shared worker before exit, without trapping Quit behind another writer.
+pub(crate) fn close_datastore(datastore: &aw_datastore::Datastore) -> bool {
+    let datastore = datastore.clone();
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
+        datastore.close();
+        let _ = tx.send(());
+    });
+    if let Err(err) = rx.recv_timeout(Duration::from_secs(5)) {
+        error!("Database shutdown did not finish: {err}; pending writes may be lost");
         false
     } else {
         true
@@ -744,7 +758,8 @@ fn run_daemon() {
         }
     };
     legacy_import_if_needed(&db_path, &cli_args.profile, testing);
-    let daemon_notify_enabled = read_notify_enabled(&db_path);
+    let datastore = aw_datastore::Datastore::new(db_path, false);
+    let daemon_notify_enabled = read_notify_enabled(&datastore);
     let device_id = aw_server::device_id::get_device_id();
 
     let asset_path_opt = match std::env::var("AW_WEBUI_DIR") {
@@ -763,8 +778,9 @@ fn run_daemon() {
         }
     };
 
+    let shutdown_datastore = datastore.clone();
     let server_state = ServerState::new(
-        aw_datastore::Datastore::new(db_path, false),
+        datastore,
         aw_server::endpoints::AssetResolver::new(asset_path_opt),
         device_id,
     );
@@ -811,6 +827,8 @@ fn run_daemon() {
         .lock()
         .expect("Failed to lock manager state")
         .stop_modules();
+
+    close_datastore(&shutdown_datastore);
 
     if exit_error {
         std::process::exit(1);
@@ -1130,7 +1148,7 @@ pub fn run() {
                 // Bring the OS login item in line with `[autostart] enabled`.
                 autostart::sync_from_config(app.handle());
 
-                let (dashboard_url, server_state, aw_config, db_path) =
+                let (dashboard_url, server_state, aw_config, _) =
                     match prepare_aw_server(user_config, cli_args) {
                         Ok(server) => server,
                         Err(message) => {
@@ -1145,11 +1163,11 @@ pub fn run() {
                             return Ok(());
                         }
                     };
-                // Read aw-notify.enabled from the settings store before Rocket takes ownership
-                // of the datastore.  A missing key / invalid JSON / any error → false so
+                // Keep a handle to the server worker for startup and tray settings.
+                // A missing key / invalid JSON / any error → false so
                 // aw-notify never autostarts unless the user explicitly enables it.
-                let notify_enabled = read_notify_enabled(&db_path);
-                let db_path_arc = Arc::new(db_path);
+                let notify_datastore = server_state.datastore.clone();
+                let notify_enabled = read_notify_enabled(&notify_datastore);
                 // Capture port before aw_config is moved into build_rocket so the
                 // manager uses the CLI-computed port (--port / --testing) rather
                 // than the raw config-file default from get_config().port.
@@ -1237,6 +1255,7 @@ pub fn run() {
                 // Nothing else would end the app then, so stop the modules and exit with it.
                 let server_manager_state = manager_state.clone();
                 let server_app = app.handle().clone();
+                let shutdown_datastore = notify_datastore.clone();
                 tauri::async_runtime::spawn(async move {
                     let exit_code = match rocket_handle.await {
                         Ok(Ok(_)) => {
@@ -1255,6 +1274,7 @@ pub fn run() {
                     if let Ok(mut state) = server_manager_state.lock() {
                         state.stop_modules();
                     }
+                    close_datastore(&shutdown_datastore);
                     server_app.exit(exit_code);
                 });
 
@@ -1307,6 +1327,8 @@ pub fn run() {
                             .lock()
                             .expect("Failed to acquire manager_state lock");
                         state.stop_modules();
+                        drop(state);
+                        close_datastore(&notify_datastore);
                         app.exit(0);
                     } else if event.id().0 == "config_folder" {
                         let config_path = get_config_path();
@@ -1331,7 +1353,7 @@ pub fn run() {
                             .lock()
                             .expect("Failed to acquire manager_state lock");
                         let now_enabled = !state.is_notify_enabled();
-                        if write_notify_enabled(&db_path_arc, now_enabled) {
+                        if write_notify_enabled(&notify_datastore, now_enabled) {
                             state.set_notify_enabled(now_enabled);
                         } else {
                             error!("Notify toggle aborted: datastore write failed; state unchanged");
@@ -1340,7 +1362,7 @@ pub fn run() {
                         // Modules menu clicks
                         manager::handle_module_menu_click(
                             &manager_state,
-                            &db_path_arc,
+                            &notify_datastore,
                             &event.id().0,
                         );
                     }
@@ -1470,6 +1492,140 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::{build_dashboard_url, default_linux_modules};
+
+    fn remove_database_after_close(path: &std::path::Path) {
+        // Close acknowledges the final commit before the worker drops its SQLite
+        // connection. Windows will not unlink the file until that handle is gone.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            match std::fs::remove_file(path) {
+                Ok(()) => return,
+                Err(_) if std::time::Instant::now() < deadline => {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                Err(err) => panic!("failed to remove closed test database: {err}"),
+            }
+        }
+    }
+
+    fn notify_settings_with_live_server(write: bool) {
+        let path = std::env::temp_dir().join(format!(
+            "aw-tauri-notify-settings-{}-{}-{}.db",
+            std::process::id(),
+            write,
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let path_string = path.to_str().unwrap().to_string();
+        let server = aw_datastore::Datastore::new(path_string, false);
+        server
+            .set_key_value_and_commit(
+                "settings.aw-notify",
+                r#"{"enabled":true,"other":"preserved"}"#,
+            )
+            .unwrap();
+        let settings = server.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let result = if write {
+                super::write_notify_enabled(&settings, false)
+            } else {
+                super::read_notify_enabled(&settings)
+            };
+            let _ = tx.send(result);
+        });
+        assert!(rx
+            .recv_timeout(std::time::Duration::from_secs(3))
+            .expect("notification settings blocked behind the server datastore"));
+        worker.join().unwrap();
+        let value: serde_json::Value =
+            serde_json::from_str(&server.get_key_value("settings.aw-notify").unwrap()).unwrap();
+        assert_eq!(value["enabled"], !write);
+        assert_eq!(value["other"], "preserved");
+        if write {
+            let reader =
+                aw_datastore::Datastore::open_reader(path.to_str().unwrap().to_string()).unwrap();
+            let durable: serde_json::Value =
+                serde_json::from_str(&reader.get_key_value("settings.aw-notify").unwrap()).unwrap();
+            assert_eq!(
+                durable, value,
+                "toggle must commit before reporting success"
+            );
+            reader.close();
+        }
+        // A settings helper must not close the shared server worker.
+        assert!(server.get_buckets().is_ok());
+        server.close();
+        remove_database_after_close(&path);
+    }
+
+    #[test]
+    fn notify_settings_shutdown_is_bounded_under_write_contention() {
+        let path = std::env::temp_dir().join(format!(
+            "aw-tauri-notify-shutdown-{}-{}.db",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let writer = aw_datastore::Datastore::new(path.to_str().unwrap().to_string(), false);
+        writer
+            .set_key_value("test", "holds the write lock")
+            .unwrap();
+        let blocked = aw_datastore::Datastore::new(path.to_str().unwrap().to_string(), false);
+        let blocked_probe = blocked.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let closer = std::thread::spawn(move || {
+            let _ = tx.send(super::close_datastore(&blocked));
+        });
+        assert!(!rx
+            .recv_timeout(std::time::Duration::from_secs(8))
+            .expect("shutdown must return even when the worker cannot acquire its writer"));
+        writer.close();
+        closer.join().unwrap();
+        // The bounded caller can return before its detached close thread runs.
+        // Wait for that close to reach the worker after releasing the writer.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while blocked_probe.get_key_value("test").is_ok() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "datastore must eventually reject requests after close"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        remove_database_after_close(&path);
+    }
+
+    #[test]
+    fn notify_settings_invalid_values_stay_disabled() {
+        let datastore = aw_datastore::Datastore::new_in_memory(false);
+        assert!(!super::read_notify_enabled(&datastore));
+        for value in [
+            "invalid json",
+            "{}",
+            r#"{"enabled":"true"}"#,
+            r#"{"enabled":false}"#,
+        ] {
+            datastore
+                .set_key_value("settings.aw-notify", value)
+                .unwrap();
+            assert!(!super::read_notify_enabled(&datastore));
+        }
+        datastore.close();
+    }
+
+    #[test]
+    fn notify_settings_read_with_live_server() {
+        notify_settings_with_live_server(false);
+    }
+
+    #[test]
+    fn notify_settings_write_with_live_server() {
+        notify_settings_with_live_server(true);
+    }
 
     #[test]
     fn default_linux_modules_prefers_awatcher_when_installed() {

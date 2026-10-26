@@ -36,7 +36,7 @@ pub fn run() {
 
     let user_config = crate::get_config();
 
-    let (dashboard_url, server_state, aw_config, db_path) =
+    let (dashboard_url, server_state, aw_config, _) =
         match crate::prepare_aw_server(user_config, cli_args) {
             Ok(server) => server,
             Err(message) => {
@@ -46,7 +46,8 @@ pub fn run() {
             }
         };
     let server_port = aw_config.port;
-    let notify_opt_in = crate::read_notify_enabled(&db_path);
+    let notify_datastore = server_state.datastore.clone();
+    let notify_opt_in = crate::read_notify_enabled(&notify_datastore);
     let rocket_handle = tauri::async_runtime::spawn(
         aw_server::endpoints::build_rocket(server_state, aw_config).launch(),
     );
@@ -127,6 +128,7 @@ pub fn run() {
                         if let Ok(mut state) = manager_state.lock() {
                             state.stop_modules();
                         }
+                        crate::close_datastore(&notify_datastore);
                         *control_flow = ControlFlow::Exit;
                     }
                     "config_folder" => {
@@ -144,7 +146,7 @@ pub fn run() {
                         if let Some(module_name) = id.strip_prefix("module:") {
                             manager::handle_module_menu_click(
                                 &manager_state,
-                                &db_path,
+                                &notify_datastore,
                                 module_name,
                             );
                         }
@@ -156,6 +158,7 @@ pub fn run() {
                 if let Ok(mut state) = manager_state.lock() {
                     state.stop_modules();
                 }
+                crate::close_datastore(&notify_datastore);
                 *control_flow = ControlFlow::Exit;
             }
             Event::UserEvent(MiniEvent::ServerFailed(msg)) => {
@@ -163,6 +166,7 @@ pub fn run() {
                 if let Ok(mut state) = manager_state.lock() {
                     state.stop_modules();
                 }
+                crate::close_datastore(&notify_datastore);
                 std::process::exit(1);
             }
             Event::UserEvent(MiniEvent::Manager(event)) => match event {
