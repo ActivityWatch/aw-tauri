@@ -1320,6 +1320,10 @@ pub fn run() {
                         app.opener()
                             .reveal_item_in_dir(log_dir)
                             .expect("Failed to open log folder");
+                    } else if event.id().0 == manager::SUPPORT_ID {
+                        if let Err(e) = app.opener().open_url(manager::SUPPORT_URL, None::<&str>) {
+                            warn!("Failed to open support page: {}", e);
+                        }
                     } else if event.id().0 == autostart::MENU_ID {
                         autostart::handle_menu_click(app);
                     } else if event.id().0 == manager::NOTIFY_TOGGLE_ID {

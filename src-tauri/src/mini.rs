@@ -134,6 +134,7 @@ pub fn run() {
                         let config_dir = config_path.parent().unwrap_or(&config_path);
                         open_path(config_dir);
                     }
+                    manager::SUPPORT_ID => open_url(manager::SUPPORT_URL),
                     "log_folder" => {
                         let log_path = crate::logging::get_log_path();
                         let log_dir = log_path.parent().unwrap_or(&log_path);
@@ -287,6 +288,8 @@ fn build_tray_menu(
     menu.append(&log_folder)?;
     menu.append(&PredefinedMenuItem::separator())?;
 
+    let support = MenuItem::with_id(manager::SUPPORT_ID, "Support ActivityWatch", true, None);
+    menu.append(&support)?;
     let quit = MenuItem::with_id("quit", "Quit ActivityWatch", true, None);
     menu.append(&quit)?;
 
@@ -315,6 +318,12 @@ fn load_tray_icon() -> Result<Icon, Box<dyn std::error::Error>> {
 fn open_dashboard(url: &str) {
     if let Err(e) = open::that_detached(url) {
         warn!("Failed to open dashboard: {e}");
+    }
+}
+
+fn open_url(url: &str) {
+    if let Err(e) = open::that_detached(url) {
+        warn!("Failed to open {url}: {e}");
     }
 }
 

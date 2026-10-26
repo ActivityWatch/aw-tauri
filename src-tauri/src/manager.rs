@@ -108,6 +108,11 @@ struct Module {
 /// Tray menu ID for the "Enable notifications" toggle.
 pub(crate) const NOTIFY_TOGGLE_ID: &str = "notify_toggle";
 
+/// Tray menu ID for the "Support ActivityWatch" link.
+pub(crate) const SUPPORT_ID: &str = "support";
+/// `src=tray` attributes the click on the website and at checkout.
+pub(crate) const SUPPORT_URL: &str = "https://activitywatch.net/go/?src=tray";
+
 /// Shared notify-enabled state for the tray rebuild path (set from ManagerState).
 static NOTIFY_ENABLED_GLOBAL: AtomicBool = AtomicBool::new(false);
 
@@ -390,6 +395,8 @@ fn build_tray_menu(
 ) {
     let open = MenuItem::with_id(app, "open", "Open Dashboard", true, None::<&str>)
         .expect("failed to create open menu item");
+    let support = MenuItem::with_id(app, SUPPORT_ID, "Support ActivityWatch", true, None::<&str>)
+        .expect("failed to create support menu item");
     let quit = MenuItem::with_id(app, "quit", "Quit ActivityWatch", true, None::<&str>)
         .expect("failed to create quit menu item");
 
@@ -453,6 +460,7 @@ fn build_tray_menu(
             &config_folder,
             &log_folder,
             &separator,
+            &support,
             &quit,
         ],
     )
