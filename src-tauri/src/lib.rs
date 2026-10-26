@@ -467,22 +467,15 @@ pub(crate) fn read_notify_enabled(ds: &aw_datastore::Datastore) -> bool {
 }
 
 /// Write `aw-notify.enabled` to the settings datastore, preserving all other keys.
-/// Returns `true` if the write succeeded, `false` on any datastore error.
+/// The field update runs inside the server worker, so a settings API write that
+/// lands between a read and this write cannot be reverted by a stale snapshot.
+/// Returns `true` once the write is committed, `false` on any datastore error.
 pub(crate) fn write_notify_enabled(ds: &aw_datastore::Datastore, enabled: bool) -> bool {
-    // Preserve existing keys in the aw-notify settings object.
-    let existing: serde_json::Value = match ds.get_key_value("settings.aw-notify") {
-        Ok(val) => {
-            serde_json::from_str(&val).unwrap_or(serde_json::Value::Object(Default::default()))
-        }
-        Err(_) => serde_json::Value::Object(Default::default()),
-    };
-    let mut obj = match existing {
-        serde_json::Value::Object(m) => m,
-        _ => Default::default(),
-    };
-    obj.insert("enabled".to_string(), serde_json::Value::Bool(enabled));
-    let new_val = serde_json::Value::Object(obj).to_string();
-    if let Err(e) = ds.set_key_value_and_commit("settings.aw-notify", &new_val) {
+    if let Err(e) = ds.set_json_field_and_commit(
+        "settings.aw-notify",
+        "enabled",
+        serde_json::Value::Bool(enabled),
+    ) {
         error!("Failed to write aw-notify.enabled: {:?}", e);
         false
     } else {
@@ -1750,6 +1743,48 @@ mod tests {
     #[test]
     fn notify_settings_write_with_live_server() {
         notify_settings_with_live_server(true);
+    }
+
+    #[test]
+    fn notify_toggle_preserves_pending_settings_api_write() {
+        let datastore = aw_datastore::Datastore::new_in_memory(false);
+        datastore
+            .set_key_value_and_commit("settings.aw-notify", r#"{"enabled":true,"interval":60}"#)
+            .unwrap();
+        // The settings endpoint writes through the same worker without committing.
+        datastore
+            .set_key_value(
+                "settings.aw-notify",
+                r#"{"enabled":true,"interval":120,"sound":"quiet"}"#,
+            )
+            .unwrap();
+        assert!(super::write_notify_enabled(&datastore, false));
+        let value: serde_json::Value =
+            serde_json::from_str(&datastore.get_key_value("settings.aw-notify").unwrap()).unwrap();
+        assert_eq!(
+            value,
+            serde_json::json!({"enabled": false, "interval": 120, "sound": "quiet"})
+        );
+        datastore.close();
+    }
+
+    #[test]
+    fn notify_toggle_replaces_malformed_settings_with_an_object() {
+        let datastore = aw_datastore::Datastore::new_in_memory(false);
+        for stored in [None, Some("invalid json"), Some("[1,2]")] {
+            if let Some(stored) = stored {
+                datastore
+                    .set_key_value("settings.aw-notify", stored)
+                    .unwrap();
+            }
+            assert!(super::write_notify_enabled(&datastore, true));
+            assert!(super::read_notify_enabled(&datastore));
+            let value: serde_json::Value =
+                serde_json::from_str(&datastore.get_key_value("settings.aw-notify").unwrap())
+                    .unwrap();
+            assert_eq!(value, serde_json::json!({"enabled": true}));
+        }
+        datastore.close();
     }
 
     #[test]
