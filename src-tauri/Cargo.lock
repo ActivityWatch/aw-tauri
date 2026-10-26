@@ -490,6 +490,7 @@ dependencies = [
  "notify-rust",
  "open",
  "png 0.17.16",
+ "quick-xml",
  "rust-embed",
  "rust-embed-impl",
  "rust-embed-utils",
@@ -512,6 +513,7 @@ dependencies = [
  "tray-icon 0.21.3",
  "winapi",
  "winreg 0.55.0",
+ "zbus",
 ]
 
 [[package]]
