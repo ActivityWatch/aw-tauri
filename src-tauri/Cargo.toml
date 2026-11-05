@@ -46,12 +46,13 @@ fern = { version = "0.7.1", features = ["colored"] }
 chrono = "0.4.39"
 aw-server = { git = "https://github.com/ActivityWatch/aw-server-rust.git", branch = "master" }
 aw-datastore = { git = "https://github.com/ActivityWatch/aw-server-rust.git", branch = "master" }
-# aw-server-rust 0.14 still uses EmbeddedAssets::get, removed in rust-embed 8.11.
-# rust-embed 8.7.2 depends on rust-embed-impl "^8.7.2", so cargo otherwise
-# unifies the proc-macro to 8.11 and the build fails. Pin the whole 8.7.2 line.
-rust-embed = "=8.7.2"
-rust-embed-impl = "=8.7.2"
-rust-embed-utils = "=8.7.2"
+# The bundled aw-server-rust is built against rust-embed 8.13 (its own
+# Cargo.lock pins 8.13.0 and its EmbeddedAssets::get call site still compiles
+# there), so the exact =8.7.2 pin that used to be required is lifted. Keep the
+# three crates on one minor so the derive/impl/util line stays unified.
+rust-embed = "8.13"
+rust-embed-impl = "8.13"
+rust-embed-utils = "8.13"
 glob = "0.3.1"
 open = "5.3.3"
 png = "0.17.16"
