@@ -127,6 +127,12 @@ pub(crate) fn set_supporter(supporter: bool) {
     SUPPORTER_GLOBAL.store(supporter, AtomicOrdering::Relaxed);
 }
 
+/// Whether the user already supports ActivityWatch, so a menu leaves the support
+/// item out. Read by both tray builders (normal and `--mini`).
+pub(crate) fn is_supporter() -> bool {
+    SUPPORTER_GLOBAL.load(AtomicOrdering::Relaxed)
+}
+
 #[derive(Debug)]
 pub struct ManagerState {
     tx: Sender<ModuleMessage>,
@@ -408,7 +414,7 @@ fn build_tray_menu(
         .expect("failed to create open menu item");
     // Hidden once the user says they already support ActivityWatch. The flag is read
     // from the settings store before the first tray build, so this is start-up state.
-    let support = if SUPPORTER_GLOBAL.load(AtomicOrdering::Relaxed) {
+    let support = if is_supporter() {
         None
     } else {
         Some(
