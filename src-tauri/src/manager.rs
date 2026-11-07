@@ -116,6 +116,17 @@ pub(crate) const SUPPORT_URL: &str = "https://activitywatch.net/go/?src=tray";
 /// Shared notify-enabled state for the tray rebuild path (set from ManagerState).
 static NOTIFY_ENABLED_GLOBAL: AtomicBool = AtomicBool::new(false);
 
+/// Shared supporter flag for the tray rebuild path. Set from the settings store
+/// (`settings.supporter`, written by aw-webui) before the tray is first built.
+static SUPPORTER_GLOBAL: AtomicBool = AtomicBool::new(false);
+
+/// Record whether the user already supports ActivityWatch, so the tray leaves the
+/// support item out. Read from the settings store by the caller, which owns the
+/// datastore handle. A false value keeps today's behaviour: the item is shown.
+pub(crate) fn set_supporter(supporter: bool) {
+    SUPPORTER_GLOBAL.store(supporter, AtomicOrdering::Relaxed);
+}
+
 #[derive(Debug)]
 pub struct ManagerState {
     tx: Sender<ModuleMessage>,
@@ -395,8 +406,16 @@ fn build_tray_menu(
 ) {
     let open = MenuItem::with_id(app, "open", "Open Dashboard", true, None::<&str>)
         .expect("failed to create open menu item");
-    let support = MenuItem::with_id(app, SUPPORT_ID, "Support ActivityWatch", true, None::<&str>)
-        .expect("failed to create support menu item");
+    // Hidden once the user says they already support ActivityWatch. The flag is read
+    // from the settings store before the first tray build, so this is start-up state.
+    let support = if SUPPORTER_GLOBAL.load(AtomicOrdering::Relaxed) {
+        None
+    } else {
+        Some(
+            MenuItem::with_id(app, SUPPORT_ID, "Support ActivityWatch", true, None::<&str>)
+                .expect("failed to create support menu item"),
+        )
+    };
     let quit = MenuItem::with_id(app, "quit", "Quit ActivityWatch", true, None::<&str>)
         .expect("failed to create quit menu item");
 
@@ -448,23 +467,23 @@ fn build_tray_menu(
     )
     .expect("Failed to create notify toggle menu item");
     let separator = PredefinedMenuItem::separator(app).expect("Failed to create separator");
-    let menu = Menu::with_items(
-        app,
-        &[
-            &open,
-            &separator,
-            &module_submenu,
-            &separator,
-            &notify_toggle_item,
-            &autostart_item,
-            &config_folder,
-            &log_folder,
-            &separator,
-            &support,
-            &quit,
-        ],
-    )
-    .expect("Failed to create tray menu");
+    let mut items: Vec<&dyn tauri::menu::IsMenuItem<Wry>> = vec![
+        &open,
+        &separator,
+        &module_submenu,
+        &separator,
+        &notify_toggle_item,
+        &autostart_item,
+        &config_folder,
+        &log_folder,
+        &separator,
+    ];
+    if let Some(support) = support.as_ref() {
+        items.push(support);
+    }
+    items.push(&quit);
+
+    let menu = Menu::with_items(app, &items).expect("Failed to create tray menu");
 
     let tray_id = get_tray_id();
     app.tray_by_id(tray_id)
