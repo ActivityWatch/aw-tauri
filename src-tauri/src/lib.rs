@@ -1342,6 +1342,9 @@ pub fn run() {
                         // Blob exports belong to the webview's native download handler,
                         // not the OS URL opener (which cannot resolve webview blob URLs).
                         if (el && el.href && el.href.startsWith('blob:') && el.hasAttribute('download')) { return; }
+                        // javascript: pseudo-links are not real navigation targets; let
+                        // the page's own handlers run instead of handing them to the OS opener.
+                        if (el && el.protocol === 'javascript:') { return; }
                         if (el && el.href && !/^(https?:\/\/(localhost|127\.0\.0\.1)|tauri:|about:)/.test(el.href)) {
                             e.preventDefault();
                             e.stopPropagation();
