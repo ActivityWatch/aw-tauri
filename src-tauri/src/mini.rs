@@ -48,6 +48,7 @@ pub fn run() {
     let server_port = aw_config.port;
     let notify_datastore = server_state.datastore.clone();
     let notify_opt_in = crate::read_notify_enabled(&notify_datastore);
+    manager::set_supporter(crate::read_supporter(&notify_datastore));
     let rocket_handle = tauri::async_runtime::spawn(
         aw_server::endpoints::build_rocket(server_state, aw_config).launch(),
     );
@@ -292,8 +293,10 @@ fn build_tray_menu(
     menu.append(&log_folder)?;
     menu.append(&PredefinedMenuItem::separator())?;
 
-    let support = MenuItem::with_id(manager::SUPPORT_ID, "Support ActivityWatch", true, None);
-    menu.append(&support)?;
+    if !manager::is_supporter() {
+        let support = MenuItem::with_id(manager::SUPPORT_ID, "Support ActivityWatch", true, None);
+        menu.append(&support)?;
+    }
     let quit = MenuItem::with_id("quit", "Quit ActivityWatch", true, None);
     menu.append(&quit)?;
 
@@ -344,5 +347,35 @@ fn show_notification(title: &str, message: &str) {
         .show()
     {
         warn!("Failed to show notification: {e}");
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::*;
+    use tao::platform::unix::EventLoopBuilderExtUnix;
+
+    #[test]
+    #[ignore = "requires a display; run with xvfb-run and --ignored"]
+    fn supporter_choice_controls_mini_menu() {
+        let _event_loop = EventLoopBuilder::<()>::with_user_event()
+            .with_any_thread(true)
+            .build();
+        let modules = manager::ModulesSnapshot::new();
+        for supporter in [false, true, false] {
+            manager::set_supporter(supporter);
+            let (menu, _) = build_tray_menu(&modules).unwrap();
+            let ids: Vec<_> = menu
+                .items()
+                .iter()
+                .map(|item| item.id().0.clone())
+                .collect();
+            assert_eq!(
+                ids.iter().any(|id| id == manager::SUPPORT_ID),
+                !supporter,
+                "mini support item must honour supporter={supporter}"
+            );
+            assert_eq!(ids.last().map(String::as_str), Some("quit"));
+        }
     }
 }

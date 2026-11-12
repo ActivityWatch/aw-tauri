@@ -467,6 +467,21 @@ pub(crate) fn read_notify_enabled(ds: &aw_datastore::Datastore) -> bool {
     }
 }
 
+/// Read the honor-system `supporter` flag from the settings datastore.
+///
+/// aw-webui writes `POST /api/0/settings/supporter` with a bare boolean once the
+/// user says they already support ActivityWatch, and skips the write while it is
+/// false. A missing key, invalid JSON or any non-boolean-true value therefore all
+/// mean "not a supporter", which keeps today's behaviour: show the support item.
+pub(crate) fn read_supporter(ds: &aw_datastore::Datastore) -> bool {
+    match ds.get_key_value("settings.supporter") {
+        Ok(val) => serde_json::from_str::<serde_json::Value>(&val)
+            .map(|v| v.as_bool() == Some(true))
+            .unwrap_or(false),
+        Err(_) => false,
+    }
+}
+
 /// Write `aw-notify.enabled` to the settings datastore, preserving all other keys.
 /// Returns `true` if the write succeeded, `false` on any datastore error.
 pub(crate) fn write_notify_enabled(ds: &aw_datastore::Datastore, enabled: bool) -> bool {
@@ -864,6 +879,8 @@ fn run_daemon() {
     legacy_import_if_needed(&db_path, &cli_args.profile, testing);
     let datastore = aw_datastore::Datastore::new(db_path, false);
     let daemon_notify_enabled = read_notify_enabled(&datastore);
+    // The tray leaves out its support item once the user says they already support us.
+    manager::set_supporter(read_supporter(&datastore));
     let device_id = aw_server::device_id::get_device_id();
 
     let asset_path_opt = match std::env::var("AW_WEBUI_DIR") {
@@ -1280,6 +1297,8 @@ pub fn run() {
                 // aw-notify never autostarts unless the user explicitly enables it.
                 let notify_datastore = server_state.datastore.clone();
                 let notify_enabled = read_notify_enabled(&notify_datastore);
+                // Seed the tray's support-item visibility before the first menu build.
+                manager::set_supporter(read_supporter(&notify_datastore));
                 // Capture port before aw_config is moved into build_rocket so the
                 // manager uses the CLI-computed port (--port / --testing) rather
                 // than the raw config-file default from get_config().port.
@@ -1689,6 +1708,50 @@ mod tests {
             );
             reader.close();
         }
+        // A settings helper must not close the shared server worker.
+        assert!(server.get_buckets().is_ok());
+        server.close();
+        remove_database_after_close(&path);
+    }
+
+    #[test]
+    fn supporter_setting_reads_only_boolean_true() {
+        let path = std::env::temp_dir().join(format!(
+            "aw-tauri-supporter-setting-{}-{}.db",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let path_string = path.to_str().unwrap().to_string();
+        let server = aw_datastore::Datastore::new(path_string, false);
+
+        // Missing key: the web UI skips writing while it is false, so unset must
+        // mean "not a supporter" — the tray keeps its support item.
+        let settings = server.clone();
+        let missing = super::read_supporter(&settings);
+        assert!(!missing, "an unset supporter key is not a supporter");
+
+        // The web UI stores a bare boolean, not an object.
+        server
+            .set_key_value_and_commit("settings.supporter", "true")
+            .unwrap();
+        let settings = server.clone();
+        assert!(super::read_supporter(&settings));
+
+        // Anything else keeps the item visible: no string matching, no coercion.
+        for value in [r#""true""#, "1", r#"{"supporter":true}"#] {
+            server
+                .set_key_value_and_commit("settings.supporter", value)
+                .unwrap();
+            let settings = server.clone();
+            assert!(
+                !super::read_supporter(&settings),
+                "{value} must not count as a supporter flag"
+            );
+        }
+
         // A settings helper must not close the shared server worker.
         assert!(server.get_buckets().is_ok());
         server.close();
