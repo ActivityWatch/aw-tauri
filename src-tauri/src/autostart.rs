@@ -133,25 +133,47 @@ pub fn sync_from_config(app: &AppHandle) {
     // entry: Some(true) = entry was active, Some(false) = entry was disabled in place.
     // Create the replacement only when the legacy entry was actually active so we do
     // not silently re-enable autostart that the user had turned off.
-    let migration = migrate_legacy_named_profile_entry(&profile::current_profile());
+    let mut register = |enabled| {
+        let manager = app.autolaunch();
+        if enabled {
+            manager.enable().map_err(|e| e.to_string())?;
+        } else if manager.is_enabled().map_err(|e| e.to_string())? {
+            manager.disable().map_err(|e| e.to_string())?;
+        }
+        if manager.is_enabled().map_err(|e| e.to_string())? != enabled {
+            return Err(format!(
+                "Replacement autostart entry did not reach enabled={enabled}"
+            ));
+        }
+        set_cached(enabled);
+        Ok(())
+    };
+    let migration =
+        match migrate_legacy_named_profile_entry(&profile::current_profile(), &mut register) {
+            Ok(migration) => migration,
+            Err(e) => {
+                clear_cached();
+                warn!(
+                    "Failed to migrate legacy autostart entry; keeping the original for retry: {e}"
+                );
+                return;
+            }
+        };
 
-    // Default-profile macOS LaunchAgent migration only applies to the default profile;
-    // running as a named profile must not remove the default entry and enable the
-    // named one instead.
+    // Named profiles must not migrate the default profile's LaunchAgent.
     #[cfg(target_os = "macos")]
     let migration = if migration.is_none() && profile::is_default(&profile::current_profile()) {
-        migrate_legacy_default_macos_launch_agent().then_some(true)
+        match migrate_legacy_default_macos_launch_agent(&mut register) {
+            Ok(migration) => migration,
+            Err(e) => {
+                clear_cached();
+                warn!("Failed to migrate legacy LaunchAgent; keeping the original for retry: {e}");
+                return;
+            }
+        }
     } else {
         migration
     };
-
-    if migration == Some(true) {
-        if let Err(e) = app.autolaunch().enable() {
-            warn!("Failed to create replacement autostart entry after legacy migration: {e}");
-        } else {
-            set_cached(true);
-        }
-    }
 
     let config_enabled = get_config().autostart.enabled;
     let current = match is_registered(app) {
@@ -192,7 +214,7 @@ pub fn sync_from_config(app: &AppHandle) {
     // the initial autostart registration from ever running.
     let is_first_run = *crate::is_first_run();
 
-    if is_first_run {
+    if apply_first_run_defaults(is_first_run, migration) {
         let manager = app.autolaunch();
         let result = if config_enabled {
             manager.enable()
@@ -276,86 +298,67 @@ fn autostart_entry_name(app: &AppHandle) -> String {
         .unwrap_or_else(|| app.package_info().name.clone())
 }
 
-/// Remove `~/Library/LaunchAgents/aw-tauri.plist` if it belongs to the default
-/// profile and is therefore a leftover from builds before b7d5832 (Nov 2025),
-/// which switched from `MacosLauncher::LaunchAgent` to `MacosLauncher::AppleScript`.
-/// The new launcher does not write this file; keeping it starts a second instance
-/// at login.  Named-profile plists that happen to have the same base name are
-/// identified by their `--profile` flag and left alone — they are cleaned up by
-/// [`migrate_legacy_named_profile_entry`] on that profile's own next run.
-/// Returns `true` if the legacy LaunchAgent was found and removed (i.e. the
-/// caller should re-create autostart via the new Login Items method).
+/// Migrate the default profile's pre-b7d5832 LaunchAgent to Login Items.
+/// Keep the LaunchAgent until its replacement is registered and verified.
 #[cfg(target_os = "macos")]
-fn migrate_legacy_default_macos_launch_agent() -> bool {
+fn migrate_legacy_default_macos_launch_agent(
+    register: &mut impl FnMut(bool) -> Result<(), String>,
+) -> Result<Option<bool>, String> {
     let Some(path) = legacy_macos_launch_agent_path() else {
-        return false;
+        return Ok(None);
     };
-    let Ok(contents) = fs::read_to_string(&path) else {
-        return false;
+    let contents = match fs::read_to_string(&path) {
+        Ok(contents) => contents,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(format!("Failed to read {}: {e}", path.display())),
     };
     if contents.contains("--profile") {
-        // Belongs to a named profile — leave it.
-        return false;
+        return Ok(None);
     }
-    match fs::remove_file(&path) {
-        Ok(()) => {
-            info!(
-                "Removed legacy default-profile macOS LaunchAgent at {} \
-                 (app now uses Login Items via AppleScript)",
-                path.display()
-            );
-            true
-        }
-        Err(e) => {
-            warn!(
-                "Failed to remove legacy macOS LaunchAgent {}: {e}",
-                path.display()
-            );
-            false
-        }
-    }
+    finish_legacy_migration(true, register, || {
+        fs::remove_file(&path).map_err(|e| format!("Failed to remove {}: {e}", path.display()))
+    })
+    .map(Some)
 }
 
-/// Drop a leftover shared `aw-tauri` login entry if a previous release
-/// registered this named profile under that identity.  The default profile
-/// still owns that name, so we only remove the entry when its command
-/// contains `--profile <this>`.
-///
-/// Returns `Some(was_enabled)` if an owned legacy entry was found and removed:
-/// `true` means the entry was active (caller should re-create it); `false`
-/// means the entry was disabled in place (e.g. `Hidden=true` in a desktop
-/// file) and the caller must not re-enable it.  Returns `None` when no owned
-/// legacy entry exists.
-fn migrate_legacy_named_profile_entry(profile: &str) -> Option<bool> {
+/// Migrate an owned shared-name login entry to this profile's identity.
+/// `Some(false)` preserves a disabled legacy entry's intent; `None` means
+/// no owned legacy entry. Failures retain the original and must stop sync.
+fn migrate_legacy_named_profile_entry(
+    profile: &str,
+    register: &mut impl FnMut(bool) -> Result<(), String>,
+) -> Result<Option<bool>, String> {
     if profile::is_default(profile) {
-        return None;
+        return Ok(None);
     }
 
     #[cfg(target_os = "linux")]
     if let Some(path) = legacy_linux_desktop_path() {
-        if let Some(was_enabled) = remove_legacy_file_if_owned(&path, profile) {
-            return Some(was_enabled);
+        if let Some(was_enabled) = migrate_legacy_file_if_owned(&path, profile, register)? {
+            return Ok(Some(was_enabled));
         }
     }
 
     #[cfg(target_os = "macos")]
     if let Some(path) = legacy_macos_launch_agent_path() {
-        if remove_legacy_file_if_owned(&path, profile).is_some() {
+        if migrate_legacy_file_if_owned(&path, profile, register)?.is_some() {
             // A macOS LaunchAgent plist has no in-place "disabled" state;
             // its presence means the entry was active.
-            return Some(true);
+            return Ok(Some(true));
         }
     }
 
     #[cfg(windows)]
-    if migrate_legacy_windows_run_value(profile) {
-        // A Windows Run registry value being present means autostart was enabled.
-        // (Checking StartupApproved for the finer-grained disabled state is
-        // not implemented; treat presence as enabled.)
-        return Some(true);
+    {
+        return migrate_legacy_windows_run_value(
+            profile,
+            profile::LEGACY_AUTOSTART_APP_NAME,
+            register,
+        );
     }
 
-    None
+    #[cfg(not(windows))]
+    Ok(None)
 }
 
 #[cfg(target_os = "linux")]
@@ -374,37 +377,40 @@ fn legacy_macos_launch_agent_path() -> Option<std::path::PathBuf> {
     })
 }
 
-/// Returns `Some(was_enabled)` when the file at `path` is owned by `profile`
-/// and was successfully removed: `true` means the entry was active, `false`
-/// means it was disabled in place (XDG desktop `Hidden=true`).  Returns
-/// `None` when the file does not exist, is not owned by this profile, or
-/// could not be removed.
-fn remove_legacy_file_if_owned(path: &Path, profile: &str) -> Option<bool> {
-    let Ok(contents) = fs::read_to_string(path) else {
-        return None;
+fn apply_first_run_defaults(first_run: bool, migration: Option<bool>) -> bool {
+    first_run && migration.is_none()
+}
+
+/// Match and verify the replacement state before removing the old entry.
+/// A failed registration leaves the original available on the next launch.
+fn finish_legacy_migration(
+    was_enabled: bool,
+    register: &mut impl FnMut(bool) -> Result<(), String>,
+    remove: impl FnOnce() -> Result<(), String>,
+) -> Result<bool, String> {
+    register(was_enabled)?;
+    remove()?;
+    Ok(was_enabled)
+}
+
+fn migrate_legacy_file_if_owned(
+    path: &Path,
+    profile: &str,
+    register: &mut impl FnMut(bool) -> Result<(), String>,
+) -> Result<Option<bool>, String> {
+    let contents = match fs::read_to_string(path) {
+        Ok(contents) => contents,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(format!("Failed to read {}: {e}", path.display())),
     };
     if !profile::command_targets_profile(&contents, profile) {
-        return None;
+        return Ok(None);
     }
-    // XDG desktop files can carry `Hidden=true` to disable the entry without
-    // deleting the file.  Preserve that intent rather than re-enabling.
     let was_enabled = !is_entry_hidden(&contents);
-    match fs::remove_file(path) {
-        Ok(()) => {
-            info!(
-                "Removed leftover autostart entry at {} owned by profile {profile}",
-                path.display()
-            );
-            Some(was_enabled)
-        }
-        Err(e) => {
-            warn!(
-                "Failed to remove leftover autostart entry {}: {e}",
-                path.display()
-            );
-            None
-        }
-    }
+    finish_legacy_migration(was_enabled, register, || {
+        fs::remove_file(path).map_err(|e| format!("Failed to remove {}: {e}", path.display()))
+    })
+    .map(Some)
 }
 
 /// Returns `true` when the file contents indicate the entry has been disabled
@@ -418,40 +424,39 @@ pub(crate) fn is_entry_hidden(contents: &str) -> bool {
 }
 
 #[cfg(windows)]
-fn migrate_legacy_windows_run_value(profile: &str) -> bool {
+fn migrate_legacy_windows_run_value(
+    profile: &str,
+    name: &str,
+    register: &mut impl FnMut(bool) -> Result<(), String>,
+) -> Result<Option<bool>, String> {
     use winreg::enums::{HKEY_CURRENT_USER, KEY_READ, KEY_SET_VALUE};
     use winreg::RegKey;
 
     const RUN_KEY: &str = r"SOFTWARE\Microsoft\Windows\CurrentVersion\Run";
     let hkcu = RegKey::predef(HKEY_CURRENT_USER);
-    let Ok(key) = hkcu.open_subkey_with_flags(RUN_KEY, KEY_READ) else {
-        return false;
+    let key = match hkcu.open_subkey_with_flags(RUN_KEY, KEY_READ | KEY_SET_VALUE) {
+        Ok(key) => key,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(format!("Failed to open legacy Windows Run key: {e}")),
     };
-    let Ok(value) = key.get_value::<String, _>(profile::LEGACY_AUTOSTART_APP_NAME) else {
-        return false;
+    let value = match key.get_value::<String, _>(name) {
+        Ok(value) => value,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(format!("Failed to read legacy Windows Run value: {e}")),
     };
     if !profile::command_targets_profile(&value, profile) {
-        return false;
+        return Ok(None);
     }
-    match hkcu.open_subkey_with_flags(RUN_KEY, KEY_SET_VALUE) {
-        Ok(key) => match key.delete_value(profile::LEGACY_AUTOSTART_APP_NAME) {
-            Ok(()) => {
-                info!(
-                    "Removed leftover Windows Run value {} owned by profile {profile}",
-                    profile::LEGACY_AUTOSTART_APP_NAME
-                );
-                true
-            }
-            Err(e) => {
-                warn!("Failed to remove leftover Windows Run value: {e}");
-                false
-            }
-        },
-        Err(e) => {
-            warn!("Failed to open Windows Run key for leftover removal: {e}");
-            false
-        }
-    }
+    // Use the same Run + StartupApproved semantics as the autostart plugin.
+    // Checking Run presence alone re-enables entries disabled in Task Manager.
+    let was_enabled = auto_launch::AutoLaunch::new(name, "", &[] as &[&str])
+        .is_enabled()
+        .map_err(|e| format!("Failed to read legacy Windows autostart state: {e}"))?;
+    finish_legacy_migration(was_enabled, register, || {
+        key.delete_value(name)
+            .map_err(|e| format!("Failed to remove legacy Windows Run value: {e}"))
+    })
+    .map(Some)
 }
 
 /// Builds the tray "Start at login" item, checked to match the current OS state.
@@ -665,8 +670,8 @@ fn is_dotted_autostart_enabled(trimmed: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        is_entry_hidden, patch_autostart_enabled, persist_enabled_at, read_and_patch,
-        remove_legacy_file_if_owned,
+        apply_first_run_defaults, is_entry_hidden, migrate_legacy_file_if_owned,
+        patch_autostart_enabled, persist_enabled_at, read_and_patch,
     };
     use std::fs;
 
@@ -801,13 +806,58 @@ auto_download = false
     }
 
     #[test]
+    fn migration_failure_keeps_legacy_entry_for_retry() {
+        let source = "Exec=/usr/bin/aw-tauri --profile research\nName=aw-tauri\n";
+        let path = write_temp_entry("retry", source);
+        let result = migrate_legacy_file_if_owned(&path, "research", &mut |_| {
+            Err("registration failed".into())
+        });
+        let retained = fs::read_to_string(&path);
+        assert!(result.is_err());
+        assert_eq!(
+            retained.unwrap(),
+            source,
+            "failed registration must retain the original"
+        );
+        let result = migrate_legacy_file_if_owned(&path, "research", &mut |_| {
+            assert!(
+                path.exists(),
+                "original must remain until replacement is ready"
+            );
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(result, Some(true));
+        assert!(!path.exists(), "successful retry removes the legacy entry");
+    }
+
+    #[test]
+    fn migration_disabled_legacy_suppresses_first_run_defaults() {
+        let path = write_temp_entry(
+            "disabled-first-run",
+            "Exec=aw-tauri --profile research\nHidden=true\n",
+        );
+        let migration = migrate_legacy_file_if_owned(&path, "research", &mut |enabled| {
+            assert!(!enabled, "must not enable a disabled entry");
+            Ok(())
+        })
+        .unwrap();
+        let _ = fs::remove_file(&path);
+        assert_eq!(migration, Some(false));
+        assert!(
+            !apply_first_run_defaults(true, migration),
+            "disabled legacy intent must beat the first-run enabled default"
+        );
+    }
+
+    #[test]
     fn migrate_removes_legacy_entry_owned_by_this_profile() {
         let path = write_temp_entry(
             "owned",
             "Exec=/usr/bin/aw-tauri --profile research\nName=aw-tauri\n",
         );
         assert_eq!(
-            remove_legacy_file_if_owned(&path, "research"),
+            migrate_legacy_file_if_owned(&path, "research", &mut |_| Ok(())).unwrap(),
             Some(true),
             "owned enabled entry should be removed and report was_enabled=true"
         );
@@ -821,8 +871,14 @@ auto_download = false
             "other",
             "Exec=/usr/bin/aw-tauri --profile testing\nName=aw-tauri\n",
         );
-        assert_eq!(remove_legacy_file_if_owned(&default_path, "research"), None);
-        assert_eq!(remove_legacy_file_if_owned(&other_path, "research"), None);
+        assert_eq!(
+            migrate_legacy_file_if_owned(&default_path, "research", &mut |_| Ok(())).unwrap(),
+            None
+        );
+        assert_eq!(
+            migrate_legacy_file_if_owned(&other_path, "research", &mut |_| Ok(())).unwrap(),
+            None
+        );
         assert!(
             default_path.exists(),
             "default identity must be left intact"
@@ -842,7 +898,7 @@ auto_download = false
             "Exec=/usr/bin/aw-tauri --profile research\nName=aw-tauri\nHidden=true\n",
         );
         assert_eq!(
-            remove_legacy_file_if_owned(&path, "research"),
+            migrate_legacy_file_if_owned(&path, "research", &mut |_| Ok(())).unwrap(),
             Some(false),
             "owned disabled entry should be removed and report was_enabled=false"
         );
@@ -859,3 +915,7 @@ auto_download = false
         assert!(!is_entry_hidden("")); // macOS plist, Windows value: no Hidden field
     }
 }
+
+#[cfg(all(test, windows))]
+#[path = "autostart_windows_tests.rs"]
+mod windows_tests;
