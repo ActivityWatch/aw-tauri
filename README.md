@@ -48,6 +48,18 @@ make dev
 make build
 ```
 
+### Bundle release identity
+
+The enclosing ActivityWatch release build supplies `AW_VERSION` at compile time
+(for example, `AW_VERSION=v0.14.2 make build`). The embedded server reports this
+exact value from `/api/0/info`, which also drives the dashboard footer, in GUI,
+mini and daemon modes. Research tags retain their `-research` suffix. Without
+this input, development builds retain the server's own version; aw-tauri's
+`0.1.0` package/config version is not an ActivityWatch release version.
+
+Run `python3 tests/test_release_version.py` for the standalone compile-input
+regression, including unset/empty input, stable, prerelease and research tags.
+
 ## Configuration
 
 aw-tauri reads its config from a TOML file:
