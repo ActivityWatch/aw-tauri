@@ -22,7 +22,8 @@ tauri-build = { version = "2.0.5", features = [] }
 [dependencies]
 clap = { version = "4", features = ["derive"] }
 shell-words = "1.1.0"
-tauri = { version = "2.2.5", features = ["tray-icon"] }
+# 2.12 brings wry 0.57.1, whose per-download state lets an export succeed after a failed one (tauri-apps/wry#1893).
+tauri = { version = "2.12.5", features = ["tray-icon"] }
 tauri-plugin-shell = "2.2.0"
 tauri-plugin-dialog = "2.2.0"
 tauri-plugin-notification = "2.2.1"
