@@ -1304,6 +1304,12 @@ pub fn run() {
                 // SPA-generated links where on_navigation (which only fires for top-level
                 // webview navigations) would miss JS-driven internal route changes.
                 let download_destinations = Mutex::new(downloads::Destinations::default());
+                // Compare effective ports: HTTP and HTTPS both omit their default
+                // port from URL.port, but those defaults are different services.
+                let dashboard_port = dashboard_url
+                    .port_or_known_default()
+                    .expect("Dashboard HTTP URL must have a port")
+                    .to_string();
                 let _main_window = WebviewWindowBuilder::new(
                     app,
                     "main",
@@ -1357,19 +1363,30 @@ pub fn run() {
                     document.addEventListener('click', function(e) {
                         var el = e.target;
                         while (el && el.tagName !== 'A') { el = el.parentElement; }
+                        if (!el || !el.href) { return; }
                         // Blob exports belong to the webview's native download handler,
                         // not the OS URL opener (which cannot resolve webview blob URLs).
-                        if (el && el.href && el.href.startsWith('blob:') && el.hasAttribute('download')) { return; }
+                        if (el.href.startsWith('blob:') && el.hasAttribute('download')) { return; }
                         // javascript: pseudo-links are not real navigation targets; let
                         // the page's own handlers run instead of handing them to the OS opener.
-                        if (el && el.protocol === 'javascript:') { return; }
-                        if (el && el.href && !/^(https?:\/\/(localhost|127\.0\.0\.1)|tauri:|about:)/.test(el.href)) {
+                        if (el.protocol === 'javascript:') { return; }
+                        // Only exact local hosts at the dashboard's port stay here. Parsed
+                        // hosts, not a URL prefix: localhost.example.com and
+                        // localhost@evil.example are external. Parsed port too: no other
+                        // local service is reachable from a dashboard link, so a stray
+                        // http://localhost:9999/ belongs in the browser.
+                        var effectivePort = el.port || (el.protocol === 'https:' ? '443' : '80');
+                        var localHttp = (el.protocol === 'http:' || el.protocol === 'https:') &&
+                            (el.hostname === 'localhost' || el.hostname === '127.0.0.1') &&
+                            effectivePort === '__AW_DASHBOARD_PORT__';
+                        if (!localHttp && el.protocol !== 'tauri:' && el.protocol !== 'about:') {
                             e.preventDefault();
                             e.stopPropagation();
                             window.__TAURI_INTERNALS__.invoke('open_external', { url: el.href });
                         }
                     }, true);
-                    "#,
+                    "#
+                    .replace("__AW_DASHBOARD_PORT__", &dashboard_port),
                 )
                 .build()
                 .expect("Failed to create main window");
