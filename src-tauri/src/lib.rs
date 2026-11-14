@@ -356,6 +356,7 @@ fn write_formatted_config(config: &UserConfig, path: &Path) -> Result<(), std::i
 
     // Add updates section
     output.push_str("[updates]\n");
+    output.push_str(&format!("check = {}\n", config.updates.check));
     output.push_str(&format!(
         "auto_download = {}\n",
         config.updates.auto_download
@@ -691,6 +692,9 @@ pub struct AutostartConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UpdatesConfig {
+    /// When false, never contact the update server (no check at startup).
+    #[serde(default = "default_true")]
+    pub check: bool,
     /// When true, download updates as soon as they are found.
     /// When false, prompt the user before starting the download.
     #[serde(default = "default_auto_download")]
@@ -701,9 +705,14 @@ fn default_auto_download() -> bool {
     true
 }
 
+fn default_true() -> bool {
+    true
+}
+
 impl Default for UpdatesConfig {
     fn default() -> Self {
         Self {
+            check: default_true(),
             auto_download: default_auto_download(),
         }
     }
@@ -758,9 +767,7 @@ impl Default for UserConfig {
                 modules,
             },
             module_args: BTreeMap::new(),
-            updates: UpdatesConfig {
-                auto_download: true,
-            },
+            updates: UpdatesConfig::default(),
         }
     }
 }
@@ -1532,6 +1539,10 @@ pub fn run() {
             tauri::async_runtime::spawn(async move {
                 if updates_disabled_via_env() {
                     info!("Update check disabled via AW_DISABLE_AUTO_UPDATE");
+                    return;
+                }
+                if !get_config().updates.check {
+                    info!("Update check disabled via [updates] check = false");
                     return;
                 }
                 info!("Checking for updates...");
