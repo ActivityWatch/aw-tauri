@@ -1346,7 +1346,13 @@ pub fn run() {
                         }
                         tauri::webview::DownloadEvent::Finished { path, success, .. } => {
                             info!("Download finished: success={success} path={path:?}");
-                            if !success {
+                            if let Some(message) = downloads::saved_message(success, path.as_deref()) {
+                                webview.app_handle().dialog()
+                                    .message(message)
+                                    .kind(MessageDialogKind::Info)
+                                    .title("Export saved")
+                                    .show(|_| {});
+                            } else if !success {
                                 webview.app_handle().dialog()
                                     .message("The native downloader reported a failure. A complete backup could not be confirmed. Check Downloads and available disk space before retrying.")
                                     .kind(MessageDialogKind::Error)

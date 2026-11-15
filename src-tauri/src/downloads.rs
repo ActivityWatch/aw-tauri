@@ -84,9 +84,29 @@ impl Destinations {
     }
 }
 
+/// Message confirming a saved export, or `None` when success cannot be confirmed.
+///
+/// Only a native `success=true` completion that names its path counts: file
+/// existence is not proof (a failed transfer can leave a partial file), and
+/// some backends (macOS) report no path, so they get no confirmation.
+pub fn saved_message(success: bool, path: Option<&Path>) -> Option<String> {
+    let path = path.filter(|_| success)?;
+    Some(format!("Export saved to:\n\n{}", path.display()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn saved_message_requires_native_success_and_a_path() {
+        let path = Path::new("/home/u/Downloads/aw-buckets-export (1).json");
+        let message = saved_message(true, Some(path)).unwrap();
+        assert!(message.contains(&path.display().to_string()), "{message}");
+        assert_eq!(saved_message(true, None), None);
+        assert_eq!(saved_message(false, Some(path)), None);
+        assert_eq!(saved_message(false, None), None);
+    }
 
     #[test]
     fn creates_downloads_and_preserves_existing_export() {
