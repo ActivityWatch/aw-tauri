@@ -70,9 +70,7 @@ fn resolve_symlinks(path: &Path) -> PathBuf {
 /// Adds `name` to, or removes it from, `[autostart] modules` in the config file,
 /// so a module started or stopped from the tray stays that way after a restart.
 pub(crate) fn persist_module_autostart(name: &str, enabled: bool) -> Result<(), String> {
-    let _guard = autostart::PERSIST_LOCK
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
+    let _guard = autostart::persist_lock();
     let path = get_config_path();
     let source = fs::read_to_string(&path)
         .map_err(|e| format!("Failed to read config file {}: {e}", path.display()))?;
