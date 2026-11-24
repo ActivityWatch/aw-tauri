@@ -554,6 +554,29 @@ pub fn handle_first_run() {
     }
 }
 
+/// Text for the "Update Available" dialog. The release notes come from the unsigned
+/// `latest.json`, so they are untrusted input.
+fn update_prompt_body(version: &str, notes: Option<&str>) -> String {
+    dialog_text(format!(
+        "Version {} is available.\n\nDownload and install this update?\n\nRelease notes:\n{}",
+        version,
+        notes.unwrap_or("No release notes available.")
+    ))
+}
+
+/// Make dynamic text safe for a message dialog. rfd converts the description to a
+/// `CString` with `.unwrap()`, so drop interior NULs. On Linux, its GTK3 backend also hands
+/// the description to `gtk_message_dialog_format_secondary_text` as a printf format
+/// string, so every `%` must be doubled to display literally.
+fn dialog_text(text: String) -> String {
+    let text = text.replace('\0', "");
+    if cfg!(target_os = "linux") {
+        text.replace('%', "%%")
+    } else {
+        text
+    }
+}
+
 fn build_dashboard_url(port: u16, api_key: Option<&str>) -> Url {
     let mut url =
         Url::parse(&format!("http://localhost:{port}/")).expect("Failed to parse localhost url");
@@ -1158,7 +1181,7 @@ async fn download_and_install_update(handle: AppHandle, update: tauri_plugin_upd
             } else {
                 handle
                     .dialog()
-                    .message(format!("Failed to install update:\n\n{}", e))
+                    .message(dialog_text(format!("Failed to install update:\n\n{}", e)))
                     .kind(MessageDialogKind::Error)
                     .title("Update Failed")
                     .show(|_| {});
@@ -1596,14 +1619,8 @@ pub fn run() {
                                     update.version
                                 );
                                 let app_handle = handle.clone();
-                                let body = format!(
-                                    "Version {} is available.\n\nDownload and install this update?\n\nRelease notes:\n{}",
-                                    update.version,
-                                    update
-                                        .body
-                                        .as_deref()
-                                        .unwrap_or("No release notes available.")
-                                );
+                                let body =
+                                    update_prompt_body(&update.version, update.body.as_deref());
                                 app_handle
                                     .dialog()
                                     .message(body)
@@ -1667,7 +1684,7 @@ pub fn run() {
 mod tests {
     use super::{
         already_running_message, build_dashboard_url, default_linux_modules, load_existing_config,
-        open_external_with, parse_config_bytes, rejected_launch_message, UserConfig,
+        open_external_with, parse_config_bytes, rejected_launch_message, update_prompt_body, UserConfig,
     };
 
     #[test]
@@ -2058,6 +2075,26 @@ mod tests {
             build_dashboard_url(5600, Some("")).as_str(),
             "http://localhost:5600/"
         );
+    }
+
+    /// rfd's GTK3 backend passes the dialog description to
+    /// `gtk_message_dialog_format_secondary_text` as the printf format string, so a `%s`
+    /// in release notes reads garbage off the stack (and `%n` writes through it).
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn update_prompt_escapes_printf_directives_in_release_notes() {
+        let body = update_prompt_body("0.15.0", Some("50% faster %s%s%n"));
+        assert!(body.contains("50%% faster %%s%%s%%n"), "{body}");
+        assert!(!body.replace("%%", "").contains('%'), "{body}");
+    }
+
+    /// rfd builds a `CString` from the description with `.unwrap()`, so an interior NUL
+    /// (valid in JSON as `\u0000`) in the release notes panics when the dialog opens.
+    #[test]
+    fn update_prompt_drops_nul_bytes_from_release_notes() {
+        let body = update_prompt_body("0.15.0", Some("fixes\0more"));
+        assert!(!body.contains('\0'), "{body:?}");
+        assert!(body.contains("fixesmore"), "{body:?}");
     }
 
     #[test]
