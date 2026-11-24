@@ -188,7 +188,14 @@ impl ManagerState {
             module.pid = Some(pid);
             module.started_at = Some(Instant::now());
             module.args = args;
-            module.pending_shutdown = false;
+            if module.pending_shutdown {
+                // The user stopped it while the spawn was in flight (stop_module had no pid
+                // to signal). Stop it now; pending_shutdown stays set so it isn't restarted.
+                info!("Stopping {name}: a stop was requested while it was starting");
+                if let Err(e) = send_sigterm(pid) {
+                    error!("Failed to send SIGTERM to module {name}: {e}");
+                }
+            }
         } else {
             warn!("Started unknown module {name}, not in discovered set");
         }
@@ -225,6 +232,9 @@ impl ManagerState {
         if !self.is_module_running(name) {
             if let Some(module) = self.modules.get_mut(name) {
                 module.generation += 1;
+                // An explicit start supersedes an earlier stop; a stop requested after this
+                // point (before Started is handled) is honoured in started_module.
+                module.pending_shutdown = false;
                 // Fall back to the last known (or configured) args for this module, so manual
                 // tray restarts and post-crash restarts don't silently drop them (#131).
                 let effective_args = args.cloned().or_else(|| module.args.clone());
@@ -1672,6 +1682,38 @@ mod tests {
             autostart_names(&["aw-awatcher"], false, true),
             ["aw-awatcher"]
         );
+    }
+
+    #[test]
+    fn stop_requested_while_starting_is_not_lost() {
+        let mut s = state_with_module("aw-watcher", 0, None);
+        {
+            let m = s.modules.get_mut("aw-watcher").unwrap();
+            m.run_state = Some(false);
+            m.pid = None;
+        }
+        s.start_module("aw-watcher", None); // spawn requested (/nonexistent fails in its thread)
+        s.stop_module("aw-watcher"); // user stops it before Started is handled
+        s.started_module("aw-watcher", 999_999_999, None); // the in-flight Started arrives
+        assert!(
+            s.modules["aw-watcher"].pending_shutdown,
+            "a stop requested before Started was handled must stick"
+        );
+    }
+
+    #[test]
+    fn manual_start_after_restart_limit_clears_pending_shutdown() {
+        let mut s = state_with_module("aw-watcher", 3, None);
+        {
+            let m = s.modules.get_mut("aw-watcher").unwrap();
+            m.run_state = Some(false);
+            m.pid = None;
+            m.pending_shutdown = true; // left stopped after the restart limit
+        }
+        assert_eq!(s.handle_system_click("aw-watcher"), Some(true));
+        s.started_module("aw-watcher", 999_999_999, None);
+        assert!(!s.modules["aw-watcher"].pending_shutdown);
+        assert_eq!(s.modules["aw-watcher"].run_state, Some(true));
     }
 
     #[test]
