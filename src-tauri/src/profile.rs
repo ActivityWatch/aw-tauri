@@ -155,9 +155,11 @@ pub fn command_targets_profile(command: &str, profile: &str) -> bool {
     if is_default(profile) || profile.is_empty() {
         return false;
     }
+    // Drop plist <string> markup first, so a profile literally named "string" still matches.
+    let command = command.replace("<string>", " ").replace("</string>", " ");
     let tokens: Vec<&str> = command
         .split(|c: char| c.is_whitespace() || matches!(c, '<' | '>' | '"' | '\''))
-        .filter(|t| !t.is_empty() && *t != "string" && *t != "/string")
+        .filter(|t| !t.is_empty())
         .collect();
     tokens
         .windows(2)
@@ -295,6 +297,20 @@ mod tests {
         assert!(!command_targets_profile(
             r#"C:\Program Files\aw-tauri.exe --profile research-lab"#,
             "research"
+        ));
+    }
+
+    #[test]
+    fn command_targets_profile_named_like_a_plist_tag() {
+        // "string" is a valid profile name; only the plist <string> tags are markup.
+        assert!(validate_profile("string").is_ok());
+        assert!(command_targets_profile(
+            "/usr/bin/aw-tauri --profile string",
+            "string"
+        ));
+        assert!(command_targets_profile(
+            "<string>/Applications/aw-tauri.app</string><string>--profile</string><string>string</string>",
+            "string"
         ));
     }
 }
