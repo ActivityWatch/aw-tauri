@@ -315,10 +315,11 @@ fn windows_user_discovery_paths(
     profile: Option<&Path>,
     local_app_data: Option<&Path>,
 ) -> Vec<PathBuf> {
-    let Some(profile) = profile else {
+    let Some(profile) = profile.filter(|p| p.is_absolute()) else {
         return Vec::new();
     };
     let local = local_app_data
+        .filter(|p| p.is_absolute())
         .map(Path::to_path_buf)
         .unwrap_or_else(|| profile.join("AppData").join("Local"));
     vec![
@@ -379,6 +380,31 @@ fn migrate_windows_discovery_paths(
     *paths = migrated;
 }
 
+#[cfg(any(target_os = "windows", test))]
+fn windows_discovery_username(
+    username: Option<String>,
+    account_name: impl FnOnce() -> Option<String>,
+) -> Option<String> {
+    username
+        .filter(|name| !name.is_empty())
+        .or_else(account_name)
+}
+
+/// Read the account name independently of launcher-supplied environment vars.
+/// Do not infer it from USERPROFILE: `john.CORP` is a folder, not an account name.
+#[cfg(target_os = "windows")]
+fn windows_account_name() -> Option<String> {
+    // GetUserNameW documents UNLEN (256) + one UTF-16 unit for the terminator.
+    let mut buffer = [0u16; 257];
+    let mut len = buffer.len() as u32;
+    // SAFETY: buffer is writable for len UTF-16 units, and len is a valid pointer.
+    let success = unsafe { winapi::um::winbase::GetUserNameW(buffer.as_mut_ptr(), &mut len) };
+    if success == 0 || len <= 1 || len as usize > buffer.len() {
+        return None;
+    }
+    String::from_utf16(&buffer[..len as usize - 1]).ok()
+}
+
 /// Fix discovery paths loaded from a `config.toml` written by an older build.
 /// Only Windows has legacy entries to rewrite. The file itself is left as is,
 /// so this has to run on every load.
@@ -386,7 +412,7 @@ pub fn migrate_legacy_discovery_paths(paths: &mut Vec<PathBuf>) {
     #[cfg(target_os = "windows")]
     migrate_windows_discovery_paths(
         paths,
-        std::env::var("USERNAME").ok().as_deref(),
+        windows_discovery_username(std::env::var("USERNAME").ok(), windows_account_name).as_deref(),
         &current_windows_user_discovery_paths(),
     );
     #[cfg(not(target_os = "windows"))]
@@ -680,7 +706,8 @@ mod tests {
 
     #[test]
     fn test_windows_user_discovery_paths_use_profile_folder() {
-        let profile = Path::new(r"C:/Users/john.CORP");
+        let root = std::env::temp_dir().join("john.CORP");
+        let profile = root.as_path();
         let paths = windows_user_discovery_paths(Some(profile), None);
         assert_eq!(paths[0], profile.join("aw-modules"));
         assert!(paths.iter().all(|p| p.starts_with(profile)), "{:?}", paths);
@@ -688,15 +715,71 @@ mod tests {
             .iter()
             .any(|p| p.starts_with(Path::new(r"C:/Users/john/"))));
 
-        let local = Path::new(r"D:/Local");
+        let local_root = std::env::temp_dir().join("redirected-local");
+        let local = local_root.as_path();
         let paths = windows_user_discovery_paths(Some(profile), Some(local));
         assert_eq!(paths[1], local.join("Programs").join("ActivityWatch-Tauri"));
         assert!(windows_user_discovery_paths(None, Some(local)).is_empty());
     }
 
     #[test]
+    fn test_windows_migration_without_username_uses_account_name() {
+        let current =
+            windows_user_discovery_paths(Some(&std::env::temp_dir().join("john.CORP")), None);
+        for username in [None, Some(String::new())] {
+            let username = windows_discovery_username(username, || Some("john".into()));
+            let mut paths = legacy_windows_user_discovery_paths("john");
+            paths.push(PathBuf::from("custom-modules"));
+            migrate_windows_discovery_paths(&mut paths, username.as_deref(), &current);
+            let mut expected = current.clone();
+            expected.push(PathBuf::from("custom-modules"));
+            assert_eq!(paths, expected);
+        }
+        assert_eq!(
+            windows_discovery_username(Some("john".into()), || panic!("unneeded fallback")),
+            Some("john".into()),
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn test_windows_account_name_is_available_without_username_env() {
+        // Direct native call: no process-wide env mutation in parallel tests.
+        assert!(windows_account_name().is_some_and(|name| !name.is_empty()));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn test_windows_discovery_rejects_drive_relative_and_rooted_paths() {
+        let profile = Path::new(r"C:\Users\john.CORP");
+        for invalid in [r"C:relative", r"\Users\john", r"/Users/john"] {
+            assert!(windows_user_discovery_paths(Some(Path::new(invalid)), None).is_empty());
+            assert_eq!(
+                windows_user_discovery_paths(Some(profile), Some(Path::new(invalid))),
+                windows_user_discovery_paths(Some(profile), None),
+            );
+        }
+        assert!(
+            !windows_user_discovery_paths(Some(Path::new(r"\\server\share\john")), None).is_empty()
+        );
+    }
+
+    #[test]
+    fn test_windows_discovery_rejects_relative_roots() {
+        let profile = std::env::temp_dir().join("john.CORP");
+        for invalid in ["", ".", "relative/profile"] {
+            assert!(windows_user_discovery_paths(Some(Path::new(invalid)), None).is_empty());
+            assert_eq!(
+                windows_user_discovery_paths(Some(&profile), Some(Path::new(invalid))),
+                windows_user_discovery_paths(Some(&profile), None),
+            );
+        }
+    }
+
+    #[test]
     fn test_migrate_windows_discovery_paths_rewrites_only_legacy_entries() {
-        let current = windows_user_discovery_paths(Some(Path::new(r"C:/Users/john.CORP")), None);
+        let current =
+            windows_user_discovery_paths(Some(&std::env::temp_dir().join("john.CORP")), None);
         let custom = PathBuf::from(r"E:/my-modules");
         let mut paths = legacy_windows_user_discovery_paths("john");
         paths.insert(1, custom.clone());
