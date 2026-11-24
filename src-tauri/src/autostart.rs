@@ -583,8 +583,20 @@ fn persist_enabled_at(path: &Path, enabled: bool) -> Result<(), String> {
 /// `enabled`, or `None` if the file can't be read or patched safely.
 fn read_and_patch(path: &Path, enabled: bool) -> Option<String> {
     let source = std::fs::read_to_string(path).ok()?;
+    // The line patcher can match text inside a multi-line string, so accept an
+    // edit only if `autostart.enabled` is the one value it changed.
+    let mut expected: toml::Value = toml::from_str(&source).ok()?;
+    expected
+        .as_table_mut()?
+        .entry("autostart")
+        .or_insert_with(|| toml::Value::Table(Default::default()))
+        .as_table_mut()?
+        .insert("enabled".into(), toml::Value::Boolean(enabled));
+    let only_flag_changed =
+        |patched: &String| toml::from_str::<toml::Value>(patched).is_ok_and(|v| v == expected);
     let patched = patch_autostart_enabled(&source, enabled)
-        .or_else(|| insert_missing_autostart_enabled(&source, enabled))?;
+        .filter(only_flag_changed)
+        .or_else(|| insert_missing_autostart_enabled(&source, enabled).filter(only_flag_changed))?;
     // Only accept the surgical edit if the result still parses and actually
     // holds the requested value; otherwise let the caller rewrite the file.
     match toml::from_str::<UserConfig>(&patched) {
@@ -766,6 +778,27 @@ auto_download = false
             let actual: toml::Value = toml::from_str(&written).unwrap();
             assert_eq!(actual, expected, "only autostart.enabled may change");
         }
+    }
+
+    #[test]
+    fn missing_enabled_key_never_edits_a_look_alike_line_in_a_string() {
+        let source = "port = 5600\ndiscovery_paths = []\n\n[module_args]\naw-watcher-x = \"\"\"\nautostart.enabled = false\n\"\"\"\n";
+        let path = write_temp_entry("config-lookalike", source);
+        persist_enabled_at(&path, true).expect("persist");
+        let written = fs::read_to_string(&path).unwrap();
+        fs::remove_file(&path).unwrap();
+        let mut expected: toml::Value = toml::from_str(source).unwrap();
+        let mut autostart = toml::map::Map::new();
+        autostart.insert("enabled".into(), toml::Value::Boolean(true));
+        expected
+            .as_table_mut()
+            .unwrap()
+            .insert("autostart".into(), toml::Value::Table(autostart));
+        let actual: toml::Value = toml::from_str(&written).unwrap();
+        assert_eq!(
+            actual, expected,
+            "only autostart.enabled may change: {written}"
+        );
     }
 
     #[test]

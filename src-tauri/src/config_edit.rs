@@ -76,7 +76,8 @@ pub(crate) fn persist_module_autostart(name: &str, enabled: bool) -> Result<(), 
     let path = get_config_path();
     let source = fs::read_to_string(&path)
         .map_err(|e| format!("Failed to read config file {}: {e}", path.display()))?;
-    match set_module_autostart(&source, name, enabled)? {
+    let startup = &crate::get_config().autostart.modules;
+    match set_module_autostart_from(&source, name, enabled, Some(startup))? {
         Some(updated) => write_atomic(&path, updated)
             .map_err(|e| format!("Failed to write config file {}: {e}", path.display())),
         None => Ok(()),
@@ -295,6 +296,17 @@ fn seed_missing_modules(doc: &mut DocumentMut, modules: &[ModuleEntry]) -> Resul
     Ok(())
 }
 
+/// [`set_module_autostart_from`], seeding a missing modules list from the
+/// parsed defaults.
+#[cfg(test)]
+pub(crate) fn set_module_autostart(
+    source: &str,
+    name: &str,
+    enabled: bool,
+) -> Result<Option<String>, String> {
+    set_module_autostart_from(source, name, enabled, None)
+}
+
 /// Returns `source` with module `name` added to (`enabled`) or removed from
 /// `[autostart] modules`, or `None` if it is already in that state.
 ///
@@ -305,17 +317,21 @@ fn seed_missing_modules(doc: &mut DocumentMut, modules: &[ModuleEntry]) -> Resul
 /// replacing any value there: the entry's args are what was in effect (they win
 /// over `[module_args]` when both are set), so a later start from the tray keeps
 /// using them.
-pub(crate) fn set_module_autostart(
+///
+/// A file without a modules list is seeded first, from `startup` (the
+/// watchers started at launch) when given, else from the parsed defaults.
+pub(crate) fn set_module_autostart_from(
     source: &str,
     name: &str,
     enabled: bool,
+    startup: Option<&[ModuleEntry]>,
 ) -> Result<Option<String>, String> {
     let config = toml::from_str::<UserConfig>(source)
         .map_err(|e| format!("Config file is malformed, not updating it: {e}"))?;
     let mut doc: DocumentMut = source
         .parse()
         .map_err(|e| format!("Config file is malformed, not updating it: {e}"))?;
-    seed_missing_modules(&mut doc, &config.autostart.modules)?;
+    seed_missing_modules(&mut doc, startup.unwrap_or(&config.autostart.modules))?;
 
     let mut moved_args = None;
     {
@@ -423,7 +439,7 @@ pub(crate) fn set_module_autostart(
 
 #[cfg(test)]
 mod tests {
-    use super::{set_module_autostart, write_atomic};
+    use super::{set_module_autostart, set_module_autostart_from, write_atomic};
     use crate::{write_formatted_config, AutostartConfig, ModuleEntry, UpdatesConfig, UserConfig};
 
     /// A unique scratch dir under the system temp dir; never the real config dir.
@@ -880,5 +896,19 @@ aw-watcher-input = "--poll-time 60"
                 Ok(None)
             );
         }
+    }
+
+    /// Without a modules list, a tray edit starts from the watchers started at
+    /// launch, not from a fresh lookup that may disagree (e.g. a discovery
+    /// path that went offline since).
+    #[test]
+    fn missing_modules_list_is_seeded_from_the_startup_watchers() {
+        let source = "port = 5600\ndiscovery_paths = []\n";
+        let startup = [ModuleEntry::Simple("aw-test-startup-only".into())];
+        let stopped =
+            set_module_autostart_from(source, "aw-test-startup-only", false, Some(&startup))
+                .expect("edit should succeed")
+                .expect("stopping a startup watcher must be saved");
+        assert!(modules_of(&stopped).is_empty(), "{stopped}");
     }
 }
