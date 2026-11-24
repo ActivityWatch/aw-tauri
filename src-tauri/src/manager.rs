@@ -201,18 +201,23 @@ impl ManagerState {
         }
         debug!("Modules: {:?}", self.modules);
     }
-    fn stopped_module(&mut self, name: &str, pid: u32) {
+    /// Records that process `pid` of module `name` exited. Returns `false` when the exit is
+    /// stale (not the tracked process), in which case the caller must not treat it as a crash.
+    fn stopped_module(&mut self, name: &str, pid: u32) -> bool {
         info!("Stopped module: {name} (pid {pid})");
         if let Some(module) = self.modules.get_mut(name) {
             // Drop Stopped messages from a process that is no longer the tracked one.
             // This prevents a delayed exit from an old process clobbering a replacement
             // that was started while the old one was shutting down (rapid toggle race).
-            if module.pid.is_some() && module.pid != Some(pid) {
+            // Started always precedes Stopped from the same spawn thread, so an exit that
+            // arrives while no pid is tracked belongs to a process already superseded
+            // (set_notify_enabled clears the pid when it starts a replacement).
+            if module.pid != Some(pid) {
                 debug!(
                     "Ignoring stale Stopped for {name}: pid {pid} ≠ tracked {:?}",
                     module.pid
                 );
-                return;
+                return false;
             }
             module.run_state = Some(false);
             module.pid = None;
@@ -226,6 +231,7 @@ impl ManagerState {
                 module.restart_count = 0;
             }
         }
+        true
     }
 
     pub fn start_module(&mut self, name: &str, args: Option<&Vec<String>>) {
@@ -844,9 +850,11 @@ fn handle(
                     }
                 }
                 ModuleMessage::Stopped { name, pid, output } => {
-                    state_guard.stopped_module(&name, pid);
+                    let current = state_guard.stopped_module(&name, pid);
                     let name_clone = name.clone();
-                    if output.status.success() {
+                    if !current {
+                        // A superseded process exiting is neither a crash nor a clean stop.
+                    } else if output.status.success() {
                         info!("Module {name} exited successfully");
                     } else {
                         // Restart path logs up to 3 attempt lines; keep this at debug to avoid spam.
@@ -1698,6 +1706,30 @@ mod tests {
         assert!(
             s.modules["aw-watcher"].pending_shutdown,
             "a stop requested before Started was handled must stick"
+        );
+    }
+
+    #[test]
+    fn late_exit_of_a_replaced_notify_process_is_stale() {
+        // Notifications off then on before the old aw-notify (pid 999_999_998) exited:
+        // its late Stopped must not be taken for the replacement crashing (which would
+        // raise "Stopped unexpectedly" and burn a restart attempt).
+        let mut s = state_with_module("aw-notify", 0, Some(Instant::now()));
+        s.modules.get_mut("aw-notify").unwrap().pid = Some(999_999_998);
+        s.set_notify_enabled(false);
+        s.set_notify_enabled(true);
+        assert!(
+            !s.stopped_module("aw-notify", 999_999_998),
+            "exit must be stale"
+        );
+        assert_eq!(
+            s.modules["aw-notify"].run_state,
+            Some(false),
+            "state unchanged by the stale exit"
+        );
+        assert!(
+            s.modules["aw-notify"].started_at.is_some(),
+            "a stale exit must not touch the replacement's bookkeeping"
         );
     }
 
