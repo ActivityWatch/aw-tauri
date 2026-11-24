@@ -420,7 +420,10 @@ fn migrate_legacy_file_if_owned(
 pub(crate) fn is_entry_hidden(contents: &str) -> bool {
     contents
         .lines()
-        .any(|line| line.trim().eq_ignore_ascii_case("hidden=true"))
+        .filter_map(|line| line.trim().split_once('='))
+        .any(|(key, value)| {
+            key.trim().eq_ignore_ascii_case("hidden") && value.trim().eq_ignore_ascii_case("true")
+        })
 }
 
 #[cfg(windows)]
@@ -913,6 +916,14 @@ auto_download = false
         assert!(!is_entry_hidden("Exec=aw-tauri\nName=aw-tauri\n"));
         assert!(!is_entry_hidden("Hidden=false\n"));
         assert!(!is_entry_hidden("")); // macOS plist, Windows value: no Hidden field
+    }
+
+    #[test]
+    fn is_entry_hidden_ignores_spaces_around_equals() {
+        // The Desktop Entry spec ignores whitespace around '=' (as desktop_line_key_is does).
+        assert!(is_entry_hidden("Exec=aw-tauri\nHidden = true\n"));
+        assert!(is_entry_hidden("Exec=aw-tauri\nHidden= true\n"));
+        assert!(!is_entry_hidden("Exec=aw-tauri\nHidden = false\n"));
     }
 }
 
