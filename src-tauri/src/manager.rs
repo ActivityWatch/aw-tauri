@@ -84,7 +84,7 @@ enum CrashPlan {
         generation: u64,
     },
     /// Out of automatic retries; the module is left stopped.
-    LimitReached,
+    LimitReached { generation: u64 },
 }
 
 /// A lightweight, path-free view of every module's run state, keyed by module name.
@@ -279,8 +279,20 @@ impl ManagerState {
             }
         } else {
             module.pending_shutdown = true;
-            CrashPlan::LimitReached
+            CrashPlan::LimitReached {
+                generation: module.generation,
+            }
         }
+    }
+
+    /// Whether the alert for a crash of run `generation` still describes the module: no start
+    /// has superseded that run and, unless the module was left stopped at the limit, no stop
+    /// was requested. Alert threads run after the lock that planned them is released, so
+    /// they check this before showing "restarting" or "left stopped".
+    fn crash_alert_current(&self, name: &str, generation: u64, left_stopped: bool) -> bool {
+        self.modules
+            .get(name)
+            .is_some_and(|m| m.generation == generation && (left_stopped || !m.pending_shutdown))
     }
 
     /// Runs the automatic restart planned by `plan_after_crash`, unless the module was started
@@ -945,6 +957,14 @@ fn handle(
                                 generation,
                             } => {
                                 thread::spawn(move || {
+                                    let current = state_clone
+                                        .lock()
+                                        .expect("Failed to acquire manager_state lock")
+                                        .crash_alert_current(&name_clone, generation, false);
+                                    if !current {
+                                        debug!("Skipping crash alert for {name_clone}: stopped or restarted since");
+                                        return;
+                                    }
                                     let attempt = restart_count + 1;
                                     // One log line per restart attempt (max 3 total with limit case).
                                     error!(
@@ -975,9 +995,17 @@ fn handle(
                                         );
                                 });
                             }
-                            CrashPlan::LimitReached => {
+                            CrashPlan::LimitReached { generation } => {
                                 // Restart limit reached — update UI; no 4th log line (cap is 3).
                                 thread::spawn(move || {
+                                    let current = state_clone
+                                        .lock()
+                                        .expect("Failed to acquire manager_state lock")
+                                        .crash_alert_current(&name_clone, generation, true);
+                                    if !current {
+                                        debug!("Skipping restart-limit alert for {name_clone}: started since");
+                                        return;
+                                    }
                                     show_module_warning(
                                         &event_tx_for_restart,
                                         &name_clone,
@@ -1774,21 +1802,27 @@ mod tests {
         s.start_module("aw-watcher", None); // spawn requested (/nonexistent fails in its thread)
         s.stop_module("aw-watcher"); // user stops it before Started is handled: no pid to signal
 
-        // Stand-in for the process that in-flight spawn produced.
-        let mut child = Command::new("sleep")
-            .arg("30")
-            .spawn()
-            .expect("spawn sleep");
-        s.started_module("aw-watcher", child.id(), None); // the in-flight Started arrives
+        // Stand-in for the process that in-flight spawn produced. Killed on drop, so a failing
+        // assertion below does not leak a `sleep` process.
+        struct KillOnDrop(std::process::Child);
+        impl Drop for KillOnDrop {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+        let mut child = KillOnDrop(
+            Command::new("sleep")
+                .arg("30")
+                .spawn()
+                .expect("spawn sleep"),
+        );
+        s.started_module("aw-watcher", child.0.id(), None); // the in-flight Started arrives
         assert!(
             s.modules["aw-watcher"].pending_shutdown,
             "a stop requested before Started was handled must stick"
         );
-        let status = wait_with_timeout(&mut child);
-        if status.is_none() {
-            let _ = child.kill();
-            let _ = child.wait();
-        }
+        let status = wait_with_timeout(&mut child.0);
         assert_eq!(
             status.and_then(|st| st.signal()),
             Some(Signal::SIGTERM as i32),
@@ -1851,12 +1885,47 @@ mod tests {
     }
 
     #[test]
+    fn crash_alert_is_skipped_once_stopped_or_restarted() {
+        let crash = |restart_count| {
+            let mut s = state_with_module("aw-watcher", restart_count, Some(Instant::now()));
+            assert!(s.stopped_module("aw-watcher", 1234));
+            let generation = match s.plan_after_crash("aw-watcher") {
+                CrashPlan::Restart { generation, .. } | CrashPlan::LimitReached { generation } => {
+                    generation
+                }
+                CrashPlan::Intentional => panic!("expected a crash plan"),
+            };
+            (s, generation)
+        };
+
+        // "Restarting in Ns": shown only while the crashed run is still current and not stopped.
+        let (s, generation) = crash(0);
+        assert!(s.crash_alert_current("aw-watcher", generation, false));
+        let (mut s, generation) = crash(0);
+        s.stop_module("aw-watcher");
+        assert!(!s.crash_alert_current("aw-watcher", generation, false));
+        let (mut s, generation) = crash(0);
+        s.start_module("aw-watcher", None);
+        assert!(!s.crash_alert_current("aw-watcher", generation, false));
+
+        // "Left stopped": pending_shutdown is set by the plan itself; only a later start voids it.
+        let (s, generation) = crash(3);
+        assert!(s.crash_alert_current("aw-watcher", generation, true));
+        let (mut s, generation) = crash(3);
+        assert_eq!(s.handle_system_click("aw-watcher"), Some(true));
+        assert!(!s.crash_alert_current("aw-watcher", generation, true));
+    }
+
+    #[test]
     fn restart_limit_leaves_a_later_start_alone() {
         // At the limit the module is marked stopped when the exit is handled, so a start the
         // user makes afterwards is never stopped by the old crash's alert path.
         let mut s = state_with_module("aw-watcher", 3, Some(Instant::now()));
         assert!(s.stopped_module("aw-watcher", 1234));
-        assert_eq!(s.plan_after_crash("aw-watcher"), CrashPlan::LimitReached);
+        assert!(matches!(
+            s.plan_after_crash("aw-watcher"),
+            CrashPlan::LimitReached { .. }
+        ));
         assert!(s.modules["aw-watcher"].pending_shutdown);
         assert_eq!(s.handle_system_click("aw-watcher"), Some(true));
         assert!(!s.modules["aw-watcher"].pending_shutdown);
