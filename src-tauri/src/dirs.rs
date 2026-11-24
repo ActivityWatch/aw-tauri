@@ -372,7 +372,14 @@ fn migrate_windows_discovery_paths(
     let legacy = legacy_windows_user_discovery_paths(username);
     let mut migrated = Vec::with_capacity(paths.len());
     for path in paths.drain(..) {
-        match legacy.iter().position(|l| *l == path) {
+        // USERNAME and GetUserNameW can spell the same account differently.
+        // Compare components so Windows slash variants still match as well.
+        match legacy.iter().position(|l| {
+            l.components().count() == path.components().count()
+                && l.components()
+                    .zip(path.components())
+                    .all(|(a, b)| a.as_os_str().eq_ignore_ascii_case(b.as_os_str()))
+        }) {
             Some(i) => migrated.extend(current.get(i).cloned()),
             None => migrated.push(path),
         }
@@ -720,6 +727,18 @@ mod tests {
         let paths = windows_user_discovery_paths(Some(profile), Some(local));
         assert_eq!(paths[1], local.join("Programs").join("ActivityWatch-Tauri"));
         assert!(windows_user_discovery_paths(None, Some(local)).is_empty());
+    }
+
+    #[test]
+    fn test_windows_migration_matches_account_case_changes() {
+        let current =
+            windows_user_discovery_paths(Some(&std::env::temp_dir().join("john.CORP")), None);
+        let mut paths = legacy_windows_user_discovery_paths("JOHN");
+        paths.extend(legacy_windows_user_discovery_paths("alice"));
+        migrate_windows_discovery_paths(&mut paths, Some("john"), &current);
+        let mut expected = current;
+        expected.extend(legacy_windows_user_discovery_paths("alice"));
+        assert_eq!(paths, expected);
     }
 
     #[test]
