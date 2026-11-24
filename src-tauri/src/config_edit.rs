@@ -267,15 +267,16 @@ fn tables_push(modules: &mut ArrayOfTables, name: &str) {
 
 /// Writes `modules = [...]` with the watchers in effect (the defaults the
 /// config parsed to) when the file doesn't list any, creating `[autostart]` if
-/// needed, so a tray edit starts from what is actually running.
-fn seed_missing_modules(doc: &mut DocumentMut, modules: &[ModuleEntry]) -> Result<(), String> {
+/// needed, so a tray edit starts from what is actually running. Returns
+/// whether it wrote the list.
+fn seed_missing_modules(doc: &mut DocumentMut, modules: &[ModuleEntry]) -> Result<bool, String> {
     let autostart = doc
         .entry("autostart")
         .or_insert(toml_edit::table())
         .as_table_like_mut()
         .ok_or("Config file's [autostart] is not a table")?;
     if autostart.contains_key("modules") {
-        return Ok(());
+        return Ok(false);
     }
     let mut array = Array::new();
     for module in modules {
@@ -292,7 +293,7 @@ fn seed_missing_modules(doc: &mut DocumentMut, modules: &[ModuleEntry]) -> Resul
         }
     }
     autostart.insert("modules", toml_edit::value(array));
-    Ok(())
+    Ok(true)
 }
 
 /// [`set_module_autostart_from`], seeding a missing modules list from the
@@ -338,7 +339,7 @@ pub(crate) fn set_module_autostart_from(
         }
         _ => &config.autostart.modules,
     };
-    seed_missing_modules(&mut doc, seed)?;
+    let seeded = seed_missing_modules(&mut doc, seed)?;
 
     let mut moved_args = None;
     {
@@ -357,7 +358,10 @@ pub(crate) fn set_module_autostart_from(
                     }
                     array_push(modules, name);
                 } else {
-                    if matches.is_empty() {
+                    // A stopped watcher missing from a seeded list (e.g. after
+                    // discovery_paths changed) is still saved as stopped: left
+                    // unset, the defaults could bring it back on a later launch.
+                    if matches.is_empty() && !seeded {
                         return Ok(None);
                     }
                     for &i in matches.iter().rev() {
@@ -897,12 +901,15 @@ aw-watcher-input = "--poll-time 60"
             more.push("aw-watcher-input".into());
             assert_eq!(modules_of(&started), more);
 
-            // Already in the requested state: nothing to write.
+            // Already running: nothing to write.
             assert_eq!(set_module_autostart(source, &first, true), Ok(None));
-            assert_eq!(
-                set_module_autostart(source, "aw-watcher-input", false),
-                Ok(None)
-            );
+            // Stopping a watcher the defaults leave out pins the defaults, so it
+            // can't come back if a later launch's defaults include it.
+            let pinned = set_module_autostart(source, "aw-watcher-input", false)
+                .expect("edit should succeed")
+                .expect("the stop must be saved");
+            assert_eq!(modules_of(&pinned), defaults);
+            assert!(pinned.contains("modules"), "{pinned}");
         }
     }
 
@@ -952,10 +959,14 @@ aw-watcher-input = "--poll-time 60"
             let mut more = defaults.clone();
             more.push("aw-watcher-input".into());
             assert_eq!(modules_of(&started), more, "{started}");
-            assert_eq!(
-                set_module_autostart_from(source, "aw-test-deleted", false, Some(startup)),
-                Ok(None),
-                "a deleted watcher is not running, so there is nothing to stop"
+            let stopped =
+                set_module_autostart_from(source, "aw-test-deleted", false, Some(startup))
+                    .expect("edit should succeed")
+                    .expect("the stop pins the file's defaults");
+            assert_eq!(modules_of(&stopped), defaults, "{stopped}");
+            assert!(
+                stopped.contains("--new") && !stopped.contains("--old"),
+                "the deleted list's args must not come back: {stopped}"
             );
         }
     }
