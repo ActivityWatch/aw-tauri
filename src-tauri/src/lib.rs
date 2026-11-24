@@ -1025,23 +1025,27 @@ fn greet(name: &str) -> String {
     format!("Hello, {}! You've been greeted from Rust!", name)
 }
 
-/// Whether `open_external` may hand `url` to the OS opener. The Rust `open_url` API does
-/// not apply the opener plugin's scope, so restrict it to web and mail links here: a
-/// `file:` or custom-scheme link in tracked data would otherwise launch a local program.
-fn is_openable_external_url(url: &str) -> bool {
-    Url::parse(url).is_ok_and(|u| matches!(u.scheme(), "http" | "https" | "mailto"))
-}
-
 #[tauri::command]
 fn open_external(url: String, app: tauri::AppHandle) {
-    if !is_openable_external_url(&url) {
-        warn!("Refusing to open non-web URL with the OS opener: {}", url);
-        return;
-    }
-    info!("Opening external URL in browser: {}", url);
-    if let Err(e) = app.opener().open_url(&url, None::<&str>) {
-        warn!("Failed to open URL in browser: {}", e);
-    }
+    open_external_with(&url, |url| {
+        if let Err(e) = app.opener().open_url(url, None::<&str>) {
+            warn!("Failed to open URL in browser: {}", e);
+        }
+    });
+}
+
+/// The Rust opener API does not apply the plugin's scope. Validate before the
+/// handoff and pass exactly the parsed URL to the OS, including normalization.
+fn open_external_with(url: &str, opener: impl FnOnce(&str)) {
+    let parsed = match Url::parse(url) {
+        Ok(parsed) if matches!(parsed.scheme(), "http" | "https" | "mailto") => parsed,
+        _ => {
+            warn!("Refusing to open non-web URL with the OS opener: {}", url);
+            return;
+        }
+    };
+    info!("Opening external URL in browser: {}", parsed);
+    opener(parsed.as_str());
 }
 
 /// Downloads and installs an update, showing a progress dialog.
@@ -1653,8 +1657,8 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::{
-        already_running_message, build_dashboard_url, default_linux_modules,
-        is_openable_external_url, rejected_launch_message,
+        already_running_message, build_dashboard_url, default_linux_modules, open_external_with,
+        rejected_launch_message,
     };
 
     #[test]
@@ -1664,7 +1668,9 @@ mod tests {
             "http://example.com/a?b=c",
             "mailto:someone@example.com",
         ] {
-            assert!(is_openable_external_url(url), "{url}");
+            let mut opened = Vec::new();
+            open_external_with(url, |value| opened.push(value.to_owned()));
+            assert_eq!(opened, [url], "{url}");
         }
         // A link in tracked data (e.g. a web.tab.current URL shown in Search) must not
         // launch a local file or a custom protocol handler via the OS opener.
@@ -1675,8 +1681,17 @@ mod tests {
             "ms-msdt:/id x",
             "not a url",
         ] {
-            assert!(!is_openable_external_url(url), "{url}");
+            open_external_with(url, |_| panic!("OS opener called for {url}"));
         }
+    }
+
+    #[test]
+    fn open_external_hands_the_validated_url_to_the_os() {
+        let mut opened = Vec::new();
+        open_external_with(" \tHtTpS://Example.COM/a\n", |value| {
+            opened.push(value.to_owned());
+        });
+        assert_eq!(opened, ["https://example.com/a"]);
     }
 
     #[test]
