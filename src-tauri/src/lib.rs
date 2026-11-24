@@ -1025,8 +1025,19 @@ fn greet(name: &str) -> String {
     format!("Hello, {}! You've been greeted from Rust!", name)
 }
 
+/// Whether `open_external` may hand `url` to the OS opener. The Rust `open_url` API does
+/// not apply the opener plugin's scope, so restrict it to web and mail links here: a
+/// `file:` or custom-scheme link in tracked data would otherwise launch a local program.
+fn is_openable_external_url(url: &str) -> bool {
+    Url::parse(url).is_ok_and(|u| matches!(u.scheme(), "http" | "https" | "mailto"))
+}
+
 #[tauri::command]
 fn open_external(url: String, app: tauri::AppHandle) {
+    if !is_openable_external_url(&url) {
+        warn!("Refusing to open non-web URL with the OS opener: {}", url);
+        return;
+    }
     info!("Opening external URL in browser: {}", url);
     if let Err(e) = app.opener().open_url(&url, None::<&str>) {
         warn!("Failed to open URL in browser: {}", e);
@@ -1643,8 +1654,30 @@ pub fn run() {
 mod tests {
     use super::{
         already_running_message, build_dashboard_url, default_linux_modules,
-        rejected_launch_message,
+        is_openable_external_url, rejected_launch_message,
     };
+
+    #[test]
+    fn open_external_only_hands_web_links_to_the_os() {
+        for url in [
+            "https://activitywatch.net/",
+            "http://example.com/a?b=c",
+            "mailto:someone@example.com",
+        ] {
+            assert!(is_openable_external_url(url), "{url}");
+        }
+        // A link in tracked data (e.g. a web.tab.current URL shown in Search) must not
+        // launch a local file or a custom protocol handler via the OS opener.
+        for url in [
+            "file:///C:/Users/Public/payload.exe",
+            "file://attacker.example/share/payload.exe",
+            "smb://host/share/x.exe",
+            "ms-msdt:/id x",
+            "not a url",
+        ] {
+            assert!(!is_openable_external_url(url), "{url}");
+        }
+    }
 
     #[test]
     fn already_running_message_names_the_version_and_the_executable() {
