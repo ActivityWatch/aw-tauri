@@ -1458,62 +1458,64 @@ fn discover_modules() -> BTreeMap<String, PathBuf> {
 
 /// Searches `dirs_to_search`, and any `aw-*` subdirectories, for executable `aw-*` modules.
 #[cfg(unix)]
-pub(crate) fn find_modules_in(
-    mut dirs_to_search: Vec<PathBuf>,
-    excluded: &[&str],
-) -> BTreeMap<String, PathBuf> {
+pub(crate) fn find_modules_in(roots: Vec<PathBuf>, excluded: &[&str]) -> BTreeMap<String, PathBuf> {
     use std::os::unix::fs::MetadataExt;
 
     let mut found_modules = BTreeMap::new();
     // Use (device, inode) pairs for cycle detection (works across filesystems)
     let mut visited_inodes = HashSet::new();
 
-    // Process directories in depth-first order
-    while let Some(dir) = dirs_to_search.pop() {
-        // Use (device, inode) tuple to detect cycles (works across different filesystems)
-        if let Ok(metadata) = fs::metadata(&dir) {
-            let id = (metadata.dev(), metadata.ino());
-            if !visited_inodes.insert(id) {
-                continue; // Already visited this directory
-            }
-        } else {
-            continue; // Can't access directory
-        }
-
-        // Look for aw-* executables in this directory
-        if let Ok(entries) = fs::read_dir(&dir) {
-            for entry in entries.filter_map(Result::ok) {
-                // Filter by name before touching metadata: PATH holds thousands of entries and
-                // only a handful are aw-*, so this skips a stat call for almost all of them.
-                let file_name = match entry.file_name().into_string() {
-                    Ok(name) if name.starts_with("aw-") => name,
-                    _ => continue,
-                };
-                let path = entry.path();
-
-                // Follow symlinks: a symlink's own mode is always 0o777 on Linux, so checking it
-                // (as entry.metadata() would) accepted any aw-* link, even one to a
-                // non-executable or missing file, and never descended into linked directories.
-                let metadata = match fs::metadata(&path) {
-                    Ok(m) => m,
-                    Err(_) => continue, // broken symlink or unreadable
-                };
-
-                // If it's a directory starting with "aw-", add to search stack
-                if metadata.is_dir() {
-                    dirs_to_search.push(path);
+    // `roots` is in priority order (as for find_windows_modules_in): search them in that
+    // order, depth-first within each, and keep the first find of a name. A directory that
+    // is reachable from several roots is then attributed to the highest-priority one.
+    for root in roots {
+        let mut dirs_to_search = vec![root];
+        while let Some(dir) = dirs_to_search.pop() {
+            // Use (device, inode) tuple to detect cycles (works across different filesystems)
+            if let Ok(metadata) = fs::metadata(&dir) {
+                let id = (metadata.dev(), metadata.ino());
+                if !visited_inodes.insert(id) {
+                    continue; // Already visited this directory
                 }
-                // If it's an executable file
-                else if metadata.is_file() {
-                    // Skip if has extension or is excluded
-                    if file_name.contains('.') || excluded.contains(&file_name.as_str()) {
-                        continue;
-                    }
+            } else {
+                continue; // Can't access directory
+            }
 
-                    // Check if executable
-                    let is_executable = metadata.permissions().mode() & 0o111 != 0;
-                    if is_executable {
-                        found_modules.insert(file_name, path);
+            // Look for aw-* executables in this directory
+            if let Ok(entries) = fs::read_dir(&dir) {
+                for entry in entries.filter_map(Result::ok) {
+                    // Filter by name before touching metadata: PATH holds thousands of entries and
+                    // only a handful are aw-*, so this skips a stat call for almost all of them.
+                    let file_name = match entry.file_name().into_string() {
+                        Ok(name) if name.starts_with("aw-") => name,
+                        _ => continue,
+                    };
+                    let path = entry.path();
+
+                    // Follow symlinks: a symlink's own mode is always 0o777 on Linux, so checking it
+                    // (as entry.metadata() would) accepted any aw-* link, even one to a
+                    // non-executable or missing file, and never descended into linked directories.
+                    let metadata = match fs::metadata(&path) {
+                        Ok(m) => m,
+                        Err(_) => continue, // broken symlink or unreadable
+                    };
+
+                    // If it's a directory starting with "aw-", add to search stack
+                    if metadata.is_dir() {
+                        dirs_to_search.push(path);
+                    }
+                    // If it's an executable file
+                    else if metadata.is_file() {
+                        // Skip if has extension or is excluded
+                        if file_name.contains('.') || excluded.contains(&file_name.as_str()) {
+                            continue;
+                        }
+
+                        // Check if executable
+                        let is_executable = metadata.permissions().mode() & 0o111 != 0;
+                        if is_executable {
+                            found_modules.entry(file_name).or_insert(path);
+                        }
                     }
                 }
             }
@@ -1912,6 +1914,43 @@ mod tests {
         );
 
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn find_modules_attributes_a_shared_dir_to_the_earlier_root() {
+        // Same case #284 fixed for Windows: the bundled watcher dir is also reachable as its
+        // own lower-priority root (e.g. via $PATH), with a classic install in between.
+        let dir = env::temp_dir().join(format!("aw-tauri-discover-prio-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let bundled = dir.join("bundled");
+        let classic = dir.join("classic");
+        fs::create_dir_all(bundled.join("aw-watcher-window")).unwrap();
+        fs::create_dir_all(classic.join("aw-watcher-window")).unwrap();
+        for path in [
+            bundled.join("aw-watcher-window").join("aw-watcher-window"),
+            classic.join("aw-watcher-window").join("aw-watcher-window"),
+        ] {
+            fs::write(&path, "").unwrap();
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let roots = vec![
+            bundled.clone(),
+            classic.clone(),
+            bundled.join("aw-watcher-window"),
+        ];
+        let found = find_modules_in(roots, &[]);
+        let reversed = find_modules_in(vec![classic.clone(), bundled.clone()], &[]);
+        fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(
+            found["aw-watcher-window"],
+            bundled.join("aw-watcher-window").join("aw-watcher-window")
+        );
+        assert_eq!(
+            reversed["aw-watcher-window"],
+            classic.join("aw-watcher-window").join("aw-watcher-window")
+        );
     }
 
     #[cfg(unix)]
