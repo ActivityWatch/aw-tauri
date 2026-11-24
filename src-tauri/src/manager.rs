@@ -717,11 +717,14 @@ fn autostart_names<'a>(
     notify_opt_in: bool,
     notify_discovered: bool,
 ) -> Vec<&'a str> {
-    let mut names: Vec<&'a str> = listed
-        .iter()
-        .copied()
-        .filter(|&name| name != NOTIFY_MODULE)
-        .collect();
+    let mut names: Vec<&'a str> = Vec::new();
+    for &name in listed {
+        // A repeated entry must not spawn a second process: run_state is only set once
+        // the Started message is handled, after this loop.
+        if name != NOTIFY_MODULE && !names.contains(&name) {
+            names.push(name);
+        }
+    }
     if notify_opt_in && (notify_discovered || listed.contains(&NOTIFY_MODULE)) {
         names.push(NOTIFY_MODULE);
     }
@@ -1668,6 +1671,21 @@ mod tests {
         assert_eq!(
             autostart_names(&["aw-awatcher"], false, true),
             ["aw-awatcher"]
+        );
+    }
+
+    #[test]
+    fn autostart_names_start_a_repeated_module_once() {
+        // A module listed twice (e.g. once bare and once with args) must not be spawned
+        // twice: run_state is only set once the Started message is handled, so the
+        // start loop's is_module_running guard cannot catch the second entry.
+        assert_eq!(
+            autostart_names(
+                &["aw-watcher-afk", "aw-sync", "aw-watcher-afk"],
+                false,
+                false
+            ),
+            ["aw-watcher-afk", "aw-sync"]
         );
     }
 
