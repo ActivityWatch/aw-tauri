@@ -422,7 +422,10 @@ pub(crate) fn is_entry_hidden(contents: &str) -> bool {
         .lines()
         .filter_map(|line| line.trim().split_once('='))
         .any(|(key, value)| {
-            key.trim().eq_ignore_ascii_case("hidden") && value.trim().eq_ignore_ascii_case("true")
+            let (key, value) = (key.trim(), value.trim());
+            (key.eq_ignore_ascii_case("hidden") && value.eq_ignore_ascii_case("true"))
+                // GNOME "Startup Applications" disables an entry this way instead.
+                || (key == "X-GNOME-Autostart-enabled" && value.eq_ignore_ascii_case("false"))
         })
 }
 
@@ -669,8 +672,18 @@ fn patch_autostart_enabled(source: &str, enabled: bool) -> Option<String> {
                 } else {
                     ""
                 };
+                // Keep anything after the old boolean (e.g. a trailing `# comment`).
+                let value = trimmed
+                    .split_once('=')
+                    .map_or("", |(_, v)| v)
+                    .trim_end_matches(['\r', '\n']);
+                let rest = value.trim_start();
+                let suffix = ["true", "false"]
+                    .iter()
+                    .find_map(|b| rest.strip_prefix(b))
+                    .unwrap_or("");
                 out.push_str(indent);
-                out.push_str(&format!("{key} = {enabled}{newline}"));
+                out.push_str(&format!("{key} = {enabled}{suffix}{newline}"));
                 replaced = true;
                 continue;
             }
@@ -966,6 +979,30 @@ auto_download = false
         assert!(!is_entry_hidden("Exec=aw-tauri\nName=aw-tauri\n"));
         assert!(!is_entry_hidden("Hidden=false\n"));
         assert!(!is_entry_hidden("")); // macOS plist, Windows value: no Hidden field
+    }
+
+    #[test]
+    fn is_entry_hidden_honours_gnome_autostart_disable() {
+        // GNOME "Startup Applications" disables an entry by writing this key, not Hidden.
+        assert!(is_entry_hidden(
+            "Exec=aw-tauri\nX-GNOME-Autostart-enabled=false\n"
+        ));
+        assert!(!is_entry_hidden(
+            "Exec=aw-tauri\nX-GNOME-Autostart-enabled=true\n"
+        ));
+    }
+
+    #[test]
+    fn patch_keeps_a_trailing_comment_on_the_enabled_line() {
+        assert_eq!(
+            patch_autostart_enabled("[autostart]\nenabled = true  # start at login\n", false)
+                .as_deref(),
+            Some("[autostart]\nenabled = false  # start at login\n")
+        );
+        assert_eq!(
+            patch_autostart_enabled("autostart.enabled=false#x\r\n", true).as_deref(),
+            Some("autostart.enabled = true#x\r\n")
+        );
     }
 
     #[test]
