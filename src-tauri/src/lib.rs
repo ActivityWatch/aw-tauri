@@ -808,31 +808,33 @@ fn parse_config_bytes(bytes: &[u8]) -> Result<UserConfig, String> {
     toml::from_str::<UserConfig>(text).map_err(|e| e.to_string())
 }
 
+fn load_existing_config(path: &Path, malformed: impl FnOnce()) -> UserConfig {
+    let bytes = std::fs::read(path).expect("Failed to read config file");
+    match parse_config_bytes(&bytes) {
+        Ok(config) => config,
+        Err(e) => {
+            warn!("Failed to parse config file: {}. Using default config.", e);
+            malformed();
+            UserConfig::default()
+        }
+    }
+}
+
 pub(crate) fn get_config() -> &'static UserConfig {
     CONFIG.get_or_init(|| {
         let config_path = get_config_path();
         if config_path.exists() {
             FIRST_RUN.set(false).expect("Failed to set FIRST_RUN");
-            let config_bytes = std::fs::read(&config_path).expect("Failed to read config file");
-
-            // Try to parse the config file
-            match parse_config_bytes(&config_bytes) {
-                Ok(config) => config,
-                Err(e) => {
-                    warn!("Failed to parse config file: {}. Using default config.", e);
-
-                    if !is_daemon_mode() && !is_mini_mode() {
-                        let app = get_app_handle();
-                        app.dialog()
-                            .message("Malformed config file. Using default config.")
-                            .kind(MessageDialogKind::Error)
-                            .title("Error")
-                            .show(|_| {});
-                    }
-
-                    UserConfig::default()
+            load_existing_config(&config_path, || {
+                if !is_daemon_mode() && !is_mini_mode() {
+                    let app = get_app_handle();
+                    app.dialog()
+                        .message("Malformed config file. Using default config.")
+                        .kind(MessageDialogKind::Error)
+                        .title("Error")
+                        .show(|_| {});
                 }
-            }
+            })
         } else {
             FIRST_RUN.set(true).expect("failed to set FIRST_RUN");
 
@@ -1664,9 +1666,8 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::{
-        already_running_message, build_dashboard_url, default_linux_modules, open_external_with,
-        parse_config_bytes,
-        rejected_launch_message,
+        already_running_message, build_dashboard_url, default_linux_modules, load_existing_config,
+        open_external_with, parse_config_bytes, rejected_launch_message, UserConfig,
     };
 
     #[test]
@@ -1711,6 +1712,39 @@ mod tests {
             .collect();
         assert!(parse_config_bytes(&utf16).is_err());
         assert!(parse_config_bytes(b"port = 5600\n\xff").is_err());
+    }
+
+    #[test]
+    fn startup_file_read_uses_defaults_for_utf16_and_loads_utf8() {
+        let mut config = UserConfig::default();
+        config.port = 5699;
+        let source = toml::to_string(&config).unwrap();
+        for utf16 in [false, true] {
+            let bytes: Vec<u8> = if utf16 {
+                [0xFF, 0xFE]
+                    .into_iter()
+                    .chain(source.encode_utf16().flat_map(u16::to_le_bytes))
+                    .collect()
+            } else {
+                source.as_bytes().to_vec()
+            };
+            let path = std::env::temp_dir().join(format!(
+                "aw-tauri-config-{}-{}-{utf16}.toml",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            std::fs::write(&path, &bytes).unwrap();
+            let mut malformed = false;
+            let loaded = load_existing_config(&path, || malformed = true);
+            let preserved = std::fs::read(&path).unwrap();
+            std::fs::remove_file(&path).unwrap();
+            assert_eq!(malformed, utf16);
+            assert_eq!(loaded.port, if utf16 { 5600 } else { 5699 });
+            assert_eq!(preserved, bytes, "loading must not rewrite the user's file");
+        }
     }
 
     #[test]
