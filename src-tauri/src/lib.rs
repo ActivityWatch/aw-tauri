@@ -682,7 +682,12 @@ impl ModuleEntry {
     }
 }
 
+/// A missing `[autostart]` table or key takes its value from
+/// `AutostartConfig::default()`. Without this, deleting the `modules = [...]`
+/// line made the whole file fail to parse and every setting, port included,
+/// fell back to the defaults.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct AutostartConfig {
     pub enabled: bool,
     pub minimized: bool,
@@ -713,6 +718,7 @@ impl Default for UpdatesConfig {
 pub struct UserConfig {
     pub port: u16,
     pub discovery_paths: Vec<PathBuf>,
+    #[serde(default)]
     pub autostart: AutostartConfig,
     /// Default args by module name, applied even if the module isn't autostarted.
     #[serde(default)]
@@ -721,33 +727,91 @@ pub struct UserConfig {
     pub updates: UpdatesConfig,
 }
 
+impl Default for AutostartConfig {
+    fn default() -> Self {
+        AutostartConfig {
+            enabled: true,
+            minimized: true,
+            modules: default_autostart_modules(&dirs::get_discovery_paths()),
+        }
+    }
+}
+
+/// The platform's first-run autostart watchers.
+fn default_autostart_modules(discovery_paths: &[PathBuf]) -> Vec<ModuleEntry> {
+    // Build default modules list based on platform
+    #[cfg(target_os = "linux")]
+    let modules = {
+        let is_wayland = env::var("XDG_SESSION_TYPE")
+            .map(|s| s == "wayland")
+            .unwrap_or(false)
+            || env::var("WAYLAND_DISPLAY").is_ok();
+        // Check install-relative paths too: they're searched at runtime
+        // even though they aren't persisted (see dirs::get_discovery_paths).
+        let search: Vec<PathBuf> = discovery_paths
+            .iter()
+            .cloned()
+            .chain(dirs::get_install_discovery_paths())
+            .collect();
+        default_linux_modules(module_available("aw-awatcher", &search), is_wayland)
+    };
+    // On non-Linux platforms, use traditional watchers
+    #[cfg(not(target_os = "linux"))]
+    let modules = {
+        let _ = discovery_paths;
+        vec!["aw-watcher-afk", "aw-watcher-window"]
+    };
+    modules
+        .into_iter()
+        .map(|name| ModuleEntry::Simple(name.to_string()))
+        .collect()
+}
+
+#[cfg(test)]
+mod config_default_tests {
+    use super::{AutostartConfig, UserConfig};
+
+    fn module_names(config: &AutostartConfig) -> Vec<String> {
+        config
+            .modules
+            .iter()
+            .map(|m| m.name().to_string())
+            .collect()
+    }
+
+    #[test]
+    fn missing_autostart_modules_keeps_the_rest_of_the_config() {
+        let config: UserConfig = toml::from_str(
+            "port = 5666\ndiscovery_paths = []\n[autostart]\nenabled = false\nminimized = false\n",
+        )
+        .expect("a config without autostart.modules should parse");
+        assert_eq!(config.port, 5666);
+        assert!(!config.autostart.enabled);
+        assert!(!config.autostart.minimized);
+        assert_eq!(
+            module_names(&config.autostart),
+            module_names(&AutostartConfig::default())
+        );
+    }
+
+    #[test]
+    fn missing_autostart_table_uses_default_autostart() {
+        let config: UserConfig = toml::from_str("port = 5666\ndiscovery_paths = []\n")
+            .expect("a config without [autostart] should parse");
+        assert_eq!(config.port, 5666);
+        assert!(config.autostart.enabled);
+        assert!(config.autostart.minimized);
+        assert_eq!(
+            module_names(&config.autostart),
+            module_names(&AutostartConfig::default())
+        );
+    }
+}
+
 impl Default for UserConfig {
     fn default() -> Self {
         let discovery_paths = dirs::get_discovery_paths();
-
-        // Build default modules list based on platform
-        #[cfg(target_os = "linux")]
-        let modules = {
-            let is_wayland = env::var("XDG_SESSION_TYPE")
-                .map(|s| s == "wayland")
-                .unwrap_or(false)
-                || env::var("WAYLAND_DISPLAY").is_ok();
-            // Check install-relative paths too: they're searched at runtime
-            // even though they aren't persisted (see dirs::get_discovery_paths).
-            let search: Vec<PathBuf> = discovery_paths
-                .iter()
-                .cloned()
-                .chain(dirs::get_install_discovery_paths())
-                .collect();
-            default_linux_modules(module_available("aw-awatcher", &search), is_wayland)
-        };
-        // On non-Linux platforms, use traditional watchers
-        #[cfg(not(target_os = "linux"))]
-        let modules = vec!["aw-watcher-afk", "aw-watcher-window"];
-        let modules = modules
-            .into_iter()
-            .map(|name| ModuleEntry::Simple(name.to_string()))
-            .collect();
+        let modules = default_autostart_modules(&discovery_paths);
 
         UserConfig {
             port: 5600,
