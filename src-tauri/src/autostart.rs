@@ -566,12 +566,21 @@ fn persist_enabled_at(path: &Path, enabled: bool) -> Result<(), String> {
                 path.display()
             ));
         }
-        Ok(s) => toml::from_str::<UserConfig>(&s).map_err(|e| {
-            format!(
-                "Config file {} is malformed and cannot be updated safely: {e}",
-                path.display()
-            )
-        })?,
+        Ok(s) => {
+            let config = toml::from_str::<UserConfig>(&s).map_err(|e| {
+                format!(
+                    "Config file {} is malformed and cannot be updated safely: {e}",
+                    path.display()
+                )
+            })?;
+            // Prefer a document edit: re-serializing UserConfig would drop comments and
+            // any key the app doesn't model.
+            if let Some(updated) = edit_autostart_enabled(&s, enabled) {
+                return crate::config_edit::write_atomic(path, updated)
+                    .map_err(|e| format!("Failed to write config file {}: {e}", path.display()));
+            }
+            config
+        }
     };
     config.autostart.enabled = enabled;
     if let Some(parent) = path.parent() {
@@ -580,6 +589,22 @@ fn persist_enabled_at(path: &Path, enabled: bool) -> Result<(), String> {
     }
     write_formatted_config(&config, path)
         .map_err(|e| format!("Failed to write config file {}: {e}", path.display()))
+}
+
+/// Sets `autostart.enabled` through `toml_edit`, keeping every other key and comment.
+/// Returns `None` unless the result parses as a config with the requested value.
+fn edit_autostart_enabled(source: &str, enabled: bool) -> Option<String> {
+    let mut doc = source.parse::<toml_edit::DocumentMut>().ok()?;
+    if !doc
+        .get("autostart")
+        .is_none_or(toml_edit::Item::is_table_like)
+    {
+        return None;
+    }
+    doc["autostart"]["enabled"] = toml_edit::value(enabled);
+    let updated = doc.to_string();
+    let parsed = toml::from_str::<UserConfig>(&updated).ok()?;
+    (parsed.autostart.enabled == enabled).then_some(updated)
 }
 
 /// Reads the config file and returns it with `[autostart] enabled` set to
@@ -692,6 +717,31 @@ modules = [
 [updates]
 auto_download = true
 "#;
+
+    #[test]
+    fn fallback_keeps_comments_and_unmodelled_keys() {
+        // A spaced table header is valid TOML the line patcher doesn't recognise.
+        let source = "# my notes\nport = 5600\ndiscovery_paths = []\nexperimental = true\n\n[ autostart ]\nenabled = true\nminimized = true # keep quiet\nmodules = []\n";
+        let path = write_temp_entry("config-fallback-unknown", source);
+        assert!(
+            read_and_patch(&path, false).is_none(),
+            "must exercise fallback"
+        );
+        persist_enabled_at(&path, false).expect("persist through fallback");
+        let out = fs::read_to_string(&path).unwrap();
+        fs::remove_file(&path).unwrap();
+        let value: toml::Value = toml::from_str(&out).unwrap();
+        assert_eq!(value["experimental"], toml::Value::Boolean(true), "{out}");
+        assert_eq!(
+            value["autostart"]["enabled"],
+            toml::Value::Boolean(false),
+            "{out}"
+        );
+        assert!(
+            out.contains("# my notes") && out.contains("# keep quiet"),
+            "{out}"
+        );
+    }
 
     #[test]
     fn fallback_preserves_escaped_control_characters() {
