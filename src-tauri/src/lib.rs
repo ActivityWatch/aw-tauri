@@ -7,7 +7,7 @@ use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watche
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::env;
-use std::fs::{create_dir_all, read_to_string, remove_file, OpenOptions};
+use std::fs::{create_dir_all, remove_file, OpenOptions};
 use std::net::{SocketAddr, TcpListener};
 use std::path::{Path, PathBuf};
 use std::sync::{mpsc, Condvar, Mutex, OnceLock};
@@ -801,15 +801,22 @@ fn get_runtime_path() -> PathBuf {
     dirs::get_runtime_dir()
 }
 
+/// Parses the user config. Bytes that are not UTF-8 (e.g. a config re-saved as UTF-16 by
+/// Windows Notepad) are a malformed config like any other, not a startup panic.
+fn parse_config_bytes(bytes: &[u8]) -> Result<UserConfig, String> {
+    let text = std::str::from_utf8(bytes).map_err(|e| format!("config is not valid UTF-8: {e}"))?;
+    toml::from_str::<UserConfig>(text).map_err(|e| e.to_string())
+}
+
 pub(crate) fn get_config() -> &'static UserConfig {
     CONFIG.get_or_init(|| {
         let config_path = get_config_path();
         if config_path.exists() {
             FIRST_RUN.set(false).expect("Failed to set FIRST_RUN");
-            let config_str = read_to_string(&config_path).expect("Failed to read config file");
+            let config_bytes = std::fs::read(&config_path).expect("Failed to read config file");
 
             // Try to parse the config file
-            match toml::from_str::<UserConfig>(&config_str) {
+            match parse_config_bytes(&config_bytes) {
                 Ok(config) => config,
                 Err(e) => {
                     warn!("Failed to parse config file: {}. Using default config.", e);
@@ -1658,6 +1665,7 @@ pub fn run() {
 mod tests {
     use super::{
         already_running_message, build_dashboard_url, default_linux_modules, open_external_with,
+        parse_config_bytes,
         rejected_launch_message,
     };
 
@@ -1692,6 +1700,17 @@ mod tests {
             opened.push(value.to_owned());
         });
         assert_eq!(opened, ["https://example.com/a"]);
+    }
+
+    #[test]
+    fn non_utf8_config_is_malformed_not_a_panic() {
+        // UTF-16LE "port = 5600" with a BOM, as Windows Notepad's "Unicode" encoding writes it.
+        let utf16: Vec<u8> = [0xFF, 0xFE]
+            .into_iter()
+            .chain("port = 5600\n".encode_utf16().flat_map(u16::to_le_bytes))
+            .collect();
+        assert!(parse_config_bytes(&utf16).is_err());
+        assert!(parse_config_bytes(b"port = 5600\n\xff").is_err());
     }
 
     #[test]
