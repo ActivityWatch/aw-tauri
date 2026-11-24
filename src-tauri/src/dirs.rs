@@ -305,6 +305,94 @@ fn macos_install_discovery_paths(exe_path: Option<&Path>) -> Vec<PathBuf> {
     paths
 }
 
+/// Per-user Windows discovery paths, rooted at the real profile folder.
+///
+/// The profile folder is not always `C:\Users\<USERNAME>`: a domain account can
+/// get `C:\Users\john.CORP`, and `C:\Users\john` may then belong to another
+/// account that could plant an `aw-*.exe` there (ActivityWatch/aw-tauri#327).
+#[cfg(any(target_os = "windows", test))]
+fn windows_user_discovery_paths(
+    profile: Option<&Path>,
+    local_app_data: Option<&Path>,
+) -> Vec<PathBuf> {
+    let Some(profile) = profile else {
+        return Vec::new();
+    };
+    let local = local_app_data
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| profile.join("AppData").join("Local"));
+    vec![
+        profile.join("aw-modules"),
+        local.join("Programs").join("ActivityWatch-Tauri"),
+        local.join("Programs").join("ActivityWatch"),
+    ]
+}
+
+#[cfg(target_os = "windows")]
+fn current_windows_user_discovery_paths() -> Vec<PathBuf> {
+    windows_user_discovery_paths(
+        std::env::var_os("USERPROFILE")
+            .map(PathBuf::from)
+            .as_deref(),
+        std::env::var_os("LOCALAPPDATA")
+            .map(PathBuf::from)
+            .as_deref(),
+    )
+}
+
+/// The `USERNAME`-derived paths older builds wrote into `config.toml`, in the
+/// same order as `windows_user_discovery_paths`.
+#[cfg(any(target_os = "windows", test))]
+fn legacy_windows_user_discovery_paths(username: &str) -> Vec<PathBuf> {
+    vec![
+        PathBuf::from(format!(r"C:/Users/{}/aw-modules", username)),
+        PathBuf::from(format!(
+            r"C:/Users/{}/AppData/Local/Programs/ActivityWatch-Tauri",
+            username
+        )),
+        PathBuf::from(format!(
+            r"C:/Users/{}/AppData/Local/Programs/ActivityWatch",
+            username
+        )),
+    ]
+}
+
+/// Replace persisted legacy entries with their profile-rooted equivalents, or
+/// drop them when the profile folder is unknown. Entries the user added are kept.
+#[cfg(any(target_os = "windows", test))]
+fn migrate_windows_discovery_paths(
+    paths: &mut Vec<PathBuf>,
+    username: Option<&str>,
+    current: &[PathBuf],
+) {
+    let Some(username) = username else {
+        return;
+    };
+    let legacy = legacy_windows_user_discovery_paths(username);
+    let mut migrated = Vec::with_capacity(paths.len());
+    for path in paths.drain(..) {
+        match legacy.iter().position(|l| *l == path) {
+            Some(i) => migrated.extend(current.get(i).cloned()),
+            None => migrated.push(path),
+        }
+    }
+    *paths = migrated;
+}
+
+/// Fix discovery paths loaded from a `config.toml` written by an older build.
+/// Only Windows has legacy entries to rewrite. The file itself is left as is,
+/// so this has to run on every load.
+pub fn migrate_legacy_discovery_paths(paths: &mut Vec<PathBuf>) {
+    #[cfg(target_os = "windows")]
+    migrate_windows_discovery_paths(
+        paths,
+        std::env::var("USERNAME").ok().as_deref(),
+        &current_windows_user_discovery_paths(),
+    );
+    #[cfg(not(target_os = "windows"))]
+    let _ = paths;
+}
+
 /// User-level discovery paths, written into a new `config.toml` as defaults.
 ///
 /// Install-relative paths (`get_install_discovery_paths`) are deliberately not
@@ -342,18 +430,7 @@ pub fn get_discovery_paths() -> Vec<PathBuf> {
 
     #[cfg(target_os = "windows")]
     {
-        // Windows: User-specific and system paths
-        if let Ok(username) = std::env::var("USERNAME") {
-            discovery_paths.push(PathBuf::from(format!(r"C:/Users/{}/aw-modules", username)));
-            discovery_paths.push(PathBuf::from(format!(
-                r"C:/Users/{}/AppData/Local/Programs/ActivityWatch-Tauri",
-                username
-            )));
-            discovery_paths.push(PathBuf::from(format!(
-                r"C:/Users/{}/AppData/Local/Programs/ActivityWatch",
-                username
-            )));
-        }
+        discovery_paths.extend(current_windows_user_discovery_paths());
     }
 
     #[cfg(target_os = "macos")]
@@ -599,6 +676,53 @@ mod tests {
         assert!(linux_install_discovery_paths(None, None).is_empty());
         assert!(macos_install_discovery_paths(None).is_empty());
         assert!(windows_install_discovery_paths(None).is_empty());
+    }
+
+    #[test]
+    fn test_windows_user_discovery_paths_use_profile_folder() {
+        let profile = Path::new(r"C:/Users/john.CORP");
+        let paths = windows_user_discovery_paths(Some(profile), None);
+        assert_eq!(paths[0], profile.join("aw-modules"));
+        assert!(paths.iter().all(|p| p.starts_with(profile)), "{:?}", paths);
+        assert!(!paths
+            .iter()
+            .any(|p| p.starts_with(Path::new(r"C:/Users/john/"))));
+
+        let local = Path::new(r"D:/Local");
+        let paths = windows_user_discovery_paths(Some(profile), Some(local));
+        assert_eq!(paths[1], local.join("Programs").join("ActivityWatch-Tauri"));
+        assert!(windows_user_discovery_paths(None, Some(local)).is_empty());
+    }
+
+    #[test]
+    fn test_migrate_windows_discovery_paths_rewrites_only_legacy_entries() {
+        let current = windows_user_discovery_paths(Some(Path::new(r"C:/Users/john.CORP")), None);
+        let custom = PathBuf::from(r"E:/my-modules");
+        let mut paths = legacy_windows_user_discovery_paths("john");
+        paths.insert(1, custom.clone());
+
+        migrate_windows_discovery_paths(&mut paths, Some("john"), &current);
+        assert_eq!(
+            paths,
+            vec![
+                current[0].clone(),
+                custom.clone(),
+                current[1].clone(),
+                current[2].clone()
+            ]
+        );
+
+        // Unknown profile folder: drop the legacy entries rather than keep them.
+        let mut paths = legacy_windows_user_discovery_paths("john");
+        paths.push(custom.clone());
+        migrate_windows_discovery_paths(&mut paths, Some("john"), &[]);
+        assert_eq!(paths, vec![custom.clone()]);
+
+        // Another user's legacy-looking path is user-added; keep it.
+        let mut paths = legacy_windows_user_discovery_paths("alice");
+        let before = paths.clone();
+        migrate_windows_discovery_paths(&mut paths, Some("john"), &current);
+        assert_eq!(paths, before);
     }
 
     #[cfg(target_os = "linux")]
