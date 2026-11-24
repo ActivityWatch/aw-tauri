@@ -11,7 +11,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use toml_edit::{Array, ArrayOfTables, DocumentMut, Item, Table, Value};
 
-use crate::{autostart, get_config_path, UserConfig};
+use crate::{autostart, get_config_path, ModuleEntry, UserConfig};
 
 /// Replaces `path` with `contents` atomically: writes a temporary file next to
 /// it, flushes it to disk and renames it over the original (which replaces the
@@ -265,6 +265,36 @@ fn tables_push(modules: &mut ArrayOfTables, name: &str) {
     modules.push(table);
 }
 
+/// Writes `modules = [...]` with the watchers in effect (the defaults the
+/// config parsed to) when the file doesn't list any, creating `[autostart]` if
+/// needed, so a tray edit starts from what is actually running.
+fn seed_missing_modules(doc: &mut DocumentMut, modules: &[ModuleEntry]) -> Result<(), String> {
+    let autostart = doc
+        .entry("autostart")
+        .or_insert(toml_edit::table())
+        .as_table_like_mut()
+        .ok_or("Config file's [autostart] is not a table")?;
+    if autostart.contains_key("modules") {
+        return Ok(());
+    }
+    let mut array = Array::new();
+    for module in modules {
+        match module {
+            ModuleEntry::Simple(name) => array.push(name.as_str()),
+            ModuleEntry::Full { name, args } => {
+                let mut entry = toml_edit::InlineTable::new();
+                entry.insert("name", name.as_str().into());
+                if !args.is_empty() {
+                    entry.insert("args", args.as_str().into());
+                }
+                array.push(entry);
+            }
+        }
+    }
+    autostart.insert("modules", toml_edit::value(array));
+    Ok(())
+}
+
 /// Returns `source` with module `name` added to (`enabled`) or removed from
 /// `[autostart] modules`, or `None` if it is already in that state.
 ///
@@ -280,11 +310,12 @@ pub(crate) fn set_module_autostart(
     name: &str,
     enabled: bool,
 ) -> Result<Option<String>, String> {
-    toml::from_str::<UserConfig>(source)
+    let config = toml::from_str::<UserConfig>(source)
         .map_err(|e| format!("Config file is malformed, not updating it: {e}"))?;
     let mut doc: DocumentMut = source
         .parse()
         .map_err(|e| format!("Config file is malformed, not updating it: {e}"))?;
+    seed_missing_modules(&mut doc, &config.autostart.modules)?;
 
     let mut moved_args = None;
     {
@@ -808,5 +839,46 @@ aw-watcher-input = "--poll-time 60"
             );
         }
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn missing_modules_list_is_seeded_from_the_defaults() {
+        let with_table =
+            "port = 5600\ndiscovery_paths = []\n\n[autostart]\n# keep me\nenabled = false\n";
+        let no_table = "port = 5600\ndiscovery_paths = []\n# keep me too\n";
+        for source in [with_table, no_table] {
+            let defaults = modules_of(source);
+            let first = defaults[0].clone();
+
+            // Stopping a default watcher from the tray must survive a restart.
+            let stopped = set_module_autostart(source, &first, false)
+                .expect("edit should succeed")
+                .expect("stopping a default watcher must be saved");
+            let rest: Vec<String> = defaults.iter().filter(|m| **m != first).cloned().collect();
+            assert_eq!(modules_of(&stopped), rest);
+            assert!(
+                stopped.contains("# keep me"),
+                "comments must be kept: {stopped}"
+            );
+            assert_eq!(
+                parse(&stopped).autostart.enabled,
+                parse(source).autostart.enabled
+            );
+
+            // Starting another module keeps the defaults running too.
+            let started = set_module_autostart(source, "aw-watcher-input", true)
+                .expect("edit should succeed")
+                .expect("starting a module must be saved");
+            let mut more = defaults.clone();
+            more.push("aw-watcher-input".into());
+            assert_eq!(modules_of(&started), more);
+
+            // Already in the requested state: nothing to write.
+            assert_eq!(set_module_autostart(source, &first, true), Ok(None));
+            assert_eq!(
+                set_module_autostart(source, "aw-watcher-input", false),
+                Ok(None)
+            );
+        }
     }
 }

@@ -682,12 +682,9 @@ impl ModuleEntry {
     }
 }
 
-/// A missing `[autostart]` table or key takes its value from
-/// `AutostartConfig::default()`. Without this, deleting the `modules = [...]`
-/// line made the whole file fail to parse and every setting, port included,
-/// fell back to the defaults.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
+/// Read from the file through [`AutostartConfigFile`], so a missing
+/// `[autostart]` table or key takes its default instead of failing the parse.
+#[derive(Debug, Clone, Serialize)]
 pub struct AutostartConfig {
     pub enabled: bool,
     pub minimized: bool,
@@ -715,10 +712,10 @@ impl Default for UpdatesConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(from = "UserConfigFile")]
 pub struct UserConfig {
     pub port: u16,
     pub discovery_paths: Vec<PathBuf>,
-    #[serde(default)]
     pub autostart: AutostartConfig,
     /// Default args by module name, applied even if the module isn't autostarted.
     #[serde(default)]
@@ -727,18 +724,74 @@ pub struct UserConfig {
     pub updates: UpdatesConfig,
 }
 
-impl Default for AutostartConfig {
+/// `UserConfig` as written in the file. A missing `[autostart]` table or key
+/// takes its default; without this, deleting the `modules = [...]` line made
+/// the whole file fail to parse and every setting, port included, fell back to
+/// the defaults.
+#[derive(Deserialize)]
+struct UserConfigFile {
+    port: u16,
+    discovery_paths: Vec<PathBuf>,
+    #[serde(default)]
+    autostart: AutostartConfigFile,
+    #[serde(default)]
+    module_args: BTreeMap<String, String>,
+    #[serde(default)]
+    updates: UpdatesConfig,
+}
+
+/// `[autostart]` as written in the file. `modules` stays `None` when missing so
+/// the default watchers are looked up only then, and in the file's own
+/// `discovery_paths` (where the manager will look for them).
+#[derive(Deserialize)]
+#[serde(default)]
+struct AutostartConfigFile {
+    enabled: bool,
+    minimized: bool,
+    modules: Option<Vec<ModuleEntry>>,
+}
+
+impl Default for AutostartConfigFile {
     fn default() -> Self {
-        AutostartConfig {
+        AutostartConfigFile {
             enabled: true,
             minimized: true,
-            modules: default_autostart_modules(&dirs::get_discovery_paths()),
+            modules: None,
         }
     }
 }
 
+impl From<UserConfigFile> for UserConfig {
+    fn from(file: UserConfigFile) -> Self {
+        let modules = file
+            .autostart
+            .modules
+            .unwrap_or_else(|| default_autostart_modules(&file.discovery_paths));
+        UserConfig {
+            port: file.port,
+            discovery_paths: file.discovery_paths,
+            autostart: AutostartConfig {
+                enabled: file.autostart.enabled,
+                minimized: file.autostart.minimized,
+                modules,
+            },
+            module_args: file.module_args,
+            updates: file.updates,
+        }
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// How many times this thread computed the default watchers (each one
+    /// scans directories and `$PATH` on Linux).
+    static DEFAULT_MODULE_LOOKUPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// The platform's first-run autostart watchers.
 fn default_autostart_modules(discovery_paths: &[PathBuf]) -> Vec<ModuleEntry> {
+    #[cfg(test)]
+    DEFAULT_MODULE_LOOKUPS.with(|n| n.set(n.get() + 1));
     // Build default modules list based on platform
     #[cfg(target_os = "linux")]
     let modules = {
@@ -769,14 +822,14 @@ fn default_autostart_modules(discovery_paths: &[PathBuf]) -> Vec<ModuleEntry> {
 
 #[cfg(test)]
 mod config_default_tests {
-    use super::{AutostartConfig, UserConfig};
+    use super::{AutostartConfig, ModuleEntry, UserConfig};
+
+    fn names(modules: &[ModuleEntry]) -> Vec<String> {
+        modules.iter().map(|m| m.name().to_string()).collect()
+    }
 
     fn module_names(config: &AutostartConfig) -> Vec<String> {
-        config
-            .modules
-            .iter()
-            .map(|m| m.name().to_string())
-            .collect()
+        names(&config.modules)
     }
 
     #[test]
@@ -790,7 +843,7 @@ mod config_default_tests {
         assert!(!config.autostart.minimized);
         assert_eq!(
             module_names(&config.autostart),
-            module_names(&AutostartConfig::default())
+            names(&super::default_autostart_modules(&[]))
         );
     }
 
@@ -803,8 +856,55 @@ mod config_default_tests {
         assert!(config.autostart.minimized);
         assert_eq!(
             module_names(&config.autostart),
-            module_names(&AutostartConfig::default())
+            names(&super::default_autostart_modules(&[]))
         );
+    }
+
+    #[test]
+    fn listed_modules_skip_the_default_watcher_lookup() {
+        let before = super::DEFAULT_MODULE_LOOKUPS.with(|n| n.get());
+        let config: UserConfig = toml::from_str(
+            "port = 5666\ndiscovery_paths = []\n[autostart]\nmodules = [\"aw-watcher-afk\"]\n",
+        )
+        .expect("config should parse");
+        assert_eq!(module_names(&config.autostart), vec!["aw-watcher-afk"]);
+        assert_eq!(
+            super::DEFAULT_MODULE_LOOKUPS.with(|n| n.get()),
+            before,
+            "reading a config that lists its modules must not scan for default watchers"
+        );
+    }
+
+    /// The fallback must search the file's own `discovery_paths`, which is
+    /// where the manager looks, not the built-in default paths.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn missing_modules_fallback_searches_the_configured_discovery_paths() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let without = super::default_autostart_modules(&[]);
+        if without.iter().any(|m| m.name() == "aw-awatcher") {
+            // Wayland session or aw-awatcher on $PATH: nothing to tell apart.
+            eprintln!("skipping: aw-awatcher is already the default here");
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!(
+            "aw-tauri-test-fallback-discovery-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let module = dir.join("aw-awatcher");
+        std::fs::write(&module, "").unwrap();
+        std::fs::set_permissions(&module, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let source = format!(
+            "port = 5666\ndiscovery_paths = [{}]\n",
+            toml::Value::String(dir.display().to_string())
+        );
+        let config: UserConfig = toml::from_str(&source).expect("config should parse");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(module_names(&config.autostart), vec!["aw-awatcher"]);
     }
 }
 

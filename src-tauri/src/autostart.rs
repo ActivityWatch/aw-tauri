@@ -547,8 +547,8 @@ fn persist_enabled_at(path: &Path, enabled: bool) -> Result<(), String> {
             .map_err(|e| format!("Failed to write config file {}: {e}", path.display()));
     }
 
-    // Surgical patch unavailable (no `[autostart] enabled` key, or the
-    // patched result didn't parse). Re-read the on-disk config for a full
+    // Surgical patch unavailable (an `enabled` key the line patcher can't
+    // reach, or the patched result didn't parse). Re-read the on-disk config for a full
     // rewrite. If the file exists but is malformed we return an error rather
     // than silently overwriting it with the startup-cached values — that would
     // discard edits the user made to unrelated fields after startup.
@@ -583,7 +583,8 @@ fn persist_enabled_at(path: &Path, enabled: bool) -> Result<(), String> {
 /// `enabled`, or `None` if the file can't be read or patched safely.
 fn read_and_patch(path: &Path, enabled: bool) -> Option<String> {
     let source = std::fs::read_to_string(path).ok()?;
-    let patched = patch_autostart_enabled(&source, enabled)?;
+    let patched = patch_autostart_enabled(&source, enabled)
+        .or_else(|| insert_missing_autostart_enabled(&source, enabled))?;
     // Only accept the surgical edit if the result still parses and actually
     // holds the requested value; otherwise let the caller rewrite the file.
     match toml::from_str::<UserConfig>(&patched) {
@@ -654,6 +655,23 @@ fn patch_autostart_enabled(source: &str, enabled: bool) -> Option<String> {
     replaced.then_some(out)
 }
 
+/// Adds `enabled` to `[autostart]` (creating the table if needed) when the file
+/// has no such key, which is valid since it defaults to `true`. Everything else
+/// is kept byte for byte. Returns `None` if the key exists (e.g. under a header
+/// the line patcher doesn't recognise) or the file isn't valid TOML.
+fn insert_missing_autostart_enabled(source: &str, enabled: bool) -> Option<String> {
+    let mut doc: toml_edit::DocumentMut = source.parse().ok()?;
+    let autostart = doc
+        .entry("autostart")
+        .or_insert(toml_edit::table())
+        .as_table_like_mut()?;
+    if autostart.contains_key("enabled") {
+        return None;
+    }
+    autostart.insert("enabled", toml_edit::value(enabled));
+    Some(doc.to_string())
+}
+
 /// Returns `true` when `trimmed` is a dotted-key assignment for
 /// `autostart.enabled`, i.e., matches `autostart[ws].[ws]enabled[ws]=…`.
 fn is_dotted_autostart_enabled(trimmed: &str) -> bool {
@@ -720,6 +738,34 @@ auto_download = false
         let actual: toml::Value = toml::from_str(&rewritten).expect("rewritten config must parse");
         expected["autostart"]["enabled"] = toml::Value::Boolean(false);
         assert_eq!(actual, expected, "only autostart.enabled may change");
+    }
+
+    #[test]
+    fn missing_enabled_key_is_inserted_in_place() {
+        let in_table = "port = 5600\ndiscovery_paths = []\n# top comment\nunknown_key = 1\n\n[autostart]\n# keep\nminimized = false\nmodules = []\n";
+        let no_table = "port = 5600\ndiscovery_paths = []\n# top comment\nunknown_key = 1\n";
+        for source in [in_table, no_table] {
+            let path = write_temp_entry("config-missing-enabled", source);
+            persist_enabled_at(&path, false).expect("persist");
+            let written = fs::read_to_string(&path).unwrap();
+            fs::remove_file(&path).unwrap();
+            assert!(
+                written.starts_with(source),
+                "existing text must be kept, only the key appended: {written}"
+            );
+            let mut expected: toml::Value = toml::from_str(source).unwrap();
+            let autostart = expected
+                .as_table_mut()
+                .unwrap()
+                .entry("autostart")
+                .or_insert_with(|| toml::Value::Table(Default::default()));
+            autostart
+                .as_table_mut()
+                .unwrap()
+                .insert("enabled".into(), toml::Value::Boolean(false));
+            let actual: toml::Value = toml::from_str(&written).unwrap();
+            assert_eq!(actual, expected, "only autostart.enabled may change");
+        }
     }
 
     #[test]
