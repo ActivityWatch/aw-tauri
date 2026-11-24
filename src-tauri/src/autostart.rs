@@ -420,7 +420,13 @@ fn migrate_legacy_file_if_owned(
 pub(crate) fn is_entry_hidden(contents: &str) -> bool {
     contents
         .lines()
-        .any(|line| line.trim().eq_ignore_ascii_case("hidden=true"))
+        .filter_map(|line| line.trim().split_once('='))
+        .any(|(key, value)| {
+            let (key, value) = (key.trim(), value.trim());
+            (key.eq_ignore_ascii_case("hidden") && value.eq_ignore_ascii_case("true"))
+                // GNOME "Startup Applications" disables an entry this way instead.
+                || (key == "X-GNOME-Autostart-enabled" && value.eq_ignore_ascii_case("false"))
+        })
 }
 
 #[cfg(windows)]
@@ -563,12 +569,21 @@ fn persist_enabled_at(path: &Path, enabled: bool) -> Result<(), String> {
                 path.display()
             ));
         }
-        Ok(s) => toml::from_str::<UserConfig>(&s).map_err(|e| {
-            format!(
-                "Config file {} is malformed and cannot be updated safely: {e}",
-                path.display()
-            )
-        })?,
+        Ok(s) => {
+            let config = toml::from_str::<UserConfig>(&s).map_err(|e| {
+                format!(
+                    "Config file {} is malformed and cannot be updated safely: {e}",
+                    path.display()
+                )
+            })?;
+            // Prefer a document edit: re-serializing UserConfig would drop comments and
+            // any key the app doesn't model.
+            if let Some(updated) = edit_autostart_enabled(&s, enabled) {
+                return crate::config_edit::write_atomic(path, updated)
+                    .map_err(|e| format!("Failed to write config file {}: {e}", path.display()));
+            }
+            config
+        }
     };
     config.autostart.enabled = enabled;
     if let Some(parent) = path.parent() {
@@ -577,6 +592,27 @@ fn persist_enabled_at(path: &Path, enabled: bool) -> Result<(), String> {
     }
     write_formatted_config(&config, path)
         .map_err(|e| format!("Failed to write config file {}: {e}", path.display()))
+}
+
+/// Sets `autostart.enabled` through `toml_edit`, keeping every other key and comment.
+/// Returns `None` unless the result parses as a config with the requested value.
+fn edit_autostart_enabled(source: &str, enabled: bool) -> Option<String> {
+    let mut doc = source.parse::<toml_edit::DocumentMut>().ok()?;
+    if !doc
+        .get("autostart")
+        .is_none_or(toml_edit::Item::is_table_like)
+    {
+        return None;
+    }
+    let item = &mut doc["autostart"]["enabled"];
+    let mut value = toml_edit::Value::from(enabled);
+    if let Some(old) = item.as_value() {
+        *value.decor_mut() = old.decor().clone();
+    }
+    *item = toml_edit::Item::Value(value);
+    let updated = doc.to_string();
+    let parsed = toml::from_str::<UserConfig>(&updated).ok()?;
+    (parsed.autostart.enabled == enabled).then_some(updated)
 }
 
 /// Reads the config file and returns it with `[autostart] enabled` set to
@@ -641,8 +677,18 @@ fn patch_autostart_enabled(source: &str, enabled: bool) -> Option<String> {
                 } else {
                     ""
                 };
+                // Keep anything after the old boolean (e.g. a trailing `# comment`).
+                let value = trimmed
+                    .split_once('=')
+                    .map_or("", |(_, v)| v)
+                    .trim_end_matches(['\r', '\n']);
+                let rest = value.trim_start();
+                let suffix = ["true", "false"]
+                    .iter()
+                    .find_map(|b| rest.strip_prefix(b))
+                    .unwrap_or("");
                 out.push_str(indent);
-                out.push_str(&format!("{key} = {enabled}{newline}"));
+                out.push_str(&format!("{key} = {enabled}{suffix}{newline}"));
                 replaced = true;
                 continue;
             }
@@ -689,6 +735,33 @@ modules = [
 [updates]
 auto_download = true
 "#;
+
+    #[test]
+    fn fallback_keeps_comments_and_unmodelled_keys() {
+        // A spaced table header is valid TOML the line patcher doesn't recognise.
+        let source = "# my notes\nport = 5600\ndiscovery_paths = []\nexperimental = true\n\n[ autostart ]\nenabled = true # start at login\nminimized = true # keep quiet\nmodules = []\n";
+        let path = write_temp_entry("config-fallback-unknown", source);
+        assert!(
+            read_and_patch(&path, false).is_none(),
+            "must exercise fallback"
+        );
+        persist_enabled_at(&path, false).expect("persist through fallback");
+        let out = fs::read_to_string(&path).unwrap();
+        fs::remove_file(&path).unwrap();
+        let value: toml::Value = toml::from_str(&out).unwrap();
+        assert_eq!(value["experimental"], toml::Value::Boolean(true), "{out}");
+        assert_eq!(
+            value["autostart"]["enabled"],
+            toml::Value::Boolean(false),
+            "{out}"
+        );
+        assert!(
+            out.contains("# my notes")
+                && out.contains("# keep quiet")
+                && out.contains("# start at login"),
+            "{out}"
+        );
+    }
 
     #[test]
     fn fallback_preserves_escaped_control_characters() {
@@ -913,6 +986,38 @@ auto_download = false
         assert!(!is_entry_hidden("Exec=aw-tauri\nName=aw-tauri\n"));
         assert!(!is_entry_hidden("Hidden=false\n"));
         assert!(!is_entry_hidden("")); // macOS plist, Windows value: no Hidden field
+    }
+
+    #[test]
+    fn is_entry_hidden_honours_gnome_autostart_disable() {
+        // GNOME "Startup Applications" disables an entry by writing this key, not Hidden.
+        assert!(is_entry_hidden(
+            "Exec=aw-tauri\nX-GNOME-Autostart-enabled=false\n"
+        ));
+        assert!(!is_entry_hidden(
+            "Exec=aw-tauri\nX-GNOME-Autostart-enabled=true\n"
+        ));
+    }
+
+    #[test]
+    fn patch_keeps_a_trailing_comment_on_the_enabled_line() {
+        assert_eq!(
+            patch_autostart_enabled("[autostart]\nenabled = true  # start at login\n", false)
+                .as_deref(),
+            Some("[autostart]\nenabled = false  # start at login\n")
+        );
+        assert_eq!(
+            patch_autostart_enabled("autostart.enabled=false#x\r\n", true).as_deref(),
+            Some("autostart.enabled = true#x\r\n")
+        );
+    }
+
+    #[test]
+    fn is_entry_hidden_ignores_spaces_around_equals() {
+        // The Desktop Entry spec ignores whitespace around '=' (as desktop_line_key_is does).
+        assert!(is_entry_hidden("Exec=aw-tauri\nHidden = true\n"));
+        assert!(is_entry_hidden("Exec=aw-tauri\nHidden= true\n"));
+        assert!(!is_entry_hidden("Exec=aw-tauri\nHidden = false\n"));
     }
 }
 
