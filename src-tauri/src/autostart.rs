@@ -604,7 +604,12 @@ fn edit_autostart_enabled(source: &str, enabled: bool) -> Option<String> {
     {
         return None;
     }
-    doc["autostart"]["enabled"] = toml_edit::value(enabled);
+    let item = &mut doc["autostart"]["enabled"];
+    let mut value = toml_edit::Value::from(enabled);
+    if let Some(old) = item.as_value() {
+        *value.decor_mut() = old.decor().clone();
+    }
+    *item = toml_edit::Item::Value(value);
     let updated = doc.to_string();
     let parsed = toml::from_str::<UserConfig>(&updated).ok()?;
     (parsed.autostart.enabled == enabled).then_some(updated)
@@ -734,7 +739,7 @@ auto_download = true
     #[test]
     fn fallback_keeps_comments_and_unmodelled_keys() {
         // A spaced table header is valid TOML the line patcher doesn't recognise.
-        let source = "# my notes\nport = 5600\ndiscovery_paths = []\nexperimental = true\n\n[ autostart ]\nenabled = true\nminimized = true # keep quiet\nmodules = []\n";
+        let source = "# my notes\nport = 5600\ndiscovery_paths = []\nexperimental = true\n\n[ autostart ]\nenabled = true # start at login\nminimized = true # keep quiet\nmodules = []\n";
         let path = write_temp_entry("config-fallback-unknown", source);
         assert!(
             read_and_patch(&path, false).is_none(),
@@ -751,7 +756,9 @@ auto_download = true
             "{out}"
         );
         assert!(
-            out.contains("# my notes") && out.contains("# keep quiet"),
+            out.contains("# my notes")
+                && out.contains("# keep quiet")
+                && out.contains("# start at login"),
             "{out}"
         );
     }
