@@ -592,8 +592,9 @@ fn read_and_patch(path: &Path, enabled: bool) -> Option<String> {
         .or_insert_with(|| toml::Value::Table(Default::default()))
         .as_table_mut()?
         .insert("enabled".into(), toml::Value::Boolean(enabled));
-    let only_flag_changed =
-        |patched: &String| toml::from_str::<toml::Value>(patched).is_ok_and(|v| v == expected);
+    let only_flag_changed = |patched: &String| {
+        toml::from_str::<toml::Value>(patched).is_ok_and(|v| same_toml(&v, &expected))
+    };
     let patched = patch_autostart_enabled(&source, enabled)
         .filter(only_flag_changed)
         .or_else(|| insert_missing_autostart_enabled(&source, enabled).filter(only_flag_changed))?;
@@ -665,6 +666,22 @@ fn patch_autostart_enabled(source: &str, enabled: bool) -> Option<String> {
     }
 
     replaced.then_some(out)
+}
+
+/// TOML equality where `nan` equals `nan`, so a float setting like
+/// `threshold = nan` doesn't make every edit look like it changed the file.
+fn same_toml(a: &toml::Value, b: &toml::Value) -> bool {
+    use toml::Value::{Array, Float, Table};
+    match (a, b) {
+        (Float(x), Float(y)) => x == y || (x.is_nan() && y.is_nan()),
+        (Array(x), Array(y)) => x.len() == y.len() && x.iter().zip(y).all(|(x, y)| same_toml(x, y)),
+        (Table(x), Table(y)) => {
+            x.len() == y.len()
+                && x.iter()
+                    .all(|(k, v)| y.get(k).is_some_and(|w| same_toml(v, w)))
+        }
+        _ => a == b,
+    }
 }
 
 /// Adds `enabled` to `[autostart]` (creating the table if needed) when the file
@@ -778,6 +795,20 @@ auto_download = false
             let actual: toml::Value = toml::from_str(&written).unwrap();
             assert_eq!(actual, expected, "only autostart.enabled may change");
         }
+    }
+
+    #[test]
+    fn nan_setting_does_not_force_a_full_rewrite() {
+        let source = "port = 5600\ndiscovery_paths = []\n# keep\nthreshold = nan\n\n[autostart]\nenabled = true\n";
+        let path = write_temp_entry("config-nan", source);
+        persist_enabled_at(&path, false).expect("persist");
+        let written = fs::read_to_string(&path).unwrap();
+        fs::remove_file(&path).unwrap();
+        assert_eq!(
+            written,
+            source.replace("enabled = true", "enabled = false"),
+            "only the flag may change"
+        );
     }
 
     #[test]

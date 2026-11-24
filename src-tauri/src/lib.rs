@@ -689,6 +689,9 @@ pub struct AutostartConfig {
     pub enabled: bool,
     pub minimized: bool,
     pub modules: Vec<ModuleEntry>,
+    /// `modules` are the defaults looked up because the file listed none.
+    #[serde(skip)]
+    pub modules_defaulted: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -763,6 +766,7 @@ impl Default for AutostartConfigFile {
 
 impl From<UserConfigFile> for UserConfig {
     fn from(file: UserConfigFile) -> Self {
+        let modules_defaulted = file.autostart.modules.is_none();
         let modules = file
             .autostart
             .modules
@@ -774,6 +778,7 @@ impl From<UserConfigFile> for UserConfig {
                 enabled: file.autostart.enabled,
                 minimized: file.autostart.minimized,
                 modules,
+                modules_defaulted,
             },
             module_args: file.module_args,
             updates: file.updates,
@@ -920,6 +925,7 @@ impl Default for UserConfig {
                 enabled: true,
                 minimized: true,
                 modules,
+                modules_defaulted: true,
             },
             module_args: BTreeMap::new(),
             updates: UpdatesConfig {
