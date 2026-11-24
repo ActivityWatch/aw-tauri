@@ -62,6 +62,10 @@ enum ModuleMessage {
         pid: u32,
         output: std::process::Output,
     },
+    /// The spawn requested by `start_module` failed before a process existed.
+    SpawnFailed {
+        name: String,
+    },
     Init {},
     Notification {
         title: String,
@@ -101,6 +105,10 @@ struct Module {
     /// again, since the crash it was scheduled for.
     generation: u64,
     pending_shutdown: bool,
+    /// A spawn has been requested and neither `Started` nor `SpawnFailed` has been handled
+    /// yet. `run_state` only changes on `Started`, so without this a second start in that
+    /// window would spawn a duplicate process.
+    starting: bool,
     /// Last-known or configured args, reused on manual or post-crash restart (#131).
     args: Option<Vec<String>>,
 }
@@ -159,6 +167,7 @@ impl ManagerState {
                     restart_count: 0,
                     generation: 0,
                     pending_shutdown: false,
+                    starting: false,
                     args,
                 };
                 (name, module)
@@ -186,6 +195,7 @@ impl ManagerState {
         if let Some(module) = self.modules.get_mut(name) {
             module.run_state = Some(true);
             module.pid = Some(pid);
+            module.starting = false;
             module.started_at = Some(Instant::now());
             module.args = args;
             if module.pending_shutdown {
@@ -234,9 +244,21 @@ impl ManagerState {
         true
     }
 
+    /// Records that the spawn requested for `name` failed, so a later start can retry it.
+    fn spawn_failed(&mut self, name: &str) {
+        if let Some(module) = self.modules.get_mut(name) {
+            module.starting = false;
+        }
+    }
+
     pub fn start_module(&mut self, name: &str, args: Option<&Vec<String>>) {
         if !self.is_module_running(name) {
             if let Some(module) = self.modules.get_mut(name) {
+                if module.starting {
+                    debug!("Not starting {name}: a spawn is already in flight");
+                    return;
+                }
+                module.starting = true;
                 module.generation += 1;
                 // An explicit start supersedes an earlier stop; a stop requested after this
                 // point (before Started is handled) is honoured in started_module.
@@ -952,6 +974,7 @@ fn handle(
                         );
                     }
                 }
+                ModuleMessage::SpawnFailed { name } => state_guard.spawn_failed(&name),
                 ModuleMessage::Init {} => {}
                 // Already handled above via early-continue
                 ModuleMessage::Notification { .. } => unreachable!(),
@@ -1036,6 +1059,7 @@ fn start_generic_module_thread(
             Ok(c) => c,
             Err(e) => {
                 error!("Failed to start module {name}: {e}");
+                let _ = tx.send(ModuleMessage::SpawnFailed { name: name.clone() });
                 #[cfg(windows)]
                 if let Some(handle) = job_handle {
                     unsafe {
@@ -1161,6 +1185,7 @@ fn start_notify_module_thread(
                 // An unsupported --output-only is detected after exit (below), not here: spawn
                 // errors are OS errors and never contain the child's usage message.
                 error!("Failed to start module {name}: {e}");
+                let _ = tx.send(ModuleMessage::SpawnFailed { name: name.clone() });
                 #[cfg(windows)]
                 if let Some(handle) = job_handle {
                     unsafe {
@@ -1640,6 +1665,7 @@ mod tests {
             restart_count,
             generation: 1,
             pending_shutdown: false,
+            starting: false,
             args: None,
         };
         ManagerState {
@@ -1708,6 +1734,43 @@ mod tests {
         assert!(
             s.modules["aw-watcher"].pending_shutdown,
             "a stop requested before Started was handled must stick"
+        );
+    }
+
+    #[test]
+    fn start_requested_while_starting_spawns_once() {
+        // A second start (tray double-click, autostart racing a manual start) that lands
+        // before the first spawn's Started is handled must not spawn a duplicate process.
+        let mut s = state_with_module("aw-watcher", 0, None);
+        {
+            let m = s.modules.get_mut("aw-watcher").unwrap();
+            m.run_state = Some(false);
+            m.pid = None;
+        }
+        s.start_module("aw-watcher", None);
+        s.start_module("aw-watcher", None);
+        assert_eq!(
+            s.modules["aw-watcher"].generation, 2,
+            "the second start must not request another spawn"
+        );
+        s.started_module("aw-watcher", 999_999_999, None);
+        assert!(!s.modules["aw-watcher"].starting);
+    }
+
+    #[test]
+    fn failed_spawn_does_not_block_a_later_start() {
+        let mut s = state_with_module("aw-watcher", 0, None);
+        {
+            let m = s.modules.get_mut("aw-watcher").unwrap();
+            m.run_state = Some(false);
+            m.pid = None;
+        }
+        s.start_module("aw-watcher", None);
+        s.spawn_failed("aw-watcher");
+        s.start_module("aw-watcher", None);
+        assert_eq!(
+            s.modules["aw-watcher"].generation, 3,
+            "a start after a failed spawn must spawn again"
         );
     }
 
