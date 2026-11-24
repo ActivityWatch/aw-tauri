@@ -73,6 +73,20 @@ enum ModuleMessage {
     },
 }
 
+/// What a module's crash leads to, decided under the lock that accepted the exit.
+#[derive(Debug, PartialEq)]
+enum CrashPlan {
+    /// The module was asked to stop; its exit is not a crash.
+    Intentional,
+    Restart {
+        delay_secs: u64,
+        restart_count: u32,
+        generation: u64,
+    },
+    /// Out of automatic retries; the module is left stopped.
+    LimitReached,
+}
+
 /// A lightweight, path-free view of every module's run state, keyed by module name.
 /// `None` = discovered but never started, `Some(true)` = running, `Some(false)` = stopped
 /// after having been started. This is all the tray and mini-mode event loop need; it is cheap
@@ -241,6 +255,47 @@ impl ManagerState {
                 module.restart_count = 0;
             }
         }
+        true
+    }
+
+    /// Decides what a crash of `name` (an exit already accepted by `stopped_module`) leads to.
+    /// Runs under the same lock as `stopped_module`, so a start or stop that lands after the
+    /// exit cannot change whether this exit counts as intentional or which run it belongs to.
+    /// At the restart limit the module is marked stopped here rather than in the alert thread,
+    /// so that thread never touches state a later start may own.
+    fn plan_after_crash(&mut self, name: &str) -> CrashPlan {
+        let Some(module) = self.modules.get_mut(name) else {
+            return CrashPlan::Intentional;
+        };
+        if module.pending_shutdown {
+            return CrashPlan::Intentional;
+        }
+        if module.restart_count < 3 {
+            CrashPlan::Restart {
+                // Exponential backoff: restart_count 0 -> 2s, 1 -> 4s, 2 -> 8s.
+                delay_secs: 2u64.pow(module.restart_count + 1),
+                restart_count: module.restart_count,
+                generation: module.generation,
+            }
+        } else {
+            module.pending_shutdown = true;
+            CrashPlan::LimitReached
+        }
+    }
+
+    /// Runs the automatic restart planned by `plan_after_crash`, unless the module was started
+    /// (and maybe stopped again) since that crash. Returns whether a restart was requested.
+    fn restart_after_crash(&mut self, name: &str, restart_count: u32, generation: u64) -> bool {
+        let Some(module) = self.modules.get_mut(name) else {
+            return false;
+        };
+        if module.generation != generation || module.pending_shutdown {
+            debug!("Skipping automatic restart of {name}: state changed during backoff");
+            return false;
+        }
+        module.restart_count = restart_count + 1;
+        // start_module falls back to the args this module was last started with
+        self.start_module(name, None);
         true
     }
 
@@ -881,32 +936,15 @@ fn handle(
                     } else {
                         // Restart path logs up to 3 attempt lines; keep this at debug to avoid spam.
                         debug!("Module {name} exited with error status");
-                        thread::spawn(move || {
-                            let (should_restart, restart_info) = {
-                                let state_guard = state_clone
-                                    .lock()
-                                    .expect("Failed to acquire manager_state lock");
-                                let module = state_guard.modules.get(&name_clone);
-
-                                // If shutdown is pending, exit early
-                                if module.is_some_and(|m| m.pending_shutdown) {
-                                    return; // Exit the entire thread
-                                }
-
-                                let restart_count = module.map_or(0, |m| m.restart_count);
-                                let generation = module.map_or(0, |m| m.generation);
-                                if restart_count < 3 {
-                                    // Exponential backoff: 2^(restart_count + 1) seconds
-                                    // restart_count 0 -> 2 seconds, 1 -> 4 seconds, 2 -> 8 seconds
-                                    let delay_secs = 2u64.pow(restart_count + 1);
-                                    (true, Some((delay_secs, restart_count, generation)))
-                                } else {
-                                    (false, None)
-                                }
-                            };
-
-                            if should_restart {
-                                if let Some((secs, restart_count, generation)) = restart_info {
+                        let plan = state_guard.plan_after_crash(&name);
+                        match plan {
+                            CrashPlan::Intentional => {}
+                            CrashPlan::Restart {
+                                delay_secs: secs,
+                                restart_count,
+                                generation,
+                            } => {
+                                thread::spawn(move || {
                                     let attempt = restart_count + 1;
                                     // One log line per restart attempt (max 3 total with limit case).
                                     error!(
@@ -924,45 +962,35 @@ fn handle(
 
                                     thread::sleep(Duration::from_secs(secs));
 
-                                    let mut state_guard = state_clone
-                                        .lock()
-                                        .expect("Failed to acquire manager_state lock");
-
-                                    let Some(module) = state_guard.modules.get_mut(&name_clone)
-                                    else {
-                                        return;
-                                    };
                                     // The user may have started the module during the backoff (and
                                     // maybe stopped it again, or it crashed and scheduled its own
                                     // retry). Any start since the crash supersedes this retry.
-                                    if module.generation != generation || module.pending_shutdown {
-                                        debug!("Skipping automatic restart of {name_clone}: state changed during backoff");
-                                        return;
-                                    }
-                                    module.restart_count = restart_count + 1;
-                                    // start_module falls back to the args this module was last started with
-                                    state_guard.start_module(&name_clone, None);
-                                }
-                            } else {
-                                // Restart limit reached — update UI; no 4th log line (cap is 3).
-                                let mut state_guard = state_clone
-                                    .lock()
-                                    .expect("Failed to acquire manager_state lock");
-                                if let Some(module) = state_guard.modules.get_mut(&name_clone) {
-                                    module.pending_shutdown = true;
-                                }
-                                show_module_warning(
-                                    &event_tx_for_restart,
-                                    &name_clone,
-                                    &format!(
-                                        "Couldn’t restart after several tries, so it was left stopped.\n\n\
-                                         Open the ActivityWatch tray menu and choose Open log folder, \
-                                         then check the log for “{name_clone}” for the error details."
-                                    ),
-                                    module_alert_ui::StatusKind::Warning,
-                                );
+                                    state_clone
+                                        .lock()
+                                        .expect("Failed to acquire manager_state lock")
+                                        .restart_after_crash(
+                                            &name_clone,
+                                            restart_count,
+                                            generation,
+                                        );
+                                });
                             }
-                        });
+                            CrashPlan::LimitReached => {
+                                // Restart limit reached — update UI; no 4th log line (cap is 3).
+                                thread::spawn(move || {
+                                    show_module_warning(
+                                        &event_tx_for_restart,
+                                        &name_clone,
+                                        &format!(
+                                            "Couldn’t restart after several tries, so it was left stopped.\n\n\
+                                             Open the ActivityWatch tray menu and choose Open log folder, \
+                                             then check the log for “{name_clone}” for the error details."
+                                        ),
+                                        module_alert_ui::StatusKind::Warning,
+                                    );
+                                });
+                            }
+                        }
 
                         debug!(
                             "Module {name} stdout: {}",
@@ -1720,8 +1748,23 @@ mod tests {
         );
     }
 
+    /// Waits up to five seconds for `child` to exit and returns how it exited.
+    #[cfg(unix)]
+    fn wait_with_timeout(child: &mut std::process::Child) -> Option<std::process::ExitStatus> {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline {
+            if let Some(status) = child.try_wait().expect("try_wait") {
+                return Some(status);
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+        None
+    }
+
     #[test]
+    #[cfg(unix)]
     fn stop_requested_while_starting_is_not_lost() {
+        use std::os::unix::process::ExitStatusExt;
         let mut s = state_with_module("aw-watcher", 0, None);
         {
             let m = s.modules.get_mut("aw-watcher").unwrap();
@@ -1729,12 +1772,94 @@ mod tests {
             m.pid = None;
         }
         s.start_module("aw-watcher", None); // spawn requested (/nonexistent fails in its thread)
-        s.stop_module("aw-watcher"); // user stops it before Started is handled
-        s.started_module("aw-watcher", 999_999_999, None); // the in-flight Started arrives
+        s.stop_module("aw-watcher"); // user stops it before Started is handled: no pid to signal
+
+        // Stand-in for the process that in-flight spawn produced.
+        let mut child = Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("spawn sleep");
+        s.started_module("aw-watcher", child.id(), None); // the in-flight Started arrives
         assert!(
             s.modules["aw-watcher"].pending_shutdown,
             "a stop requested before Started was handled must stick"
         );
+        let status = wait_with_timeout(&mut child);
+        if status.is_none() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        assert_eq!(
+            status.and_then(|st| st.signal()),
+            Some(Signal::SIGTERM as i32),
+            "Started must send SIGTERM to the reported pid"
+        );
+    }
+
+    #[test]
+    fn exit_after_a_stop_is_intentional_even_if_restarted_before_the_worker_runs() {
+        // Notifications off: aw-notify is signalled and exits non-zero. If the user turns them
+        // back on before the crash worker runs, the exit must still count as the stop it was.
+        let mut s = state_with_module("aw-notify", 0, Some(Instant::now()));
+        s.modules.get_mut("aw-notify").unwrap().pid = Some(999_999_997);
+        s.stop_module("aw-notify");
+        assert!(s.stopped_module("aw-notify", 999_999_997));
+        assert_eq!(s.plan_after_crash("aw-notify"), CrashPlan::Intentional);
+        s.set_notify_enabled(true);
+        assert_eq!(s.modules["aw-notify"].restart_count, 0);
+    }
+
+    #[test]
+    fn restart_planned_before_a_manual_start_is_dropped() {
+        let mut s = state_with_module("aw-watcher", 0, Some(Instant::now()));
+        assert!(s.stopped_module("aw-watcher", 1234));
+        let CrashPlan::Restart {
+            restart_count,
+            generation,
+            ..
+        } = s.plan_after_crash("aw-watcher")
+        else {
+            panic!("an unrequested exit below the limit must plan a restart");
+        };
+        // The user starts it by hand during the backoff.
+        assert_eq!(s.handle_system_click("aw-watcher"), Some(true));
+        let after_manual = s.modules["aw-watcher"].generation;
+        assert!(
+            !s.restart_after_crash("aw-watcher", restart_count, generation),
+            "a retry for an older run must not act on the new one"
+        );
+        assert_eq!(s.modules["aw-watcher"].generation, after_manual);
+        assert_eq!(s.modules["aw-watcher"].restart_count, 0);
+    }
+
+    #[test]
+    fn restart_after_crash_restarts_the_same_run() {
+        let mut s = state_with_module("aw-watcher", 1, Some(Instant::now()));
+        assert!(s.stopped_module("aw-watcher", 1234));
+        let CrashPlan::Restart {
+            delay_secs,
+            restart_count,
+            generation,
+        } = s.plan_after_crash("aw-watcher")
+        else {
+            panic!("expected a restart plan");
+        };
+        assert_eq!(delay_secs, 4);
+        assert!(s.restart_after_crash("aw-watcher", restart_count, generation));
+        assert_eq!(s.modules["aw-watcher"].restart_count, 2);
+        assert_eq!(s.modules["aw-watcher"].generation, generation + 1);
+    }
+
+    #[test]
+    fn restart_limit_leaves_a_later_start_alone() {
+        // At the limit the module is marked stopped when the exit is handled, so a start the
+        // user makes afterwards is never stopped by the old crash's alert path.
+        let mut s = state_with_module("aw-watcher", 3, Some(Instant::now()));
+        assert!(s.stopped_module("aw-watcher", 1234));
+        assert_eq!(s.plan_after_crash("aw-watcher"), CrashPlan::LimitReached);
+        assert!(s.modules["aw-watcher"].pending_shutdown);
+        assert_eq!(s.handle_system_click("aw-watcher"), Some(true));
+        assert!(!s.modules["aw-watcher"].pending_shutdown);
     }
 
     #[test]
