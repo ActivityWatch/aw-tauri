@@ -62,18 +62,53 @@ enum ModuleMessage {
         pid: u32,
         output: std::process::Output,
     },
+    /// The spawn requested by `start_module` failed before a process existed. `generation` is
+    /// the start it answers, so a late failure from a replaced run is ignored.
+    SpawnFailed {
+        name: String,
+        generation: u64,
+    },
     Init {},
+    /// Something outside the message loop changed module state (a tray click). Nothing needs
+    /// handling; the loop rebuilds the snapshot after every message, which refreshes the
+    /// checkmarks so they never disagree with what a click would do.
+    Refresh {},
     Notification {
         title: String,
         message: String,
     },
 }
 
-/// A lightweight, path-free view of every module's run state, keyed by module name.
-/// `None` = discovered but never started, `Some(true)` = running, `Some(false)` = stopped
-/// after having been started. This is all the tray and mini-mode event loop need; it is cheap
-/// to build and shared via `Arc` instead of cloning the full per-module state on every event.
-pub(crate) type ModulesSnapshot = BTreeMap<String, Option<bool>>;
+/// What a module's crash leads to, decided under the lock that accepted the exit.
+#[derive(Debug, PartialEq)]
+enum CrashPlan {
+    /// The module was asked to stop; its exit is not a crash.
+    Intentional,
+    Restart {
+        delay_secs: u64,
+        restart_count: u32,
+        generation: u64,
+    },
+    /// Out of automatic retries; the module is left stopped.
+    LimitReached { generation: u64 },
+}
+
+/// The tray-visible state of one module.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ModuleView {
+    /// The module belongs in the tray's started group: it has run (or a restart is queued),
+    /// or a start is in flight.
+    pub started: bool,
+    /// The module is meant to be running now: running, starting, or queued to restart after a
+    /// stop that already signalled the process. Drives the checkmark, so it always matches
+    /// what a tray click would do (`handle_system_click` toggles the same value).
+    pub requested: bool,
+}
+
+/// A lightweight, path-free view of every module's tray state, keyed by module name. This is
+/// all the tray and mini-mode event loop need; it is cheap to build and shared via `Arc`
+/// instead of cloning the full per-module state on every event.
+pub(crate) type ModulesSnapshot = BTreeMap<String, ModuleView>;
 
 #[derive(Debug, Clone)]
 pub(crate) enum ManagerEvent {
@@ -101,8 +136,39 @@ struct Module {
     /// again, since the crash it was scheduled for.
     generation: u64,
     pending_shutdown: bool,
+    /// A spawn has been requested and neither `Started` nor `SpawnFailed` has been handled
+    /// yet. `run_state` only changes on `Started`, so without this a second start in that
+    /// window would spawn a duplicate process.
+    starting: bool,
+    /// A start arrived while `starting` and was served by the in-flight spawn. If that spawn
+    /// fails, the request is retried once instead of being dropped with the failed attempt.
+    start_coalesced: bool,
+    /// A start arrived after a stop had already signalled the running process. `run_state`
+    /// still reads "running" until that process exits, so the request is remembered and
+    /// honoured when the exit arrives instead of being dropped.
+    restart_after_exit: bool,
     /// Last-known or configured args, reused on manual or post-crash restart (#131).
     args: Option<Vec<String>>,
+}
+
+impl Module {
+    /// Whether the module is meant to be running right now: running, starting, or queued to
+    /// restart after a stop that already signalled the process. `run_state` alone lags a
+    /// restart request (it stays `Some(false)` until the replacement reports `Started`), so
+    /// the tray checkmark must use this to agree with `handle_system_click`.
+    fn requested_running(&self) -> bool {
+        !self.pending_shutdown
+            && (self.run_state == Some(true) || self.starting || self.restart_after_exit)
+    }
+
+    /// The tray-visible view: whether it belongs in the started group, and whether it is
+    /// meant to be running.
+    fn view(&self) -> ModuleView {
+        ModuleView {
+            started: self.run_state.is_some() || self.starting || self.restart_after_exit,
+            requested: self.requested_running(),
+        }
+    }
 }
 
 /// Tray menu ID for the "Enable notifications" toggle.
@@ -159,6 +225,9 @@ impl ManagerState {
                     restart_count: 0,
                     generation: 0,
                     pending_shutdown: false,
+                    starting: false,
+                    start_coalesced: false,
+                    restart_after_exit: false,
                     args,
                 };
                 (name, module)
@@ -173,12 +242,19 @@ impl ManagerState {
         }
     }
 
-    /// A path-free `name -> run state` view for the tray and mini-mode event loop.
+    /// A path-free view of each module's tray state for the tray and mini-mode event loop.
     pub(crate) fn modules_snapshot(&self) -> ModulesSnapshot {
         self.modules
             .iter()
-            .map(|(name, module)| (name.clone(), module.run_state))
+            .map(|(name, module)| (name.clone(), module.view()))
             .collect()
+    }
+
+    /// Ask the message loop to refresh the tray/mini view. Called after a click changes state
+    /// outside the loop, so the checkmark matches the click's intent at once instead of
+    /// waiting for the next Started/Stopped message.
+    fn refresh_ui(&self) {
+        let _ = self.tx.send(ModuleMessage::Refresh {});
     }
 
     fn started_module(&mut self, name: &str, pid: u32, args: Option<Vec<String>>) {
@@ -186,26 +262,41 @@ impl ManagerState {
         if let Some(module) = self.modules.get_mut(name) {
             module.run_state = Some(true);
             module.pid = Some(pid);
+            module.starting = false;
+            module.start_coalesced = false;
+            module.restart_after_exit = false;
             module.started_at = Some(Instant::now());
             module.args = args;
-            module.pending_shutdown = false;
+            if module.pending_shutdown {
+                // The user stopped it while the spawn was in flight (stop_module had no pid
+                // to signal). Stop it now; pending_shutdown stays set so it isn't restarted.
+                info!("Stopping {name}: a stop was requested while it was starting");
+                if let Err(e) = send_sigterm(pid) {
+                    error!("Failed to send SIGTERM to module {name}: {e}");
+                }
+            }
         } else {
             warn!("Started unknown module {name}, not in discovered set");
         }
         debug!("Modules: {:?}", self.modules);
     }
-    fn stopped_module(&mut self, name: &str, pid: u32) {
+    /// Records that process `pid` of module `name` exited. Returns `false` when the exit is
+    /// stale (not the tracked process), in which case the caller must not treat it as a crash.
+    fn stopped_module(&mut self, name: &str, pid: u32) -> bool {
         info!("Stopped module: {name} (pid {pid})");
         if let Some(module) = self.modules.get_mut(name) {
             // Drop Stopped messages from a process that is no longer the tracked one.
             // This prevents a delayed exit from an old process clobbering a replacement
             // that was started while the old one was shutting down (rapid toggle race).
-            if module.pid.is_some() && module.pid != Some(pid) {
+            // Started always precedes Stopped from the same spawn thread, so an exit that
+            // arrives while no pid is tracked belongs to a process already superseded
+            // (set_notify_enabled clears the pid when it starts a replacement).
+            if module.pid != Some(pid) {
                 debug!(
                     "Ignoring stale Stopped for {name}: pid {pid} ≠ tracked {:?}",
                     module.pid
                 );
-                return;
+                return false;
             }
             module.run_state = Some(false);
             module.pid = None;
@@ -219,12 +310,130 @@ impl ManagerState {
                 module.restart_count = 0;
             }
         }
+        true
+    }
+
+    /// Decides what a crash of `name` (an exit already accepted by `stopped_module`) leads to.
+    /// Runs under the same lock as `stopped_module`, so a start or stop that lands after the
+    /// exit cannot change whether this exit counts as intentional or which run it belongs to.
+    /// At the restart limit the module is marked stopped here rather than in the alert thread,
+    /// so that thread never touches state a later start may own.
+    fn plan_after_crash(&mut self, name: &str) -> CrashPlan {
+        let Some(module) = self.modules.get_mut(name) else {
+            return CrashPlan::Intentional;
+        };
+        if module.pending_shutdown {
+            return CrashPlan::Intentional;
+        }
+        if module.restart_count < 3 {
+            CrashPlan::Restart {
+                // Exponential backoff: restart_count 0 -> 2s, 1 -> 4s, 2 -> 8s.
+                delay_secs: 2u64.pow(module.restart_count + 1),
+                restart_count: module.restart_count,
+                generation: module.generation,
+            }
+        } else {
+            module.pending_shutdown = true;
+            CrashPlan::LimitReached {
+                generation: module.generation,
+            }
+        }
+    }
+
+    /// Whether the alert for a crash of run `generation` still describes the module: no start
+    /// has superseded that run and, unless the module was left stopped at the limit, no stop
+    /// was requested. Alert threads run after the lock that planned them is released, so
+    /// they check this before showing "restarting" or "left stopped".
+    fn crash_alert_current(&self, name: &str, generation: u64, left_stopped: bool) -> bool {
+        self.modules
+            .get(name)
+            .is_some_and(|m| m.generation == generation && (left_stopped || !m.pending_shutdown))
+    }
+
+    /// Runs the automatic restart planned by `plan_after_crash`, unless the module was started
+    /// (and maybe stopped again) since that crash. Returns whether a restart was requested.
+    fn restart_after_crash(&mut self, name: &str, restart_count: u32, generation: u64) -> bool {
+        let Some(module) = self.modules.get_mut(name) else {
+            return false;
+        };
+        if module.generation != generation || module.pending_shutdown {
+            debug!("Skipping automatic restart of {name}: state changed during backoff");
+            return false;
+        }
+        module.restart_count = restart_count + 1;
+        // start_module falls back to the args this module was last started with
+        self.start_module(name, None);
+        true
+    }
+
+    /// Records that the spawn requested for `name` failed, so a later start can retry it.
+    /// A start coalesced into the failed attempt is retried once now (unless a stop came
+    /// after it): the failure may already have happened when that start arrived.
+    fn spawn_failed(&mut self, name: &str, generation: u64) {
+        let retry = match self.modules.get_mut(name) {
+            Some(module) if module.generation != generation => {
+                // A replaced run's spawn (e.g. aw-notify's fallback after a re-enable) failed
+                // late: the current start is still in flight, so leave its state alone.
+                debug!("Ignoring stale spawn failure of {name} (generation {generation})");
+                false
+            }
+            Some(module) => {
+                // aw-notify's fallback can fail after Started was reported for its
+                // now-reaped --output-only child. No Stopped follows that path, so
+                // clear the dead pid here rather than leave the tray running and
+                // allow a later stop to signal a potentially recycled pid.
+                // Only a module that had started is marked stopped: a first spawn that
+                // never produced a child stays "never started", so the tray does not
+                // report a run that never existed.
+                if module.run_state.is_some() {
+                    module.run_state = Some(false);
+                }
+                module.pid = None;
+                module.started_at = None;
+                module.starting = false;
+                let retry = module.start_coalesced && !module.pending_shutdown;
+                module.start_coalesced = false;
+                retry
+            }
+            None => false,
+        };
+        if retry {
+            info!("Retrying {name}: a start was requested while the failed spawn was in flight");
+            self.start_module(name, None);
+        }
     }
 
     pub fn start_module(&mut self, name: &str, args: Option<&Vec<String>>) {
-        if !self.is_module_running(name) {
+        if self.is_module_running(name) {
+            // A stop may already have signalled the running process (the start landed
+            // between that stop and the exit). `run_state` still reads "running" until the
+            // signalled child actually exits, so remember the request and honour it there
+            // instead of dropping it as a duplicate start.
             if let Some(module) = self.modules.get_mut(name) {
+                if module.pending_shutdown {
+                    module.pending_shutdown = false;
+                    module.restart_after_exit = true;
+                    if args.is_some() {
+                        module.args = args.cloned();
+                    }
+                    debug!("Not starting {name}: it is stopping, will restart on exit");
+                }
+            }
+        } else {
+            if let Some(module) = self.modules.get_mut(name) {
+                if module.starting {
+                    // The in-flight spawn serves this start. It still supersedes a stop made
+                    // since that spawn began, or started_module would stop the new process.
+                    module.pending_shutdown = false;
+                    module.start_coalesced = true;
+                    debug!("Not starting {name}: a spawn is already in flight");
+                    return;
+                }
+                module.starting = true;
                 module.generation += 1;
+                // An explicit start supersedes an earlier stop; a stop requested after this
+                // point (before Started is handled) is honoured in started_module.
+                module.pending_shutdown = false;
                 // Fall back to the last known (or configured) args for this module, so manual
                 // tray restarts and post-crash restarts don't silently drop them (#131).
                 let effective_args = args.cloned().or_else(|| module.args.clone());
@@ -234,6 +443,7 @@ impl ManagerState {
                     effective_args,
                     self.server_port,
                     self.tx.clone(),
+                    module.generation,
                 );
             } else {
                 error!("Module {name} not found in PATH");
@@ -245,6 +455,9 @@ impl ManagerState {
             // Mark pending_shutdown unconditionally so a module in backoff (no pid yet)
             // does not restart after its delay expires.
             module.pending_shutdown = true;
+            // A start that was waiting for the signalled process to exit is superseded by
+            // this stop; otherwise the exit would start a process the user just stopped.
+            module.restart_after_exit = false;
             if let Some(pid) = module.pid {
                 if let Err(e) = send_sigterm(pid) {
                     error!("Failed to send SIGTERM to module {name}: {e}");
@@ -258,21 +471,42 @@ impl ManagerState {
         let running: Vec<String> = self
             .modules
             .iter()
-            .filter(|(_, module)| module.pid.is_some())
+            // A starting module has no pid yet; record the stop so its Started is stopped
+            // and a failed spawn is not retried while the app quits.
+            .filter(|(_, module)| module.pid.is_some() || module.starting)
             .map(|(name, _)| name.clone())
             .collect();
         for name in running {
             self.stop_module(&name);
         }
     }
+    /// Honours a start that landed while the module was already being stopped, now that
+    /// the signalled process has exited. Returns whether a new run was started.
+    fn restart_after_stop_if_requested(&mut self, name: &str) -> bool {
+        let requested = self
+            .modules
+            .get_mut(name)
+            .is_some_and(|module| std::mem::take(&mut module.restart_after_exit));
+        if requested {
+            info!("Restarting {name}: a start was requested while it was stopping");
+            self.start_module(name, None);
+        }
+        requested
+    }
+
     /// Toggles module `name` from a tray click. Returns whether it is now meant to
     /// be running, or `None` if `name` isn't a discovered module.
     pub fn handle_system_click(&mut self, name: &str) -> Option<bool> {
-        if !self.modules.contains_key(name) {
+        let Some(module) = self.modules.get(name) else {
             warn!("Ignoring tray click for unknown module {name}");
             return None;
-        }
-        if self.is_module_running(name) {
+        };
+        // Toggle the requested state, not just the last reported process state: an
+        // in-flight spawn or queued restart is on, while a pending stop is off even
+        // before its process exits. This also makes repeated clicks during startup
+        // alternate instead of coalescing every click into another start request.
+        // The tray checkmark uses the same value (`ModuleView::requested`).
+        if module.requested_running() {
             self.stop_module(name);
             Some(false)
         } else {
@@ -289,6 +523,16 @@ impl ManagerState {
         self.modules
             .get(name)
             .is_some_and(|module| module.run_state == Some(true))
+    }
+
+    /// Whether the module is meant to be running right now — the same value the tray
+    /// checkmark renders (`ModuleView::requested`). Tray toggles must start from this, not
+    /// from `is_module_running`, or a click disagrees with the checkmark while a start or a
+    /// stop is still in flight and persists the opposite of what the user saw.
+    fn requested_running(&self, name: &str) -> bool {
+        self.modules
+            .get(name)
+            .is_some_and(|module| module.requested_running())
     }
 
     pub(crate) fn is_notify_enabled(&self) -> bool {
@@ -369,10 +613,10 @@ fn update_tray_menu(modules: ModulesSnapshot, event_tx: &Option<Sender<ManagerEv
     let app = get_app_handle();
     debug!("App handle acquired");
 
-    // Running group = modules that have been started at least once (run_state is Some).
+    // Running group = modules that have been started at least once, or whose start is in flight.
     let running_keys: BTreeSet<String> = modules
         .iter()
-        .filter(|(_, run_state)| run_state.is_some())
+        .filter(|(_, view)| view.started)
         .map(|(name, _)| name.clone())
         .collect();
     let mut cache = TRAY_MENU_CACHE
@@ -381,9 +625,9 @@ fn update_tray_menu(modules: ModulesSnapshot, event_tx: &Option<Sender<ManagerEv
     match cache.as_ref() {
         // Same running group as last build: ordering is unchanged, so only sync checked state.
         Some(c) if c.running_keys == running_keys => {
-            for (name, run_state) in modules.iter() {
-                if let (Some(item), Some(running)) = (c.module_items.get(name), run_state) {
-                    if let Err(e) = item.set_checked(*running) {
+            for (name, view) in modules.iter() {
+                if let Some(item) = c.module_items.get(name) {
+                    if let Err(e) = item.set_checked(view.requested) {
                         error!("Failed to update tray checked state for {name}: {e}");
                     }
                 }
@@ -428,10 +672,10 @@ fn build_tray_menu(
     let mut module_items = HashMap::new();
     let mut modules_submenu_builder = SubmenuBuilder::new(app, "Modules");
     // Started modules first, alphabetically (BTreeMap iterates in key order), each with a checkbox.
-    for (module, run_state) in modules.iter() {
-        if let Some(running) = run_state {
+    for (module, view) in modules.iter() {
+        if view.started {
             let module_menu =
-                CheckMenuItem::with_id(app, module, module, true, *running, None::<&str>)
+                CheckMenuItem::with_id(app, module, module, true, view.requested, None::<&str>)
                     .expect("Failed to create module menu item");
             modules_submenu_builder = modules_submenu_builder.item(&module_menu);
             module_items.insert(module.clone(), module_menu);
@@ -439,8 +683,8 @@ fn build_tray_menu(
     }
 
     // Then discovered modules that have never been started, alphabetically.
-    for (module, run_state) in modules.iter() {
-        if run_state.is_none() {
+    for (module, view) in modules.iter() {
+        if !view.started {
             let module_menu = MenuItem::with_id(app, module, module, true, None::<&str>)
                 .expect("Failed to create module menu item");
             modules_submenu_builder = modules_submenu_builder.item(&module_menu);
@@ -717,11 +961,14 @@ fn autostart_names<'a>(
     notify_opt_in: bool,
     notify_discovered: bool,
 ) -> Vec<&'a str> {
-    let mut names: Vec<&'a str> = listed
-        .iter()
-        .copied()
-        .filter(|&name| name != NOTIFY_MODULE)
-        .collect();
+    let mut names: Vec<&'a str> = Vec::new();
+    for &name in listed {
+        // A repeated entry must not spawn a second process: run_state is only set once
+        // the Started message is handled, after this loop.
+        if name != NOTIFY_MODULE && !names.contains(&name) {
+            names.push(name);
+        }
+    }
     if notify_opt_in && (notify_discovered || listed.contains(&NOTIFY_MODULE)) {
         names.push(NOTIFY_MODULE);
     }
@@ -745,9 +992,13 @@ pub(crate) fn handle_module_menu_click(
             warn!("Ignoring tray click for unknown module {name}");
             return;
         }
-        let enable = !s.is_module_running(name);
+        // Toggle the requested state the checkmark shows, not the last reported process
+        // state: aw-notify stopping still reads running, and aw-notify starting reads
+        // stopped, so `is_module_running` would flip the opposite of the visible toggle.
+        let enable = !s.requested_running(name);
         if crate::write_notify_enabled(datastore, enable) {
             s.set_notify_enabled(enable);
+            s.refresh_ui();
         } else {
             error!("aw-notify toggle aborted: datastore write failed; state unchanged");
         }
@@ -758,6 +1009,7 @@ pub(crate) fn handle_module_menu_click(
     // nothing takes them the other way round).
     if let Some(enabled) = s.handle_system_click(name) {
         crate::config_edit::persist_module_click(name, enabled);
+        s.refresh_ui();
     }
 }
 
@@ -831,39 +1083,35 @@ fn handle(
                     }
                 }
                 ModuleMessage::Stopped { name, pid, output } => {
-                    state_guard.stopped_module(&name, pid);
+                    let current = state_guard.stopped_module(&name, pid);
                     let name_clone = name.clone();
-                    if output.status.success() {
+                    if !current {
+                        // A superseded process exiting is neither a crash nor a clean stop.
+                    } else if state_guard.restart_after_stop_if_requested(&name) {
+                        // A start landed while this process was being stopped; it is
+                        // running again, so the exit is neither a crash nor a final stop.
+                    } else if output.status.success() {
                         info!("Module {name} exited successfully");
                     } else {
                         // Restart path logs up to 3 attempt lines; keep this at debug to avoid spam.
                         debug!("Module {name} exited with error status");
-                        thread::spawn(move || {
-                            let (should_restart, restart_info) = {
-                                let state_guard = state_clone
-                                    .lock()
-                                    .expect("Failed to acquire manager_state lock");
-                                let module = state_guard.modules.get(&name_clone);
-
-                                // If shutdown is pending, exit early
-                                if module.is_some_and(|m| m.pending_shutdown) {
-                                    return; // Exit the entire thread
-                                }
-
-                                let restart_count = module.map_or(0, |m| m.restart_count);
-                                let generation = module.map_or(0, |m| m.generation);
-                                if restart_count < 3 {
-                                    // Exponential backoff: 2^(restart_count + 1) seconds
-                                    // restart_count 0 -> 2 seconds, 1 -> 4 seconds, 2 -> 8 seconds
-                                    let delay_secs = 2u64.pow(restart_count + 1);
-                                    (true, Some((delay_secs, restart_count, generation)))
-                                } else {
-                                    (false, None)
-                                }
-                            };
-
-                            if should_restart {
-                                if let Some((secs, restart_count, generation)) = restart_info {
+                        let plan = state_guard.plan_after_crash(&name);
+                        match plan {
+                            CrashPlan::Intentional => {}
+                            CrashPlan::Restart {
+                                delay_secs: secs,
+                                restart_count,
+                                generation,
+                            } => {
+                                thread::spawn(move || {
+                                    let current = state_clone
+                                        .lock()
+                                        .expect("Failed to acquire manager_state lock")
+                                        .crash_alert_current(&name_clone, generation, false);
+                                    if !current {
+                                        debug!("Skipping crash alert for {name_clone}: stopped or restarted since");
+                                        return;
+                                    }
                                     let attempt = restart_count + 1;
                                     // One log line per restart attempt (max 3 total with limit case).
                                     error!(
@@ -881,45 +1129,43 @@ fn handle(
 
                                     thread::sleep(Duration::from_secs(secs));
 
-                                    let mut state_guard = state_clone
-                                        .lock()
-                                        .expect("Failed to acquire manager_state lock");
-
-                                    let Some(module) = state_guard.modules.get_mut(&name_clone)
-                                    else {
-                                        return;
-                                    };
                                     // The user may have started the module during the backoff (and
                                     // maybe stopped it again, or it crashed and scheduled its own
                                     // retry). Any start since the crash supersedes this retry.
-                                    if module.generation != generation || module.pending_shutdown {
-                                        debug!("Skipping automatic restart of {name_clone}: state changed during backoff");
+                                    state_clone
+                                        .lock()
+                                        .expect("Failed to acquire manager_state lock")
+                                        .restart_after_crash(
+                                            &name_clone,
+                                            restart_count,
+                                            generation,
+                                        );
+                                });
+                            }
+                            CrashPlan::LimitReached { generation } => {
+                                // Restart limit reached — update UI; no 4th log line (cap is 3).
+                                thread::spawn(move || {
+                                    let current = state_clone
+                                        .lock()
+                                        .expect("Failed to acquire manager_state lock")
+                                        .crash_alert_current(&name_clone, generation, true);
+                                    if !current {
+                                        debug!("Skipping restart-limit alert for {name_clone}: started since");
                                         return;
                                     }
-                                    module.restart_count = restart_count + 1;
-                                    // start_module falls back to the args this module was last started with
-                                    state_guard.start_module(&name_clone, None);
-                                }
-                            } else {
-                                // Restart limit reached — update UI; no 4th log line (cap is 3).
-                                let mut state_guard = state_clone
-                                    .lock()
-                                    .expect("Failed to acquire manager_state lock");
-                                if let Some(module) = state_guard.modules.get_mut(&name_clone) {
-                                    module.pending_shutdown = true;
-                                }
-                                show_module_warning(
-                                    &event_tx_for_restart,
-                                    &name_clone,
-                                    &format!(
-                                        "Couldn’t restart after several tries, so it was left stopped.\n\n\
-                                         Open the ActivityWatch tray menu and choose Open log folder, \
-                                         then check the log for “{name_clone}” for the error details."
-                                    ),
-                                    module_alert_ui::StatusKind::Warning,
-                                );
+                                    show_module_warning(
+                                        &event_tx_for_restart,
+                                        &name_clone,
+                                        &format!(
+                                            "Couldn’t restart after several tries, so it was left stopped.\n\n\
+                                             Open the ActivityWatch tray menu and choose Open log folder, \
+                                             then check the log for “{name_clone}” for the error details."
+                                        ),
+                                        module_alert_ui::StatusKind::Warning,
+                                    );
+                                });
                             }
-                        });
+                        }
 
                         debug!(
                             "Module {name} stdout: {}",
@@ -931,7 +1177,10 @@ fn handle(
                         );
                     }
                 }
-                ModuleMessage::Init {} => {}
+                ModuleMessage::SpawnFailed { name, generation } => {
+                    state_guard.spawn_failed(&name, generation)
+                }
+                ModuleMessage::Init {} | ModuleMessage::Refresh {} => {}
                 // Already handled above via early-continue
                 ModuleMessage::Notification { .. } => unreachable!(),
             }
@@ -956,15 +1205,16 @@ fn start_module_thread(
     custom_args: Option<Vec<String>>,
     server_port: u16,
     tx: Sender<ModuleMessage>,
+    generation: u64,
 ) {
     // Special handling for aw-notify module
     if name == "aw-notify" {
         info!("Using special aw-notify handler for module: {name}");
-        start_notify_module_thread(name, path, custom_args, server_port, tx);
+        start_notify_module_thread(name, path, custom_args, server_port, tx, generation);
         return;
     }
 
-    start_generic_module_thread(name, path, custom_args, server_port, tx);
+    start_generic_module_thread(name, path, custom_args, server_port, tx, generation);
 }
 
 fn start_generic_module_thread(
@@ -973,6 +1223,7 @@ fn start_generic_module_thread(
     custom_args: Option<Vec<String>>,
     server_port: u16,
     tx: Sender<ModuleMessage>,
+    generation: u64,
 ) {
     thread::spawn(move || {
         // Create job object on Windows to ensure child dies with parent
@@ -1015,6 +1266,10 @@ fn start_generic_module_thread(
             Ok(c) => c,
             Err(e) => {
                 error!("Failed to start module {name}: {e}");
+                let _ = tx.send(ModuleMessage::SpawnFailed {
+                    name: name.clone(),
+                    generation,
+                });
                 #[cfg(windows)]
                 if let Some(handle) = job_handle {
                     unsafe {
@@ -1090,6 +1345,7 @@ fn start_notify_module_thread(
     custom_args: Option<Vec<String>>,
     server_port: u16,
     tx: Sender<ModuleMessage>,
+    generation: u64,
 ) {
     thread::spawn(move || {
         // Create job object on Windows to ensure child dies with parent
@@ -1140,6 +1396,10 @@ fn start_notify_module_thread(
                 // An unsupported --output-only is detected after exit (below), not here: spawn
                 // errors are OS errors and never contain the child's usage message.
                 error!("Failed to start module {name}: {e}");
+                let _ = tx.send(ModuleMessage::SpawnFailed {
+                    name: name.clone(),
+                    generation,
+                });
                 #[cfg(windows)]
                 if let Some(handle) = job_handle {
                     unsafe {
@@ -1246,7 +1506,7 @@ fn start_notify_module_thread(
                     }
                 }
                 // Fallback to generic module handler
-                start_generic_module_thread(name, path, custom_args, server_port, tx);
+                start_generic_module_thread(name, path, custom_args, server_port, tx, generation);
                 return;
             }
         }
@@ -1437,62 +1697,64 @@ fn discover_modules() -> BTreeMap<String, PathBuf> {
 
 /// Searches `dirs_to_search`, and any `aw-*` subdirectories, for executable `aw-*` modules.
 #[cfg(unix)]
-pub(crate) fn find_modules_in(
-    mut dirs_to_search: Vec<PathBuf>,
-    excluded: &[&str],
-) -> BTreeMap<String, PathBuf> {
+pub(crate) fn find_modules_in(roots: Vec<PathBuf>, excluded: &[&str]) -> BTreeMap<String, PathBuf> {
     use std::os::unix::fs::MetadataExt;
 
     let mut found_modules = BTreeMap::new();
     // Use (device, inode) pairs for cycle detection (works across filesystems)
     let mut visited_inodes = HashSet::new();
 
-    // Process directories in depth-first order
-    while let Some(dir) = dirs_to_search.pop() {
-        // Use (device, inode) tuple to detect cycles (works across different filesystems)
-        if let Ok(metadata) = fs::metadata(&dir) {
-            let id = (metadata.dev(), metadata.ino());
-            if !visited_inodes.insert(id) {
-                continue; // Already visited this directory
-            }
-        } else {
-            continue; // Can't access directory
-        }
-
-        // Look for aw-* executables in this directory
-        if let Ok(entries) = fs::read_dir(&dir) {
-            for entry in entries.filter_map(Result::ok) {
-                // Filter by name before touching metadata: PATH holds thousands of entries and
-                // only a handful are aw-*, so this skips a stat call for almost all of them.
-                let file_name = match entry.file_name().into_string() {
-                    Ok(name) if name.starts_with("aw-") => name,
-                    _ => continue,
-                };
-                let path = entry.path();
-
-                // Follow symlinks: a symlink's own mode is always 0o777 on Linux, so checking it
-                // (as entry.metadata() would) accepted any aw-* link, even one to a
-                // non-executable or missing file, and never descended into linked directories.
-                let metadata = match fs::metadata(&path) {
-                    Ok(m) => m,
-                    Err(_) => continue, // broken symlink or unreadable
-                };
-
-                // If it's a directory starting with "aw-", add to search stack
-                if metadata.is_dir() {
-                    dirs_to_search.push(path);
+    // `roots` is in priority order (as for find_windows_modules_in): search them in that
+    // order, depth-first within each, and keep the first find of a name. A directory that
+    // is reachable from several roots is then attributed to the highest-priority one.
+    for root in roots {
+        let mut dirs_to_search = vec![root];
+        while let Some(dir) = dirs_to_search.pop() {
+            // Use (device, inode) tuple to detect cycles (works across different filesystems)
+            if let Ok(metadata) = fs::metadata(&dir) {
+                let id = (metadata.dev(), metadata.ino());
+                if !visited_inodes.insert(id) {
+                    continue; // Already visited this directory
                 }
-                // If it's an executable file
-                else if metadata.is_file() {
-                    // Skip if has extension or is excluded
-                    if file_name.contains('.') || excluded.contains(&file_name.as_str()) {
-                        continue;
-                    }
+            } else {
+                continue; // Can't access directory
+            }
 
-                    // Check if executable
-                    let is_executable = metadata.permissions().mode() & 0o111 != 0;
-                    if is_executable {
-                        found_modules.insert(file_name, path);
+            // Look for aw-* executables in this directory
+            if let Ok(entries) = fs::read_dir(&dir) {
+                for entry in entries.filter_map(Result::ok) {
+                    // Filter by name before touching metadata: PATH holds thousands of entries and
+                    // only a handful are aw-*, so this skips a stat call for almost all of them.
+                    let file_name = match entry.file_name().into_string() {
+                        Ok(name) if name.starts_with("aw-") => name,
+                        _ => continue,
+                    };
+                    let path = entry.path();
+
+                    // Follow symlinks: a symlink's own mode is always 0o777 on Linux, so checking it
+                    // (as entry.metadata() would) accepted any aw-* link, even one to a
+                    // non-executable or missing file, and never descended into linked directories.
+                    let metadata = match fs::metadata(&path) {
+                        Ok(m) => m,
+                        Err(_) => continue, // broken symlink or unreadable
+                    };
+
+                    // If it's a directory starting with "aw-", add to search stack
+                    if metadata.is_dir() {
+                        dirs_to_search.push(path);
+                    }
+                    // If it's an executable file
+                    else if metadata.is_file() {
+                        // Skip if has extension or is excluded
+                        if file_name.contains('.') || excluded.contains(&file_name.as_str()) {
+                            continue;
+                        }
+
+                        // Check if executable
+                        let is_executable = metadata.permissions().mode() & 0o111 != 0;
+                        if is_executable {
+                            found_modules.entry(file_name).or_insert(path);
+                        }
                     }
                 }
             }
@@ -1617,6 +1879,9 @@ mod tests {
             restart_count,
             generation: 1,
             pending_shutdown: false,
+            starting: false,
+            start_coalesced: false,
+            restart_after_exit: false,
             args: None,
         };
         ManagerState {
@@ -1641,6 +1906,53 @@ mod tests {
         state.stopped_module("aw-watcher", 1234);
         assert_eq!(state.handle_system_click("aw-watcher"), Some(true));
         assert_eq!(state.modules["aw-watcher"].restart_count, 0);
+    }
+
+    #[test]
+    fn notify_click_toggles_the_state_the_checkmark_shows() {
+        let datastore = aw_datastore::Datastore::new_in_memory(false);
+
+        // Stopping: the process has been signalled but has not exited, so the checkmark
+        // reads "off". A click must turn aw-notify back on instead of persisting the
+        // watcher as disabled and re-sending SIGTERM.
+        let mut stopping = state_with_module("aw-notify", 0, None);
+        stopping
+            .modules
+            .get_mut("aw-notify")
+            .unwrap()
+            .pending_shutdown = true;
+        let state = Mutex::new(stopping);
+        handle_module_menu_click(&state, &datastore, "aw-notify");
+        assert!(
+            crate::read_notify_enabled(&datastore),
+            "a click on a stopping aw-notify must persist it as enabled"
+        );
+        {
+            let s = state.lock().unwrap();
+            assert!(s.modules["aw-notify"].requested_running());
+        }
+
+        // Starting: a spawn is in flight, so the checkmark reads "on". A click must turn
+        // it off instead of persisting it as enabled and coalescing into that spawn.
+        let mut starting = state_with_module("aw-notify", 0, None);
+        {
+            let module = starting.modules.get_mut("aw-notify").unwrap();
+            module.run_state = None;
+            module.pid = None;
+            module.starting = true;
+        }
+        let state = Mutex::new(starting);
+        handle_module_menu_click(&state, &datastore, "aw-notify");
+        assert!(
+            !crate::read_notify_enabled(&datastore),
+            "a click on a starting aw-notify must persist it as disabled"
+        );
+        {
+            let s = state.lock().unwrap();
+            assert!(s.modules["aw-notify"].pending_shutdown);
+        }
+
+        datastore.close();
     }
 
     #[test]
@@ -1671,6 +1983,555 @@ mod tests {
         );
     }
 
+    /// Waits up to five seconds for `child` to exit and returns how it exited.
+    #[cfg(unix)]
+    fn wait_with_timeout(child: &mut std::process::Child) -> Option<std::process::ExitStatus> {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline {
+            if let Some(status) = child.try_wait().expect("try_wait") {
+                return Some(status);
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+        None
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn stop_requested_while_starting_is_not_lost() {
+        use std::os::unix::process::ExitStatusExt;
+        let mut s = state_with_module("aw-watcher", 0, None);
+        {
+            let m = s.modules.get_mut("aw-watcher").unwrap();
+            m.run_state = Some(false);
+            m.pid = None;
+        }
+        s.start_module("aw-watcher", None); // spawn requested (/nonexistent fails in its thread)
+        s.stop_module("aw-watcher"); // user stops it before Started is handled: no pid to signal
+
+        // Stand-in for the process that in-flight spawn produced. Killed on drop, so a failing
+        // assertion below does not leak a `sleep` process.
+        struct KillOnDrop(std::process::Child);
+        impl Drop for KillOnDrop {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+        let mut child = KillOnDrop(
+            Command::new("sleep")
+                .arg("30")
+                .spawn()
+                .expect("spawn sleep"),
+        );
+        s.started_module("aw-watcher", child.0.id(), None); // the in-flight Started arrives
+        assert!(
+            s.modules["aw-watcher"].pending_shutdown,
+            "a stop requested before Started was handled must stick"
+        );
+        let status = wait_with_timeout(&mut child.0);
+        assert_eq!(
+            status.and_then(|st| st.signal()),
+            Some(Signal::SIGTERM as i32),
+            "Started must send SIGTERM to the reported pid"
+        );
+    }
+
+    #[test]
+    fn exit_after_a_stop_is_intentional_and_a_reenable_starts_one_new_run() {
+        // Notifications off: aw-notify is signalled and exits non-zero. The exit is classified
+        // under the lock that accepted it, so it counts as the stop it was; turning
+        // notifications back on afterwards starts exactly one new run of its own.
+        let mut s = state_with_module("aw-notify", 0, Some(Instant::now()));
+        s.modules.get_mut("aw-notify").unwrap().pid = Some(999_999_997);
+        s.stop_module("aw-notify");
+        assert!(s.stopped_module("aw-notify", 999_999_997));
+        assert_eq!(s.plan_after_crash("aw-notify"), CrashPlan::Intentional);
+        let stopped_generation = s.modules["aw-notify"].generation;
+        s.set_notify_enabled(true);
+        let m = &s.modules["aw-notify"];
+        assert!(
+            m.starting && !m.pending_shutdown,
+            "the re-enable must start it"
+        );
+        assert_eq!(m.generation, stopped_generation + 1);
+    }
+
+    #[test]
+    fn start_after_a_stop_while_starting_keeps_the_module_running() {
+        // start, stop, start, all before the first spawn's Started is handled: the latest
+        // request is to run, so Started must not stop the process that spawn produced.
+        let mut s = state_with_module("aw-watcher", 0, None);
+        {
+            let m = s.modules.get_mut("aw-watcher").unwrap();
+            m.run_state = Some(false);
+            m.pid = None;
+        }
+        s.start_module("aw-watcher", None);
+        s.stop_module("aw-watcher");
+        s.start_module("aw-watcher", None);
+        assert_eq!(
+            s.modules["aw-watcher"].generation, 2,
+            "still a single spawn"
+        );
+        assert!(
+            !s.modules["aw-watcher"].pending_shutdown,
+            "the later start must supersede the stop"
+        );
+        s.started_module("aw-watcher", 999_999_999, None);
+        assert!(!s.modules["aw-watcher"].pending_shutdown);
+        assert_eq!(s.modules["aw-watcher"].run_state, Some(true));
+    }
+
+    #[test]
+    fn start_after_a_stop_that_already_signalled_the_process_restarts_it() {
+        // start, stop, Started (SIGTERM sent), then start again before the signalled child
+        // exits. `run_state` still reads "running", so the start must not be dropped: the
+        // exit starts a fresh run instead of being treated as the stop's own exit.
+        let mut s = state_with_module("aw-watcher", 0, None);
+        {
+            let m = s.modules.get_mut("aw-watcher").unwrap();
+            m.run_state = Some(false);
+            m.pid = None;
+        }
+        s.start_module("aw-watcher", None);
+        s.stop_module("aw-watcher");
+        s.started_module("aw-watcher", 999_999_991, None);
+        assert!(s.modules["aw-watcher"].pending_shutdown);
+        let before = s.modules["aw-watcher"].generation;
+        s.start_module("aw-watcher", None);
+        assert!(
+            s.modules["aw-watcher"].restart_after_exit,
+            "the start must be remembered while the signalled process exits"
+        );
+        assert!(!s.modules["aw-watcher"].pending_shutdown);
+        assert_eq!(s.modules["aw-watcher"].generation, before, "no spawn yet");
+        assert!(s.stopped_module("aw-watcher", 999_999_991));
+        assert!(s.restart_after_stop_if_requested("aw-watcher"));
+        let m = &s.modules["aw-watcher"];
+        assert_eq!(m.generation, before + 1, "the exit must start a fresh run");
+        assert!(m.starting);
+        assert!(!m.restart_after_exit);
+    }
+
+    #[test]
+    fn a_second_click_while_the_watcher_is_stopping_queues_a_restart() {
+        // off then on through the tray before the signalled process exits: the second
+        // click must queue the restart and report "enabled", not send a second stop and
+        // persist the watcher as disabled.
+        let mut s = state_with_module("aw-watcher", 0, None);
+        {
+            let m = s.modules.get_mut("aw-watcher").unwrap();
+            m.run_state = Some(false);
+            m.pid = None;
+        }
+        s.start_module("aw-watcher", None);
+        s.started_module("aw-watcher", 999_999_991, None);
+        assert_eq!(s.handle_system_click("aw-watcher"), Some(false));
+        assert!(s.modules["aw-watcher"].pending_shutdown);
+        assert_eq!(
+            s.handle_system_click("aw-watcher"),
+            Some(true),
+            "the second click is a start request"
+        );
+        assert!(s.modules["aw-watcher"].restart_after_exit);
+        assert!(!s.modules["aw-watcher"].pending_shutdown);
+        assert!(s.stopped_module("aw-watcher", 999_999_991));
+        assert!(s.restart_after_stop_if_requested("aw-watcher"));
+        assert_eq!(s.modules["aw-watcher"].run_state, Some(false));
+        assert!(s.modules["aw-watcher"].starting);
+    }
+
+    #[test]
+    fn third_tray_click_stops_the_replacement_even_while_it_is_starting() {
+        for old_exited in [false, true] {
+            let mut s = state_with_module("aw-watcher", 0, None);
+            s.started_module("aw-watcher", 999_999_991, None);
+            assert_eq!(s.handle_system_click("aw-watcher"), Some(false));
+            assert_eq!(s.handle_system_click("aw-watcher"), Some(true));
+            if old_exited {
+                assert!(s.stopped_module("aw-watcher", 999_999_991));
+                assert!(s.restart_after_stop_if_requested("aw-watcher"));
+                assert!(s.modules["aw-watcher"].starting);
+            }
+            assert_eq!(s.handle_system_click("aw-watcher"), Some(false));
+            assert!(s.modules["aw-watcher"].pending_shutdown);
+            assert!(!s.modules["aw-watcher"].restart_after_exit);
+            if old_exited {
+                // The replacement reports Started after the off click. It must still stop.
+                s.started_module("aw-watcher", 999_999_992, None);
+                assert!(s.modules["aw-watcher"].pending_shutdown);
+                assert!(s.stopped_module("aw-watcher", 999_999_992));
+            } else {
+                assert!(s.stopped_module("aw-watcher", 999_999_991));
+            }
+            assert!(!s.restart_after_stop_if_requested("aw-watcher"));
+            assert_eq!(s.plan_after_crash("aw-watcher"), CrashPlan::Intentional);
+            assert!(!s.modules["aw-watcher"].starting);
+        }
+    }
+
+    #[test]
+    fn tray_checkmark_follows_the_request_while_a_restart_is_in_flight() {
+        // off → on while the stopped process is still exiting leaves run_state at Some(false)
+        // until the replacement reports Started. The checkmark must show the requested state:
+        // otherwise it reads "off" while a click on it (the same requested state) stops the
+        // replacement and saves the watcher as disabled for the next launch.
+        let mut s = state_with_module("aw-watcher", 0, None);
+        s.started_module("aw-watcher", 999_999_991, None);
+        assert_eq!(s.handle_system_click("aw-watcher"), Some(false));
+        assert_eq!(s.handle_system_click("aw-watcher"), Some(true));
+        assert!(s.stopped_module("aw-watcher", 999_999_991));
+        assert!(s.restart_after_stop_if_requested("aw-watcher"));
+        assert_eq!(s.modules["aw-watcher"].run_state, Some(false));
+        let view = s.modules_snapshot()["aw-watcher"];
+        assert!(
+            view.started,
+            "a queued restart keeps it in the started group"
+        );
+        assert!(view.requested, "the checkmark must show the queued restart");
+        // A click on the item as shown toggles it off, exactly as the checkmark said.
+        assert_eq!(s.handle_system_click("aw-watcher"), Some(false));
+        assert!(!s.modules_snapshot()["aw-watcher"].requested);
+    }
+
+    #[test]
+    fn failed_first_spawn_leaves_the_module_never_started() {
+        // A first spawn that fails before a child exists was never a run: the module must
+        // stay in the tray's never-started group instead of reporting "started, now stopped".
+        let mut s = state_with_module("aw-watcher", 0, None);
+        {
+            let m = s.modules.get_mut("aw-watcher").unwrap();
+            m.run_state = None;
+            m.pid = None;
+        }
+        s.start_module("aw-watcher", None);
+        s.spawn_failed("aw-watcher", s.modules["aw-watcher"].generation);
+        assert_eq!(s.modules["aw-watcher"].run_state, None);
+        let view = s.modules_snapshot()["aw-watcher"];
+        assert!(!view.started);
+        assert!(!view.requested);
+    }
+
+    #[test]
+    fn tray_clicks_toggle_an_initial_spawn_before_started_arrives() {
+        let mut s = state_with_module("aw-watcher", 0, None);
+        s.stopped_module("aw-watcher", 1234);
+        assert_eq!(s.handle_system_click("aw-watcher"), Some(true));
+        let generation = s.modules["aw-watcher"].generation;
+        assert_eq!(s.handle_system_click("aw-watcher"), Some(false));
+        assert!(s.modules["aw-watcher"].pending_shutdown);
+        assert_eq!(s.handle_system_click("aw-watcher"), Some(true));
+        assert!(!s.modules["aw-watcher"].pending_shutdown);
+        assert_eq!(s.modules["aw-watcher"].generation, generation);
+        s.started_module("aw-watcher", 999_999_991, None);
+        assert!(!s.modules["aw-watcher"].pending_shutdown);
+    }
+
+    #[test]
+    fn stop_after_a_restart_waits_for_the_exit_cancels_it() {
+        // The same sequence, but a stop lands after the start that was waiting for the
+        // exit: the later stop wins, so the exit is the stop's own and nothing restarts.
+        let mut s = state_with_module("aw-watcher", 0, None);
+        {
+            let m = s.modules.get_mut("aw-watcher").unwrap();
+            m.run_state = Some(false);
+            m.pid = None;
+        }
+        s.start_module("aw-watcher", None);
+        s.stop_module("aw-watcher");
+        s.started_module("aw-watcher", 999_999_991, None);
+        s.start_module("aw-watcher", None);
+        s.stop_module("aw-watcher");
+        assert!(!s.modules["aw-watcher"].restart_after_exit);
+        assert!(s.stopped_module("aw-watcher", 999_999_991));
+        assert!(!s.restart_after_stop_if_requested("aw-watcher"));
+        assert_eq!(s.plan_after_crash("aw-watcher"), CrashPlan::Intentional);
+        assert!(!s.modules["aw-watcher"].starting);
+    }
+
+    #[test]
+    fn restart_planned_before_a_manual_start_is_dropped() {
+        let mut s = state_with_module("aw-watcher", 0, Some(Instant::now()));
+        assert!(s.stopped_module("aw-watcher", 1234));
+        let CrashPlan::Restart {
+            restart_count,
+            generation,
+            ..
+        } = s.plan_after_crash("aw-watcher")
+        else {
+            panic!("an unrequested exit below the limit must plan a restart");
+        };
+        // The user starts it by hand during the backoff.
+        assert_eq!(s.handle_system_click("aw-watcher"), Some(true));
+        let after_manual = s.modules["aw-watcher"].generation;
+        assert!(
+            !s.restart_after_crash("aw-watcher", restart_count, generation),
+            "a retry for an older run must not act on the new one"
+        );
+        assert_eq!(s.modules["aw-watcher"].generation, after_manual);
+        assert_eq!(s.modules["aw-watcher"].restart_count, 0);
+    }
+
+    #[test]
+    fn restart_after_crash_restarts_the_same_run() {
+        let mut s = state_with_module("aw-watcher", 1, Some(Instant::now()));
+        assert!(s.stopped_module("aw-watcher", 1234));
+        let CrashPlan::Restart {
+            delay_secs,
+            restart_count,
+            generation,
+        } = s.plan_after_crash("aw-watcher")
+        else {
+            panic!("expected a restart plan");
+        };
+        assert_eq!(delay_secs, 4);
+        assert!(s.restart_after_crash("aw-watcher", restart_count, generation));
+        assert_eq!(s.modules["aw-watcher"].restart_count, 2);
+        assert_eq!(s.modules["aw-watcher"].generation, generation + 1);
+    }
+
+    #[test]
+    fn crash_alert_is_skipped_once_stopped_or_restarted() {
+        let crash = |restart_count| {
+            let mut s = state_with_module("aw-watcher", restart_count, Some(Instant::now()));
+            assert!(s.stopped_module("aw-watcher", 1234));
+            let generation = match s.plan_after_crash("aw-watcher") {
+                CrashPlan::Restart { generation, .. } | CrashPlan::LimitReached { generation } => {
+                    generation
+                }
+                CrashPlan::Intentional => panic!("expected a crash plan"),
+            };
+            (s, generation)
+        };
+
+        // "Restarting in Ns": shown only while the crashed run is still current and not stopped.
+        let (s, generation) = crash(0);
+        assert!(s.crash_alert_current("aw-watcher", generation, false));
+        let (mut s, generation) = crash(0);
+        s.stop_module("aw-watcher");
+        assert!(!s.crash_alert_current("aw-watcher", generation, false));
+        let (mut s, generation) = crash(0);
+        s.start_module("aw-watcher", None);
+        assert!(!s.crash_alert_current("aw-watcher", generation, false));
+
+        // "Left stopped": pending_shutdown is set by the plan itself; only a later start voids it.
+        let (s, generation) = crash(3);
+        assert!(s.crash_alert_current("aw-watcher", generation, true));
+        let (mut s, generation) = crash(3);
+        assert_eq!(s.handle_system_click("aw-watcher"), Some(true));
+        assert!(!s.crash_alert_current("aw-watcher", generation, true));
+    }
+
+    #[test]
+    fn restart_limit_leaves_a_later_start_alone() {
+        // At the limit the module is marked stopped when the exit is handled, so a start the
+        // user makes afterwards is never stopped by the old crash's alert path.
+        let mut s = state_with_module("aw-watcher", 3, Some(Instant::now()));
+        assert!(s.stopped_module("aw-watcher", 1234));
+        assert!(matches!(
+            s.plan_after_crash("aw-watcher"),
+            CrashPlan::LimitReached { .. }
+        ));
+        assert!(s.modules["aw-watcher"].pending_shutdown);
+        assert_eq!(s.handle_system_click("aw-watcher"), Some(true));
+        assert!(!s.modules["aw-watcher"].pending_shutdown);
+    }
+
+    #[test]
+    fn start_requested_while_starting_spawns_once() {
+        // A second start (tray double-click, autostart racing a manual start) that lands
+        // before the first spawn's Started is handled must not spawn a duplicate process.
+        let mut s = state_with_module("aw-watcher", 0, None);
+        {
+            let m = s.modules.get_mut("aw-watcher").unwrap();
+            m.run_state = Some(false);
+            m.pid = None;
+        }
+        s.start_module("aw-watcher", None);
+        s.start_module("aw-watcher", None);
+        assert_eq!(
+            s.modules["aw-watcher"].generation, 2,
+            "the second start must not request another spawn"
+        );
+        s.started_module("aw-watcher", 999_999_999, None);
+        assert!(!s.modules["aw-watcher"].starting);
+    }
+
+    #[test]
+    fn failed_notify_fallback_clears_the_reaped_process_and_allows_a_retry() {
+        let mut s = state_with_module("aw-notify", 0, None);
+        // The --output-only child was reported Started, then reaped with exit 2.
+        // Its generic fallback fails to spawn, so there will be no Stopped message.
+        s.started_module("aw-notify", 999_999_991, None);
+        let generation = s.modules["aw-notify"].generation;
+        s.spawn_failed("aw-notify", generation);
+        let m = &s.modules["aw-notify"];
+        assert_eq!(m.run_state, Some(false));
+        assert_eq!(m.pid, None, "never signal the reaped child's recycled pid");
+        assert!(m.started_at.is_none());
+        assert!(!m.starting);
+        assert_eq!(s.handle_system_click("aw-notify"), Some(true));
+        assert_eq!(s.modules["aw-notify"].generation, generation + 1);
+        assert!(s.modules["aw-notify"].starting);
+    }
+
+    #[test]
+    fn failed_spawn_does_not_block_a_later_start() {
+        let mut s = state_with_module("aw-watcher", 0, None);
+        {
+            let m = s.modules.get_mut("aw-watcher").unwrap();
+            m.run_state = Some(false);
+            m.pid = None;
+        }
+        s.start_module("aw-watcher", None);
+        s.spawn_failed("aw-watcher", s.modules["aw-watcher"].generation);
+        s.start_module("aw-watcher", None);
+        assert_eq!(
+            s.modules["aw-watcher"].generation, 3,
+            "a start after a failed spawn must spawn again"
+        );
+    }
+
+    #[test]
+    fn start_coalesced_into_a_spawn_that_fails_is_retried_once() {
+        // The spawn fails (e.g. the executable was briefly missing) and a second start lands
+        // before its SpawnFailed is handled. The second start was coalesced into the failed
+        // attempt, so the failure must launch one replacement rather than drop the request.
+        let mut s = state_with_module("aw-watcher", 0, None);
+        {
+            let m = s.modules.get_mut("aw-watcher").unwrap();
+            m.run_state = Some(false);
+            m.pid = None;
+        }
+        s.start_module("aw-watcher", None);
+        s.start_module("aw-watcher", None);
+        s.spawn_failed("aw-watcher", s.modules["aw-watcher"].generation);
+        assert_eq!(
+            s.modules["aw-watcher"].generation, 3,
+            "the coalesced start must be retried after the failure"
+        );
+        assert!(s.modules["aw-watcher"].starting);
+        // The retry fails too: no coalesced start this time, so nothing more is launched.
+        s.spawn_failed("aw-watcher", s.modules["aw-watcher"].generation);
+        assert_eq!(s.modules["aw-watcher"].generation, 3);
+        assert!(!s.modules["aw-watcher"].starting);
+    }
+
+    #[test]
+    fn stop_after_a_coalesced_start_cancels_the_retry() {
+        let mut s = state_with_module("aw-watcher", 0, None);
+        {
+            let m = s.modules.get_mut("aw-watcher").unwrap();
+            m.run_state = Some(false);
+            m.pid = None;
+        }
+        s.start_module("aw-watcher", None);
+        s.start_module("aw-watcher", None);
+        s.stop_module("aw-watcher");
+        s.spawn_failed("aw-watcher", s.modules["aw-watcher"].generation);
+        assert_eq!(
+            s.modules["aw-watcher"].generation, 2,
+            "a stop after the coalesced start must win"
+        );
+        assert!(!s.modules["aw-watcher"].starting);
+    }
+
+    #[test]
+    fn spawn_failure_of_a_replaced_run_is_ignored() {
+        // An older run's spawn (aw-notify's fallback after off/on) fails while the
+        // replacement, with a coalesced start, is still launching: no second copy.
+        let mut s = state_with_module("aw-watcher", 0, None);
+        {
+            let m = s.modules.get_mut("aw-watcher").unwrap();
+            m.run_state = Some(false);
+            m.pid = None;
+        }
+        s.start_module("aw-watcher", None);
+        s.start_module("aw-watcher", None);
+        s.spawn_failed("aw-watcher", 1);
+        let m = &s.modules["aw-watcher"];
+        assert_eq!(
+            m.generation, 2,
+            "a stale failure must not launch a replacement"
+        );
+        assert!(m.starting, "the current start is still in flight");
+        assert!(m.start_coalesced);
+    }
+
+    #[test]
+    fn quit_cancels_the_retry_of_a_starting_module() {
+        let mut s = state_with_module("aw-watcher", 0, None);
+        {
+            let m = s.modules.get_mut("aw-watcher").unwrap();
+            m.run_state = Some(false);
+            m.pid = None;
+        }
+        s.start_module("aw-watcher", None);
+        s.start_module("aw-watcher", None);
+        s.stop_modules();
+        assert!(s.modules["aw-watcher"].pending_shutdown);
+        s.spawn_failed("aw-watcher", s.modules["aw-watcher"].generation);
+        assert_eq!(
+            s.modules["aw-watcher"].generation, 2,
+            "Quit must not be followed by a new spawn"
+        );
+    }
+
+    #[test]
+    fn late_exit_of_a_replaced_notify_process_is_stale() {
+        // Notifications off then on before the old aw-notify (pid 999_999_998) exited:
+        // its late Stopped must not be taken for the replacement crashing (which would
+        // raise "Stopped unexpectedly" and burn a restart attempt).
+        let mut s = state_with_module("aw-notify", 0, Some(Instant::now()));
+        s.modules.get_mut("aw-notify").unwrap().pid = Some(999_999_998);
+        s.set_notify_enabled(false);
+        s.set_notify_enabled(true);
+        assert!(
+            !s.stopped_module("aw-notify", 999_999_998),
+            "exit must be stale"
+        );
+        assert_eq!(
+            s.modules["aw-notify"].run_state,
+            Some(false),
+            "state unchanged by the stale exit"
+        );
+        assert!(
+            s.modules["aw-notify"].started_at.is_some(),
+            "a stale exit must not touch the replacement's bookkeeping"
+        );
+    }
+
+    #[test]
+    fn manual_start_after_restart_limit_clears_pending_shutdown() {
+        let mut s = state_with_module("aw-watcher", 3, None);
+        {
+            let m = s.modules.get_mut("aw-watcher").unwrap();
+            m.run_state = Some(false);
+            m.pid = None;
+            m.pending_shutdown = true; // left stopped after the restart limit
+        }
+        assert_eq!(s.handle_system_click("aw-watcher"), Some(true));
+        s.started_module("aw-watcher", 999_999_999, None);
+        assert!(!s.modules["aw-watcher"].pending_shutdown);
+        assert_eq!(s.modules["aw-watcher"].run_state, Some(true));
+    }
+
+    #[test]
+    fn autostart_names_start_a_repeated_module_once() {
+        // A module listed twice (e.g. once bare and once with args) must not be spawned
+        // twice: run_state is only set once the Started message is handled, so the
+        // start loop's is_module_running guard cannot catch the second entry.
+        assert_eq!(
+            autostart_names(
+                &["aw-watcher-afk", "aw-sync", "aw-watcher-afk"],
+                false,
+                false
+            ),
+            ["aw-watcher-afk", "aw-sync"]
+        );
+    }
+
     #[test]
     fn tray_click_on_unknown_module_is_ignored() {
         let mut state = state_with_module("aw-watcher", 0, None);
@@ -1689,7 +2550,7 @@ mod tests {
     fn run_generic_module(script: &str) -> std::process::Output {
         let (tx, rx) = channel();
         let args = vec!["-c".to_string(), script.to_string()];
-        start_generic_module_thread("sh".into(), "/bin/sh".into(), Some(args), 5600, tx);
+        start_generic_module_thread("sh".into(), "/bin/sh".into(), Some(args), 5600, tx, 1);
         loop {
             match rx.recv_timeout(Duration::from_secs(10)) {
                 Ok(ModuleMessage::Stopped { output, .. }) => return output,
@@ -1713,6 +2574,7 @@ mod tests {
                 Some(args),
                 5600,
                 tx.clone(),
+                1,
             );
         };
         const QUICK: usize = 40;
@@ -1820,6 +2682,43 @@ mod tests {
         );
 
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn find_modules_attributes_a_shared_dir_to_the_earlier_root() {
+        // Same case #284 fixed for Windows: the bundled watcher dir is also reachable as its
+        // own lower-priority root (e.g. via $PATH), with a classic install in between.
+        let dir = env::temp_dir().join(format!("aw-tauri-discover-prio-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let bundled = dir.join("bundled");
+        let classic = dir.join("classic");
+        fs::create_dir_all(bundled.join("aw-watcher-window")).unwrap();
+        fs::create_dir_all(classic.join("aw-watcher-window")).unwrap();
+        for path in [
+            bundled.join("aw-watcher-window").join("aw-watcher-window"),
+            classic.join("aw-watcher-window").join("aw-watcher-window"),
+        ] {
+            fs::write(&path, "").unwrap();
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let roots = vec![
+            bundled.clone(),
+            classic.clone(),
+            bundled.join("aw-watcher-window"),
+        ];
+        let found = find_modules_in(roots, &[]);
+        let reversed = find_modules_in(vec![classic.clone(), bundled.clone()], &[]);
+        fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(
+            found["aw-watcher-window"],
+            bundled.join("aw-watcher-window").join("aw-watcher-window")
+        );
+        assert_eq!(
+            reversed["aw-watcher-window"],
+            classic.join("aw-watcher-window").join("aw-watcher-window")
+        );
     }
 
     #[cfg(unix)]

@@ -211,9 +211,9 @@ impl MiniTray {
         let running_keys = running_keys(modules);
         if running_keys == self.running_keys {
             // Same running group, so the menu order is unchanged: only sync checkmarks.
-            for (name, run_state) in modules {
-                if let (Some(item), Some(running)) = (self.module_items.get(name), run_state) {
-                    item.set_checked(*running);
+            for (name, view) in modules {
+                if let Some(item) = self.module_items.get(name) {
+                    item.set_checked(view.requested);
                 }
             }
             return;
@@ -233,7 +233,7 @@ impl MiniTray {
 fn running_keys(modules: &manager::ModulesSnapshot) -> BTreeSet<String> {
     modules
         .iter()
-        .filter(|(_, run_state)| run_state.is_some())
+        .filter(|(_, view)| view.started)
         .map(|(name, _)| name.clone())
         .collect()
 }
@@ -269,17 +269,17 @@ fn build_tray_menu(
     let mut module_items = HashMap::new();
     let modules_submenu = Submenu::with_id("modules", "Modules", true);
     // Started modules first, alphabetically, each with a checkbox.
-    for (module, run_state) in modules {
-        if let Some(running) = run_state {
+    for (module, view) in modules {
+        if view.started {
             let module_menu =
-                CheckMenuItem::with_id(module_menu_id(module), module, true, *running, None);
+                CheckMenuItem::with_id(module_menu_id(module), module, true, view.requested, None);
             modules_submenu.append(&module_menu)?;
             module_items.insert(module.clone(), module_menu);
         }
     }
     // Then discovered modules that have never been started, alphabetically.
-    for (module, run_state) in modules {
-        if run_state.is_none() {
+    for (module, view) in modules {
+        if !view.started {
             let module_menu = MenuItem::with_id(module_menu_id(module), module, true, None);
             modules_submenu.append(&module_menu)?;
         }
