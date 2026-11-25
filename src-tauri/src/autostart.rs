@@ -774,6 +774,7 @@ minimized = false
 modules = ["aw-watcher-afk", { name = "aw-test", args = "--label='one\ntwo'" }]
 
 [updates]
+check = false
 auto_download = false
 
 [module_args]

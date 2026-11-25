@@ -436,6 +436,23 @@ mod tests {
         toml::from_str::<UserConfig>(source).unwrap()
     }
 
+    /// `[updates] check` defaults on for existing configs, is written on first
+    /// run, and `check = false` disables the update check.
+    #[test]
+    fn updates_check_defaults_on_and_can_be_disabled() {
+        let written = first_run_config();
+        assert!(written.contains("[updates]\ncheck = true\n"), "{written}");
+        assert!(parse(&written).updates.check);
+
+        let legacy = written.replace("check = true\n", "");
+        assert!(parse(&legacy).updates.check, "{legacy}");
+
+        let off = written.replace("check = true", "check = false");
+        let config = parse(&off);
+        assert!(!config.updates.check);
+        assert!(config.updates.auto_download);
+    }
+
     fn modules_of(source: &str) -> Vec<String> {
         parse(source)
             .autostart
