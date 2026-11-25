@@ -448,6 +448,20 @@ impl ManagerState {
             return None;
         }
         if self.is_module_running(name) {
+            if self
+                .modules
+                .get(name)
+                .is_some_and(|module| module.pending_shutdown)
+            {
+                // A stop already signalled the process but it has not exited yet. This
+                // click is a start request: queue the restart instead of issuing a
+                // second stop and persisting "disabled" for a watcher the user wants on.
+                if let Some(module) = self.modules.get_mut(name) {
+                    module.restart_count = 0;
+                }
+                self.start_module(name, None);
+                return Some(true);
+            }
             self.stop_module(name);
             Some(false)
         } else {
@@ -1991,6 +2005,34 @@ mod tests {
         assert_eq!(m.generation, before + 1, "the exit must start a fresh run");
         assert!(m.starting);
         assert!(!m.restart_after_exit);
+    }
+
+    #[test]
+    fn a_second_click_while_the_watcher_is_stopping_queues_a_restart() {
+        // off then on through the tray before the signalled process exits: the second
+        // click must queue the restart and report "enabled", not send a second stop and
+        // persist the watcher as disabled.
+        let mut s = state_with_module("aw-watcher", 0, None);
+        {
+            let m = s.modules.get_mut("aw-watcher").unwrap();
+            m.run_state = Some(false);
+            m.pid = None;
+        }
+        s.start_module("aw-watcher", None);
+        s.started_module("aw-watcher", 999_999_991, None);
+        assert_eq!(s.handle_system_click("aw-watcher"), Some(false));
+        assert!(s.modules["aw-watcher"].pending_shutdown);
+        assert_eq!(
+            s.handle_system_click("aw-watcher"),
+            Some(true),
+            "the second click is a start request"
+        );
+        assert!(s.modules["aw-watcher"].restart_after_exit);
+        assert!(!s.modules["aw-watcher"].pending_shutdown);
+        assert!(s.stopped_module("aw-watcher", 999_999_991));
+        assert!(s.restart_after_stop_if_requested("aw-watcher"));
+        assert_eq!(s.modules["aw-watcher"].run_state, Some(false));
+        assert!(s.modules["aw-watcher"].starting);
     }
 
     #[test]
