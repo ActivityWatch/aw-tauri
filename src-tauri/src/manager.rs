@@ -62,9 +62,11 @@ enum ModuleMessage {
         pid: u32,
         output: std::process::Output,
     },
-    /// The spawn requested by `start_module` failed before a process existed.
+    /// The spawn requested by `start_module` failed before a process existed. `generation` is
+    /// the start it answers, so a late failure from a replaced run is ignored.
     SpawnFailed {
         name: String,
+        generation: u64,
     },
     Init {},
     Notification {
@@ -319,8 +321,14 @@ impl ManagerState {
     /// Records that the spawn requested for `name` failed, so a later start can retry it.
     /// A start coalesced into the failed attempt is retried once now (unless a stop came
     /// after it): the failure may already have happened when that start arrived.
-    fn spawn_failed(&mut self, name: &str) {
+    fn spawn_failed(&mut self, name: &str, generation: u64) {
         let retry = match self.modules.get_mut(name) {
+            Some(module) if module.generation != generation => {
+                // A replaced run's spawn (e.g. aw-notify's fallback after a re-enable) failed
+                // late: the current start is still in flight, so leave its state alone.
+                debug!("Ignoring stale spawn failure of {name} (generation {generation})");
+                false
+            }
             Some(module) => {
                 module.starting = false;
                 let retry = module.start_coalesced && !module.pending_shutdown;
@@ -360,6 +368,7 @@ impl ManagerState {
                     effective_args,
                     self.server_port,
                     self.tx.clone(),
+                    module.generation,
                 );
             } else {
                 error!("Module {name} not found in PATH");
@@ -384,7 +393,9 @@ impl ManagerState {
         let running: Vec<String> = self
             .modules
             .iter()
-            .filter(|(_, module)| module.pid.is_some())
+            // A starting module has no pid yet; record the stop so its Started is stopped
+            // and a failed spawn is not retried while the app quits.
+            .filter(|(_, module)| module.pid.is_some() || module.starting)
             .map(|(name, _)| name.clone())
             .collect();
         for name in running {
@@ -1051,7 +1062,9 @@ fn handle(
                         );
                     }
                 }
-                ModuleMessage::SpawnFailed { name } => state_guard.spawn_failed(&name),
+                ModuleMessage::SpawnFailed { name, generation } => {
+                    state_guard.spawn_failed(&name, generation)
+                }
                 ModuleMessage::Init {} => {}
                 // Already handled above via early-continue
                 ModuleMessage::Notification { .. } => unreachable!(),
@@ -1077,15 +1090,16 @@ fn start_module_thread(
     custom_args: Option<Vec<String>>,
     server_port: u16,
     tx: Sender<ModuleMessage>,
+    generation: u64,
 ) {
     // Special handling for aw-notify module
     if name == "aw-notify" {
         info!("Using special aw-notify handler for module: {name}");
-        start_notify_module_thread(name, path, custom_args, server_port, tx);
+        start_notify_module_thread(name, path, custom_args, server_port, tx, generation);
         return;
     }
 
-    start_generic_module_thread(name, path, custom_args, server_port, tx);
+    start_generic_module_thread(name, path, custom_args, server_port, tx, generation);
 }
 
 fn start_generic_module_thread(
@@ -1094,6 +1108,7 @@ fn start_generic_module_thread(
     custom_args: Option<Vec<String>>,
     server_port: u16,
     tx: Sender<ModuleMessage>,
+    generation: u64,
 ) {
     thread::spawn(move || {
         // Create job object on Windows to ensure child dies with parent
@@ -1136,7 +1151,10 @@ fn start_generic_module_thread(
             Ok(c) => c,
             Err(e) => {
                 error!("Failed to start module {name}: {e}");
-                let _ = tx.send(ModuleMessage::SpawnFailed { name: name.clone() });
+                let _ = tx.send(ModuleMessage::SpawnFailed {
+                    name: name.clone(),
+                    generation,
+                });
                 #[cfg(windows)]
                 if let Some(handle) = job_handle {
                     unsafe {
@@ -1212,6 +1230,7 @@ fn start_notify_module_thread(
     custom_args: Option<Vec<String>>,
     server_port: u16,
     tx: Sender<ModuleMessage>,
+    generation: u64,
 ) {
     thread::spawn(move || {
         // Create job object on Windows to ensure child dies with parent
@@ -1262,7 +1281,10 @@ fn start_notify_module_thread(
                 // An unsupported --output-only is detected after exit (below), not here: spawn
                 // errors are OS errors and never contain the child's usage message.
                 error!("Failed to start module {name}: {e}");
-                let _ = tx.send(ModuleMessage::SpawnFailed { name: name.clone() });
+                let _ = tx.send(ModuleMessage::SpawnFailed {
+                    name: name.clone(),
+                    generation,
+                });
                 #[cfg(windows)]
                 if let Some(handle) = job_handle {
                     unsafe {
@@ -1369,7 +1391,7 @@ fn start_notify_module_thread(
                     }
                 }
                 // Fallback to generic module handler
-                start_generic_module_thread(name, path, custom_args, server_port, tx);
+                start_generic_module_thread(name, path, custom_args, server_port, tx, generation);
                 return;
             }
         }
@@ -2015,7 +2037,7 @@ mod tests {
             m.pid = None;
         }
         s.start_module("aw-watcher", None);
-        s.spawn_failed("aw-watcher");
+        s.spawn_failed("aw-watcher", s.modules["aw-watcher"].generation);
         s.start_module("aw-watcher", None);
         assert_eq!(
             s.modules["aw-watcher"].generation, 3,
@@ -2036,14 +2058,14 @@ mod tests {
         }
         s.start_module("aw-watcher", None);
         s.start_module("aw-watcher", None);
-        s.spawn_failed("aw-watcher");
+        s.spawn_failed("aw-watcher", s.modules["aw-watcher"].generation);
         assert_eq!(
             s.modules["aw-watcher"].generation, 3,
             "the coalesced start must be retried after the failure"
         );
         assert!(s.modules["aw-watcher"].starting);
         // The retry fails too: no coalesced start this time, so nothing more is launched.
-        s.spawn_failed("aw-watcher");
+        s.spawn_failed("aw-watcher", s.modules["aw-watcher"].generation);
         assert_eq!(s.modules["aw-watcher"].generation, 3);
         assert!(!s.modules["aw-watcher"].starting);
     }
@@ -2059,12 +2081,53 @@ mod tests {
         s.start_module("aw-watcher", None);
         s.start_module("aw-watcher", None);
         s.stop_module("aw-watcher");
-        s.spawn_failed("aw-watcher");
+        s.spawn_failed("aw-watcher", s.modules["aw-watcher"].generation);
         assert_eq!(
             s.modules["aw-watcher"].generation, 2,
             "a stop after the coalesced start must win"
         );
         assert!(!s.modules["aw-watcher"].starting);
+    }
+
+    #[test]
+    fn spawn_failure_of_a_replaced_run_is_ignored() {
+        // An older run's spawn (aw-notify's fallback after off/on) fails while the
+        // replacement, with a coalesced start, is still launching: no second copy.
+        let mut s = state_with_module("aw-watcher", 0, None);
+        {
+            let m = s.modules.get_mut("aw-watcher").unwrap();
+            m.run_state = Some(false);
+            m.pid = None;
+        }
+        s.start_module("aw-watcher", None);
+        s.start_module("aw-watcher", None);
+        s.spawn_failed("aw-watcher", 1);
+        let m = &s.modules["aw-watcher"];
+        assert_eq!(
+            m.generation, 2,
+            "a stale failure must not launch a replacement"
+        );
+        assert!(m.starting, "the current start is still in flight");
+        assert!(m.start_coalesced);
+    }
+
+    #[test]
+    fn quit_cancels_the_retry_of_a_starting_module() {
+        let mut s = state_with_module("aw-watcher", 0, None);
+        {
+            let m = s.modules.get_mut("aw-watcher").unwrap();
+            m.run_state = Some(false);
+            m.pid = None;
+        }
+        s.start_module("aw-watcher", None);
+        s.start_module("aw-watcher", None);
+        s.stop_modules();
+        assert!(s.modules["aw-watcher"].pending_shutdown);
+        s.spawn_failed("aw-watcher", s.modules["aw-watcher"].generation);
+        assert_eq!(
+            s.modules["aw-watcher"].generation, 2,
+            "Quit must not be followed by a new spawn"
+        );
     }
 
     #[test]
@@ -2139,7 +2202,7 @@ mod tests {
     fn run_generic_module(script: &str) -> std::process::Output {
         let (tx, rx) = channel();
         let args = vec!["-c".to_string(), script.to_string()];
-        start_generic_module_thread("sh".into(), "/bin/sh".into(), Some(args), 5600, tx);
+        start_generic_module_thread("sh".into(), "/bin/sh".into(), Some(args), 5600, tx, 1);
         loop {
             match rx.recv_timeout(Duration::from_secs(10)) {
                 Ok(ModuleMessage::Stopped { output, .. }) => return output,
@@ -2163,6 +2226,7 @@ mod tests {
                 Some(args),
                 5600,
                 tx.clone(),
+                1,
             );
         };
         const QUICK: usize = 40;
