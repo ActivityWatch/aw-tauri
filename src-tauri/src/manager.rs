@@ -322,6 +322,9 @@ impl ManagerState {
         if !self.is_module_running(name) {
             if let Some(module) = self.modules.get_mut(name) {
                 if module.starting {
+                    // The in-flight spawn serves this start. It still supersedes a stop made
+                    // since that spawn began, or started_module would stop the new process.
+                    module.pending_shutdown = false;
                     debug!("Not starting {name}: a spawn is already in flight");
                     return;
                 }
@@ -1831,16 +1834,49 @@ mod tests {
     }
 
     #[test]
-    fn exit_after_a_stop_is_intentional_even_if_restarted_before_the_worker_runs() {
-        // Notifications off: aw-notify is signalled and exits non-zero. If the user turns them
-        // back on before the crash worker runs, the exit must still count as the stop it was.
+    fn exit_after_a_stop_is_intentional_and_a_reenable_starts_one_new_run() {
+        // Notifications off: aw-notify is signalled and exits non-zero. The exit is classified
+        // under the lock that accepted it, so it counts as the stop it was; turning
+        // notifications back on afterwards starts exactly one new run of its own.
         let mut s = state_with_module("aw-notify", 0, Some(Instant::now()));
         s.modules.get_mut("aw-notify").unwrap().pid = Some(999_999_997);
         s.stop_module("aw-notify");
         assert!(s.stopped_module("aw-notify", 999_999_997));
         assert_eq!(s.plan_after_crash("aw-notify"), CrashPlan::Intentional);
+        let stopped_generation = s.modules["aw-notify"].generation;
         s.set_notify_enabled(true);
-        assert_eq!(s.modules["aw-notify"].restart_count, 0);
+        let m = &s.modules["aw-notify"];
+        assert!(
+            m.starting && !m.pending_shutdown,
+            "the re-enable must start it"
+        );
+        assert_eq!(m.generation, stopped_generation + 1);
+    }
+
+    #[test]
+    fn start_after_a_stop_while_starting_keeps_the_module_running() {
+        // start, stop, start, all before the first spawn's Started is handled: the latest
+        // request is to run, so Started must not stop the process that spawn produced.
+        let mut s = state_with_module("aw-watcher", 0, None);
+        {
+            let m = s.modules.get_mut("aw-watcher").unwrap();
+            m.run_state = Some(false);
+            m.pid = None;
+        }
+        s.start_module("aw-watcher", None);
+        s.stop_module("aw-watcher");
+        s.start_module("aw-watcher", None);
+        assert_eq!(
+            s.modules["aw-watcher"].generation, 2,
+            "still a single spawn"
+        );
+        assert!(
+            !s.modules["aw-watcher"].pending_shutdown,
+            "the later start must supersede the stop"
+        );
+        s.started_module("aw-watcher", 999_999_999, None);
+        assert!(!s.modules["aw-watcher"].pending_shutdown);
+        assert_eq!(s.modules["aw-watcher"].run_state, Some(true));
     }
 
     #[test]
