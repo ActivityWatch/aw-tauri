@@ -525,6 +525,16 @@ impl ManagerState {
             .is_some_and(|module| module.run_state == Some(true))
     }
 
+    /// Whether the module is meant to be running right now — the same value the tray
+    /// checkmark renders (`ModuleView::requested`). Tray toggles must start from this, not
+    /// from `is_module_running`, or a click disagrees with the checkmark while a start or a
+    /// stop is still in flight and persists the opposite of what the user saw.
+    fn requested_running(&self, name: &str) -> bool {
+        self.modules
+            .get(name)
+            .is_some_and(|module| module.requested_running())
+    }
+
     pub(crate) fn is_notify_enabled(&self) -> bool {
         self.notify_enabled
     }
@@ -982,7 +992,10 @@ pub(crate) fn handle_module_menu_click(
             warn!("Ignoring tray click for unknown module {name}");
             return;
         }
-        let enable = !s.is_module_running(name);
+        // Toggle the requested state the checkmark shows, not the last reported process
+        // state: aw-notify stopping still reads running, and aw-notify starting reads
+        // stopped, so `is_module_running` would flip the opposite of the visible toggle.
+        let enable = !s.requested_running(name);
         if crate::write_notify_enabled(datastore, enable) {
             s.set_notify_enabled(enable);
             s.refresh_ui();
@@ -1893,6 +1906,53 @@ mod tests {
         state.stopped_module("aw-watcher", 1234);
         assert_eq!(state.handle_system_click("aw-watcher"), Some(true));
         assert_eq!(state.modules["aw-watcher"].restart_count, 0);
+    }
+
+    #[test]
+    fn notify_click_toggles_the_state_the_checkmark_shows() {
+        let datastore = aw_datastore::Datastore::new_in_memory(false);
+
+        // Stopping: the process has been signalled but has not exited, so the checkmark
+        // reads "off". A click must turn aw-notify back on instead of persisting the
+        // watcher as disabled and re-sending SIGTERM.
+        let mut stopping = state_with_module("aw-notify", 0, None);
+        stopping
+            .modules
+            .get_mut("aw-notify")
+            .unwrap()
+            .pending_shutdown = true;
+        let state = Mutex::new(stopping);
+        handle_module_menu_click(&state, &datastore, "aw-notify");
+        assert!(
+            crate::read_notify_enabled(&datastore),
+            "a click on a stopping aw-notify must persist it as enabled"
+        );
+        {
+            let s = state.lock().unwrap();
+            assert!(s.modules["aw-notify"].requested_running());
+        }
+
+        // Starting: a spawn is in flight, so the checkmark reads "on". A click must turn
+        // it off instead of persisting it as enabled and coalescing into that spawn.
+        let mut starting = state_with_module("aw-notify", 0, None);
+        {
+            let module = starting.modules.get_mut("aw-notify").unwrap();
+            module.run_state = None;
+            module.pid = None;
+            module.starting = true;
+        }
+        let state = Mutex::new(starting);
+        handle_module_menu_click(&state, &datastore, "aw-notify");
+        assert!(
+            !crate::read_notify_enabled(&datastore),
+            "a click on a starting aw-notify must persist it as disabled"
+        );
+        {
+            let s = state.lock().unwrap();
+            assert!(s.modules["aw-notify"].pending_shutdown);
+        }
+
+        datastore.close();
     }
 
     #[test]
