@@ -1691,7 +1691,8 @@ pub fn run() {
 mod tests {
     use super::{
         already_running_message, build_dashboard_url, default_linux_modules, load_existing_config,
-        open_external_with, parse_config_bytes, rejected_launch_message, update_prompt_body, UserConfig,
+        open_external_with, parse_config_bytes, rejected_launch_message, update_prompt_body,
+        UserConfig,
     };
 
     #[test]
