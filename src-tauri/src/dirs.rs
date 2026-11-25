@@ -358,6 +358,33 @@ fn legacy_windows_user_discovery_paths(username: &str) -> Vec<PathBuf> {
     ]
 }
 
+/// Use Windows' ordinal Unicode comparison, not ASCII folding or lossy decoding.
+#[cfg(target_os = "windows")]
+fn windows_account_names_equal(a: &std::ffi::OsStr, b: &std::ffi::OsStr) -> bool {
+    use std::os::windows::ffi::OsStrExt;
+
+    let a: Vec<u16> = a.encode_wide().collect();
+    let b: Vec<u16> = b.encode_wide().collect();
+    let (Ok(a_len), Ok(b_len)) = (i32::try_from(a.len()), i32::try_from(b.len())) else {
+        return false;
+    };
+    // SAFETY: both buffers are valid for the explicit UTF-16 lengths passed.
+    // CompareStringOrdinal returns CSTR_EQUAL (2), or 0 on failure.
+    unsafe {
+        winapi::um::stringapiset::CompareStringOrdinal(a.as_ptr(), a_len, b.as_ptr(), b_len, 1) == 2
+    }
+}
+
+// Portable helper tests cover ordinary Unicode case changes; Windows CI also
+// exercises the native comparison used in production.
+#[cfg(all(test, not(target_os = "windows")))]
+fn windows_account_names_equal(a: &std::ffi::OsStr, b: &std::ffi::OsStr) -> bool {
+    match (a.to_str(), b.to_str()) {
+        (Some(a), Some(b)) => a.to_uppercase() == b.to_uppercase(),
+        _ => a == b,
+    }
+}
+
 /// Replace persisted legacy entries with their profile-rooted equivalents, or
 /// drop them when the profile folder is unknown. Entries the user added are kept.
 #[cfg(any(target_os = "windows", test))]
@@ -370,15 +397,25 @@ fn migrate_windows_discovery_paths(
         return;
     };
     let legacy = legacy_windows_user_discovery_paths(username);
+    let account_index = Path::new("C:/Users").components().count();
     let mut migrated = Vec::with_capacity(paths.len());
     for path in paths.drain(..) {
         // USERNAME and GetUserNameW can spell the same account differently.
-        // Compare components so Windows slash variants still match as well.
+        // Only fold the account component: custom folders such as AW-Modules
+        // must remain distinct on case-sensitive Windows directories.
+        // Components still normalize Windows slash variants.
         match legacy.iter().position(|l| {
             l.components().count() == path.components().count()
                 && l.components()
                     .zip(path.components())
-                    .all(|(a, b)| a.as_os_str().eq_ignore_ascii_case(b.as_os_str()))
+                    .enumerate()
+                    .all(|(index, (a, b))| {
+                        if index == account_index {
+                            windows_account_names_equal(a.as_os_str(), b.as_os_str())
+                        } else {
+                            a == b
+                        }
+                    })
         }) {
             Some(i) => migrated.extend(current.get(i).cloned()),
             None => migrated.push(path),
@@ -739,6 +776,33 @@ mod tests {
         let mut expected = current;
         expected.extend(legacy_windows_user_discovery_paths("alice"));
         assert_eq!(paths, expected);
+    }
+
+    #[test]
+    fn test_windows_migration_matches_unicode_account_case_changes() {
+        let current =
+            windows_user_discovery_paths(Some(&std::env::temp_dir().join("ömer.CORP")), None);
+        // Final sigma uppercases to the same letter as ordinary sigma, but
+        // lowercasing both names would not match it. Use the native Windows
+        // comparison rather than approximating account identity with lowercase.
+        for (saved, account) in [("Ömer", "ömer"), ("Σ", "ς")] {
+            let mut paths = legacy_windows_user_discovery_paths(saved);
+            paths.extend(legacy_windows_user_discovery_paths("alice"));
+            migrate_windows_discovery_paths(&mut paths, Some(account), &current);
+            let mut expected = current.clone();
+            expected.extend(legacy_windows_user_discovery_paths("alice"));
+            assert_eq!(paths, expected);
+        }
+    }
+
+    #[test]
+    fn test_windows_migration_preserves_custom_folder_case() {
+        let current =
+            windows_user_discovery_paths(Some(&std::env::temp_dir().join("john.CORP")), None);
+        let mut paths = vec![PathBuf::from("C:/Users/JOHN/AW-Modules")];
+        let before = paths.clone();
+        migrate_windows_discovery_paths(&mut paths, Some("john"), &current);
+        assert_eq!(paths, before);
     }
 
     #[test]
