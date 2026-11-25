@@ -128,6 +128,10 @@ struct Module {
     /// A start arrived while `starting` and was served by the in-flight spawn. If that spawn
     /// fails, the request is retried once instead of being dropped with the failed attempt.
     start_coalesced: bool,
+    /// A start arrived after a stop had already signalled the running process. `run_state`
+    /// still reads "running" until that process exits, so the request is remembered and
+    /// honoured when the exit arrives instead of being dropped.
+    restart_after_exit: bool,
     /// Last-known or configured args, reused on manual or post-crash restart (#131).
     args: Option<Vec<String>>,
 }
@@ -188,6 +192,7 @@ impl ManagerState {
                     pending_shutdown: false,
                     starting: false,
                     start_coalesced: false,
+                    restart_after_exit: false,
                     args,
                 };
                 (name, module)
@@ -217,6 +222,7 @@ impl ManagerState {
             module.pid = Some(pid);
             module.starting = false;
             module.start_coalesced = false;
+            module.restart_after_exit = false;
             module.started_at = Some(Instant::now());
             module.args = args;
             if module.pending_shutdown {
@@ -344,7 +350,22 @@ impl ManagerState {
     }
 
     pub fn start_module(&mut self, name: &str, args: Option<&Vec<String>>) {
-        if !self.is_module_running(name) {
+        if self.is_module_running(name) {
+            // A stop may already have signalled the running process (the start landed
+            // between that stop and the exit). `run_state` still reads "running" until the
+            // signalled child actually exits, so remember the request and honour it there
+            // instead of dropping it as a duplicate start.
+            if let Some(module) = self.modules.get_mut(name) {
+                if module.pending_shutdown {
+                    module.pending_shutdown = false;
+                    module.restart_after_exit = true;
+                    if args.is_some() {
+                        module.args = args.cloned();
+                    }
+                    debug!("Not starting {name}: it is stopping, will restart on exit");
+                }
+            }
+        } else {
             if let Some(module) = self.modules.get_mut(name) {
                 if module.starting {
                     // The in-flight spawn serves this start. It still supersedes a stop made
@@ -380,6 +401,9 @@ impl ManagerState {
             // Mark pending_shutdown unconditionally so a module in backoff (no pid yet)
             // does not restart after its delay expires.
             module.pending_shutdown = true;
+            // A start that was waiting for the signalled process to exit is superseded by
+            // this stop; otherwise the exit would start a process the user just stopped.
+            module.restart_after_exit = false;
             if let Some(pid) = module.pid {
                 if let Err(e) = send_sigterm(pid) {
                     error!("Failed to send SIGTERM to module {name}: {e}");
@@ -402,6 +426,20 @@ impl ManagerState {
             self.stop_module(&name);
         }
     }
+    /// Honours a start that landed while the module was already being stopped, now that
+    /// the signalled process has exited. Returns whether a new run was started.
+    fn restart_after_stop_if_requested(&mut self, name: &str) -> bool {
+        let requested = self
+            .modules
+            .get_mut(name)
+            .is_some_and(|module| std::mem::take(&mut module.restart_after_exit));
+        if requested {
+            info!("Restarting {name}: a start was requested while it was stopping");
+            self.start_module(name, None);
+        }
+        requested
+    }
+
     /// Toggles module `name` from a tray click. Returns whether it is now meant to
     /// be running, or `None` if `name` isn't a discovered module.
     pub fn handle_system_click(&mut self, name: &str) -> Option<bool> {
@@ -975,6 +1013,9 @@ fn handle(
                     let name_clone = name.clone();
                     if !current {
                         // A superseded process exiting is neither a crash nor a clean stop.
+                    } else if state_guard.restart_after_stop_if_requested(&name) {
+                        // A start landed while this process was being stopped; it is
+                        // running again, so the exit is neither a crash nor a final stop.
                     } else if output.status.success() {
                         info!("Module {name} exited successfully");
                     } else {
@@ -1766,6 +1807,7 @@ mod tests {
             pending_shutdown: false,
             starting: false,
             start_coalesced: false,
+            restart_after_exit: false,
             args: None,
         };
         ManagerState {
@@ -1918,6 +1960,59 @@ mod tests {
         s.started_module("aw-watcher", 999_999_999, None);
         assert!(!s.modules["aw-watcher"].pending_shutdown);
         assert_eq!(s.modules["aw-watcher"].run_state, Some(true));
+    }
+
+    #[test]
+    fn start_after_a_stop_that_already_signalled_the_process_restarts_it() {
+        // start, stop, Started (SIGTERM sent), then start again before the signalled child
+        // exits. `run_state` still reads "running", so the start must not be dropped: the
+        // exit starts a fresh run instead of being treated as the stop's own exit.
+        let mut s = state_with_module("aw-watcher", 0, None);
+        {
+            let m = s.modules.get_mut("aw-watcher").unwrap();
+            m.run_state = Some(false);
+            m.pid = None;
+        }
+        s.start_module("aw-watcher", None);
+        s.stop_module("aw-watcher");
+        s.started_module("aw-watcher", 999_999_991, None);
+        assert!(s.modules["aw-watcher"].pending_shutdown);
+        let before = s.modules["aw-watcher"].generation;
+        s.start_module("aw-watcher", None);
+        assert!(
+            s.modules["aw-watcher"].restart_after_exit,
+            "the start must be remembered while the signalled process exits"
+        );
+        assert!(!s.modules["aw-watcher"].pending_shutdown);
+        assert_eq!(s.modules["aw-watcher"].generation, before, "no spawn yet");
+        assert!(s.stopped_module("aw-watcher", 999_999_991));
+        assert!(s.restart_after_stop_if_requested("aw-watcher"));
+        let m = &s.modules["aw-watcher"];
+        assert_eq!(m.generation, before + 1, "the exit must start a fresh run");
+        assert!(m.starting);
+        assert!(!m.restart_after_exit);
+    }
+
+    #[test]
+    fn stop_after_a_restart_waits_for_the_exit_cancels_it() {
+        // The same sequence, but a stop lands after the start that was waiting for the
+        // exit: the later stop wins, so the exit is the stop's own and nothing restarts.
+        let mut s = state_with_module("aw-watcher", 0, None);
+        {
+            let m = s.modules.get_mut("aw-watcher").unwrap();
+            m.run_state = Some(false);
+            m.pid = None;
+        }
+        s.start_module("aw-watcher", None);
+        s.stop_module("aw-watcher");
+        s.started_module("aw-watcher", 999_999_991, None);
+        s.start_module("aw-watcher", None);
+        s.stop_module("aw-watcher");
+        assert!(!s.modules["aw-watcher"].restart_after_exit);
+        assert!(s.stopped_module("aw-watcher", 999_999_991));
+        assert!(!s.restart_after_stop_if_requested("aw-watcher"));
+        assert_eq!(s.plan_after_crash("aw-watcher"), CrashPlan::Intentional);
+        assert!(!s.modules["aw-watcher"].starting);
     }
 
     #[test]
