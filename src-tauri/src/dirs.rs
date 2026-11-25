@@ -782,10 +782,10 @@ mod tests {
     fn test_windows_migration_matches_unicode_account_case_changes() {
         let current =
             windows_user_discovery_paths(Some(&std::env::temp_dir().join("ömer.CORP")), None);
-        // Final sigma uppercases to the same letter as ordinary sigma, but
-        // lowercasing both names would not match it. Use the native Windows
-        // comparison rather than approximating account identity with lowercase.
-        for (saved, account) in [("Ömer", "ömer"), ("Σ", "ς")] {
+        // Only pairs that Windows' native upcase table equates belong here:
+        // final sigma (ς) is not equal to Σ under CompareStringOrdinal, even
+        // though Rust's Unicode uppercasing (the portable stand-in) maps it so.
+        for (saved, account) in [("Ömer", "ömer"), ("Σ", "σ")] {
             let mut paths = legacy_windows_user_discovery_paths(saved);
             paths.extend(legacy_windows_user_discovery_paths("alice"));
             migrate_windows_discovery_paths(&mut paths, Some(account), &current);
