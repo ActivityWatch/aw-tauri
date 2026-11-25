@@ -123,6 +123,9 @@ struct Module {
     /// yet. `run_state` only changes on `Started`, so without this a second start in that
     /// window would spawn a duplicate process.
     starting: bool,
+    /// A start arrived while `starting` and was served by the in-flight spawn. If that spawn
+    /// fails, the request is retried once instead of being dropped with the failed attempt.
+    start_coalesced: bool,
     /// Last-known or configured args, reused on manual or post-crash restart (#131).
     args: Option<Vec<String>>,
 }
@@ -182,6 +185,7 @@ impl ManagerState {
                     generation: 0,
                     pending_shutdown: false,
                     starting: false,
+                    start_coalesced: false,
                     args,
                 };
                 (name, module)
@@ -210,6 +214,7 @@ impl ManagerState {
             module.run_state = Some(true);
             module.pid = Some(pid);
             module.starting = false;
+            module.start_coalesced = false;
             module.started_at = Some(Instant::now());
             module.args = args;
             if module.pending_shutdown {
@@ -312,9 +317,21 @@ impl ManagerState {
     }
 
     /// Records that the spawn requested for `name` failed, so a later start can retry it.
+    /// A start coalesced into the failed attempt is retried once now (unless a stop came
+    /// after it): the failure may already have happened when that start arrived.
     fn spawn_failed(&mut self, name: &str) {
-        if let Some(module) = self.modules.get_mut(name) {
-            module.starting = false;
+        let retry = match self.modules.get_mut(name) {
+            Some(module) => {
+                module.starting = false;
+                let retry = module.start_coalesced && !module.pending_shutdown;
+                module.start_coalesced = false;
+                retry
+            }
+            None => false,
+        };
+        if retry {
+            info!("Retrying {name}: a start was requested while the failed spawn was in flight");
+            self.start_module(name, None);
         }
     }
 
@@ -325,6 +342,7 @@ impl ManagerState {
                     // The in-flight spawn serves this start. It still supersedes a stop made
                     // since that spawn began, or started_module would stop the new process.
                     module.pending_shutdown = false;
+                    module.start_coalesced = true;
                     debug!("Not starting {name}: a spawn is already in flight");
                     return;
                 }
@@ -1725,6 +1743,7 @@ mod tests {
             generation: 1,
             pending_shutdown: false,
             starting: false,
+            start_coalesced: false,
             args: None,
         };
         ManagerState {
@@ -2002,6 +2021,50 @@ mod tests {
             s.modules["aw-watcher"].generation, 3,
             "a start after a failed spawn must spawn again"
         );
+    }
+
+    #[test]
+    fn start_coalesced_into_a_spawn_that_fails_is_retried_once() {
+        // The spawn fails (e.g. the executable was briefly missing) and a second start lands
+        // before its SpawnFailed is handled. The second start was coalesced into the failed
+        // attempt, so the failure must launch one replacement rather than drop the request.
+        let mut s = state_with_module("aw-watcher", 0, None);
+        {
+            let m = s.modules.get_mut("aw-watcher").unwrap();
+            m.run_state = Some(false);
+            m.pid = None;
+        }
+        s.start_module("aw-watcher", None);
+        s.start_module("aw-watcher", None);
+        s.spawn_failed("aw-watcher");
+        assert_eq!(
+            s.modules["aw-watcher"].generation, 3,
+            "the coalesced start must be retried after the failure"
+        );
+        assert!(s.modules["aw-watcher"].starting);
+        // The retry fails too: no coalesced start this time, so nothing more is launched.
+        s.spawn_failed("aw-watcher");
+        assert_eq!(s.modules["aw-watcher"].generation, 3);
+        assert!(!s.modules["aw-watcher"].starting);
+    }
+
+    #[test]
+    fn stop_after_a_coalesced_start_cancels_the_retry() {
+        let mut s = state_with_module("aw-watcher", 0, None);
+        {
+            let m = s.modules.get_mut("aw-watcher").unwrap();
+            m.run_state = Some(false);
+            m.pid = None;
+        }
+        s.start_module("aw-watcher", None);
+        s.start_module("aw-watcher", None);
+        s.stop_module("aw-watcher");
+        s.spawn_failed("aw-watcher");
+        assert_eq!(
+            s.modules["aw-watcher"].generation, 2,
+            "a stop after the coalesced start must win"
+        );
+        assert!(!s.modules["aw-watcher"].starting);
     }
 
     #[test]
