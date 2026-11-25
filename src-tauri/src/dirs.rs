@@ -717,10 +717,10 @@ mod tests {
         let profile = root.as_path();
         let paths = windows_user_discovery_paths(Some(profile), None);
         assert_eq!(paths[0], profile.join("aw-modules"));
+        // Every output is rooted at the profile folder. The sibling-folder case
+        // from #327 needs real Windows path semantics, so it is asserted in
+        // `test_windows_user_discovery_paths_avoid_sibling_account_folder`.
         assert!(paths.iter().all(|p| p.starts_with(profile)), "{:?}", paths);
-        assert!(!paths
-            .iter()
-            .any(|p| p.starts_with(Path::new(r"C:/Users/john/"))));
 
         let local_root = std::env::temp_dir().join("redirected-local");
         let local = local_root.as_path();
@@ -765,6 +765,33 @@ mod tests {
     fn test_windows_account_name_is_available_without_username_env() {
         // Direct native call: no process-wide env mutation in parallel tests.
         assert!(windows_account_name().is_some_and(|name| !name.is_empty()));
+    }
+
+    /// The #327 repro: a domain account gets `C:\Users\john.CORP` while
+    /// `C:\Users\john` belongs to a different account. Discovery must never
+    /// reach into the sibling folder, which a `USERNAME`-derived path did.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn test_windows_user_discovery_paths_avoid_sibling_account_folder() {
+        let profile = Path::new(r"C:\Users\john.CORP");
+        let sibling = Path::new(r"C:\Users\john");
+        let paths = windows_user_discovery_paths(Some(profile), None);
+        assert_eq!(paths[0], profile.join("aw-modules"));
+        assert_eq!(
+            paths[1],
+            profile
+                .join("AppData")
+                .join("Local")
+                .join("Programs")
+                .join("ActivityWatch-Tauri")
+        );
+        assert!(paths.iter().all(|p| !p.starts_with(sibling)), "{:?}", paths);
+
+        // Persisted legacy entries for the account name are migrated onto the
+        // real profile, so no sibling-folder path survives a config load.
+        let mut persisted = legacy_windows_user_discovery_paths("john");
+        migrate_windows_discovery_paths(&mut persisted, Some("john"), &paths);
+        assert_eq!(persisted, paths);
     }
 
     #[cfg(target_os = "windows")]
