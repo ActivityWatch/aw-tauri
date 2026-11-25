@@ -796,6 +796,20 @@ mod tests {
     }
 
     #[test]
+    fn test_windows_migration_uses_redirected_local_app_data() {
+        let profile = std::env::temp_dir().join("john.CORP");
+        // Different depth from C:/Users/john/AppData/Local: replacement paths
+        // are never compared to the legacy template, only the saved entries are.
+        let local = std::env::temp_dir().join("redirected");
+        let current = windows_user_discovery_paths(Some(&profile), Some(&local));
+        let mut paths = legacy_windows_user_discovery_paths("john");
+        migrate_windows_discovery_paths(&mut paths, Some("john"), &current);
+        assert_eq!(paths, current);
+        assert_eq!(paths[1], local.join("Programs").join("ActivityWatch-Tauri"));
+        assert_eq!(paths[2], local.join("Programs").join("ActivityWatch"));
+    }
+
+    #[test]
     fn test_windows_migration_preserves_custom_folder_case() {
         let current =
             windows_user_discovery_paths(Some(&std::env::temp_dir().join("john.CORP")), None);
