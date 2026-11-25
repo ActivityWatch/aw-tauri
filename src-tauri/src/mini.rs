@@ -52,7 +52,7 @@ pub fn run() {
     let rocket_handle = tauri::async_runtime::spawn(
         aw_server::endpoints::build_rocket(server_state, aw_config).launch(),
     );
-    info!("Running aw-tauri mini mode at {}", dashboard_url.as_str());
+    info!("{}", startup_message(&dashboard_url));
 
     // Pick the notification sender up front. Otherwise notify-rust resolves one on the first
     // notification by running an AppleScript lookup for an app named "use_default", on the main
@@ -322,6 +322,15 @@ fn load_tray_icon() -> Result<Icon, Box<dyn std::error::Error>> {
     Ok(Icon::from_rgba(rgba, info.width, info.height)?)
 }
 
+/// The startup log line for mini mode. The dashboard URL carries the API token in its
+/// query (`?token=`), and the log file is often attached to bug reports, so log the URL
+/// without its query.
+fn startup_message(dashboard_url: &tauri::Url) -> String {
+    let mut shown = dashboard_url.clone();
+    shown.set_query(None);
+    format!("Running aw-tauri mini mode at {}", shown.as_str())
+}
+
 fn open_dashboard(url: &str) {
     if let Err(e) = open::that_detached(url) {
         warn!("Failed to open dashboard: {e}");
@@ -347,6 +356,22 @@ fn show_notification(title: &str, message: &str) {
         .show()
     {
         warn!("Failed to show notification: {e}");
+    }
+}
+
+#[cfg(test)]
+mod log_tests {
+    use super::startup_message;
+
+    #[test]
+    fn startup_message_does_not_log_the_api_token() {
+        let url = crate::build_dashboard_url(5600, Some("s3cret-api-key"));
+        let message = startup_message(&url);
+        assert!(
+            !message.contains("s3cret-api-key"),
+            "mini-mode startup log line leaks the API token: {message}"
+        );
+        assert!(message.contains("http://localhost:5600/"), "{message}");
     }
 }
 
