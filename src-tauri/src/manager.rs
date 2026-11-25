@@ -69,6 +69,10 @@ enum ModuleMessage {
         generation: u64,
     },
     Init {},
+    /// Something outside the message loop changed module state (a tray click). Nothing needs
+    /// handling; the loop rebuilds the snapshot after every message, which refreshes the
+    /// checkmarks so they never disagree with what a click would do.
+    Refresh {},
     Notification {
         title: String,
         message: String,
@@ -89,11 +93,22 @@ enum CrashPlan {
     LimitReached { generation: u64 },
 }
 
-/// A lightweight, path-free view of every module's run state, keyed by module name.
-/// `None` = discovered but never started, `Some(true)` = running, `Some(false)` = stopped
-/// after having been started. This is all the tray and mini-mode event loop need; it is cheap
-/// to build and shared via `Arc` instead of cloning the full per-module state on every event.
-pub(crate) type ModulesSnapshot = BTreeMap<String, Option<bool>>;
+/// The tray-visible state of one module.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ModuleView {
+    /// The module belongs in the tray's started group: it has run (or a restart is queued),
+    /// or a start is in flight.
+    pub started: bool,
+    /// The module is meant to be running now: running, starting, or queued to restart after a
+    /// stop that already signalled the process. Drives the checkmark, so it always matches
+    /// what a tray click would do (`handle_system_click` toggles the same value).
+    pub requested: bool,
+}
+
+/// A lightweight, path-free view of every module's tray state, keyed by module name. This is
+/// all the tray and mini-mode event loop need; it is cheap to build and shared via `Arc`
+/// instead of cloning the full per-module state on every event.
+pub(crate) type ModulesSnapshot = BTreeMap<String, ModuleView>;
 
 #[derive(Debug, Clone)]
 pub(crate) enum ManagerEvent {
@@ -134,6 +149,26 @@ struct Module {
     restart_after_exit: bool,
     /// Last-known or configured args, reused on manual or post-crash restart (#131).
     args: Option<Vec<String>>,
+}
+
+impl Module {
+    /// Whether the module is meant to be running right now: running, starting, or queued to
+    /// restart after a stop that already signalled the process. `run_state` alone lags a
+    /// restart request (it stays `Some(false)` until the replacement reports `Started`), so
+    /// the tray checkmark must use this to agree with `handle_system_click`.
+    fn requested_running(&self) -> bool {
+        !self.pending_shutdown
+            && (self.run_state == Some(true) || self.starting || self.restart_after_exit)
+    }
+
+    /// The tray-visible view: whether it belongs in the started group, and whether it is
+    /// meant to be running.
+    fn view(&self) -> ModuleView {
+        ModuleView {
+            started: self.run_state.is_some() || self.starting || self.restart_after_exit,
+            requested: self.requested_running(),
+        }
+    }
 }
 
 /// Tray menu ID for the "Enable notifications" toggle.
@@ -207,12 +242,19 @@ impl ManagerState {
         }
     }
 
-    /// A path-free `name -> run state` view for the tray and mini-mode event loop.
+    /// A path-free view of each module's tray state for the tray and mini-mode event loop.
     pub(crate) fn modules_snapshot(&self) -> ModulesSnapshot {
         self.modules
             .iter()
-            .map(|(name, module)| (name.clone(), module.run_state))
+            .map(|(name, module)| (name.clone(), module.view()))
             .collect()
+    }
+
+    /// Ask the message loop to refresh the tray/mini view. Called after a click changes state
+    /// outside the loop, so the checkmark matches the click's intent at once instead of
+    /// waiting for the next Started/Stopped message.
+    fn refresh_ui(&self) {
+        let _ = self.tx.send(ModuleMessage::Refresh {});
     }
 
     fn started_module(&mut self, name: &str, pid: u32, args: Option<Vec<String>>) {
@@ -340,7 +382,12 @@ impl ManagerState {
                 // now-reaped --output-only child. No Stopped follows that path, so
                 // clear the dead pid here rather than leave the tray running and
                 // allow a later stop to signal a potentially recycled pid.
-                module.run_state = Some(false);
+                // Only a module that had started is marked stopped: a first spawn that
+                // never produced a child stays "never started", so the tray does not
+                // report a run that never existed.
+                if module.run_state.is_some() {
+                    module.run_state = Some(false);
+                }
                 module.pid = None;
                 module.started_at = None;
                 module.starting = false;
@@ -458,9 +505,8 @@ impl ManagerState {
         // in-flight spawn or queued restart is on, while a pending stop is off even
         // before its process exits. This also makes repeated clicks during startup
         // alternate instead of coalescing every click into another start request.
-        let requested = !module.pending_shutdown
-            && (module.run_state == Some(true) || module.starting || module.restart_after_exit);
-        if requested {
+        // The tray checkmark uses the same value (`ModuleView::requested`).
+        if module.requested_running() {
             self.stop_module(name);
             Some(false)
         } else {
@@ -557,10 +603,10 @@ fn update_tray_menu(modules: ModulesSnapshot, event_tx: &Option<Sender<ManagerEv
     let app = get_app_handle();
     debug!("App handle acquired");
 
-    // Running group = modules that have been started at least once (run_state is Some).
+    // Running group = modules that have been started at least once, or whose start is in flight.
     let running_keys: BTreeSet<String> = modules
         .iter()
-        .filter(|(_, run_state)| run_state.is_some())
+        .filter(|(_, view)| view.started)
         .map(|(name, _)| name.clone())
         .collect();
     let mut cache = TRAY_MENU_CACHE
@@ -569,9 +615,9 @@ fn update_tray_menu(modules: ModulesSnapshot, event_tx: &Option<Sender<ManagerEv
     match cache.as_ref() {
         // Same running group as last build: ordering is unchanged, so only sync checked state.
         Some(c) if c.running_keys == running_keys => {
-            for (name, run_state) in modules.iter() {
-                if let (Some(item), Some(running)) = (c.module_items.get(name), run_state) {
-                    if let Err(e) = item.set_checked(*running) {
+            for (name, view) in modules.iter() {
+                if let Some(item) = c.module_items.get(name) {
+                    if let Err(e) = item.set_checked(view.requested) {
                         error!("Failed to update tray checked state for {name}: {e}");
                     }
                 }
@@ -616,10 +662,10 @@ fn build_tray_menu(
     let mut module_items = HashMap::new();
     let mut modules_submenu_builder = SubmenuBuilder::new(app, "Modules");
     // Started modules first, alphabetically (BTreeMap iterates in key order), each with a checkbox.
-    for (module, run_state) in modules.iter() {
-        if let Some(running) = run_state {
+    for (module, view) in modules.iter() {
+        if view.started {
             let module_menu =
-                CheckMenuItem::with_id(app, module, module, true, *running, None::<&str>)
+                CheckMenuItem::with_id(app, module, module, true, view.requested, None::<&str>)
                     .expect("Failed to create module menu item");
             modules_submenu_builder = modules_submenu_builder.item(&module_menu);
             module_items.insert(module.clone(), module_menu);
@@ -627,8 +673,8 @@ fn build_tray_menu(
     }
 
     // Then discovered modules that have never been started, alphabetically.
-    for (module, run_state) in modules.iter() {
-        if run_state.is_none() {
+    for (module, view) in modules.iter() {
+        if !view.started {
             let module_menu = MenuItem::with_id(app, module, module, true, None::<&str>)
                 .expect("Failed to create module menu item");
             modules_submenu_builder = modules_submenu_builder.item(&module_menu);
@@ -939,6 +985,7 @@ pub(crate) fn handle_module_menu_click(
         let enable = !s.is_module_running(name);
         if crate::write_notify_enabled(datastore, enable) {
             s.set_notify_enabled(enable);
+            s.refresh_ui();
         } else {
             error!("aw-notify toggle aborted: datastore write failed; state unchanged");
         }
@@ -949,6 +996,7 @@ pub(crate) fn handle_module_menu_click(
     // nothing takes them the other way round).
     if let Some(enabled) = s.handle_system_click(name) {
         crate::config_edit::persist_module_click(name, enabled);
+        s.refresh_ui();
     }
 }
 
@@ -1119,7 +1167,7 @@ fn handle(
                 ModuleMessage::SpawnFailed { name, generation } => {
                     state_guard.spawn_failed(&name, generation)
                 }
-                ModuleMessage::Init {} => {}
+                ModuleMessage::Init {} | ModuleMessage::Refresh {} => {}
                 // Already handled above via early-continue
                 ModuleMessage::Notification { .. } => unreachable!(),
             }
@@ -2061,6 +2109,48 @@ mod tests {
             assert_eq!(s.plan_after_crash("aw-watcher"), CrashPlan::Intentional);
             assert!(!s.modules["aw-watcher"].starting);
         }
+    }
+
+    #[test]
+    fn tray_checkmark_follows_the_request_while_a_restart_is_in_flight() {
+        // off → on while the stopped process is still exiting leaves run_state at Some(false)
+        // until the replacement reports Started. The checkmark must show the requested state:
+        // otherwise it reads "off" while a click on it (the same requested state) stops the
+        // replacement and saves the watcher as disabled for the next launch.
+        let mut s = state_with_module("aw-watcher", 0, None);
+        s.started_module("aw-watcher", 999_999_991, None);
+        assert_eq!(s.handle_system_click("aw-watcher"), Some(false));
+        assert_eq!(s.handle_system_click("aw-watcher"), Some(true));
+        assert!(s.stopped_module("aw-watcher", 999_999_991));
+        assert!(s.restart_after_stop_if_requested("aw-watcher"));
+        assert_eq!(s.modules["aw-watcher"].run_state, Some(false));
+        let view = s.modules_snapshot()["aw-watcher"];
+        assert!(
+            view.started,
+            "a queued restart keeps it in the started group"
+        );
+        assert!(view.requested, "the checkmark must show the queued restart");
+        // A click on the item as shown toggles it off, exactly as the checkmark said.
+        assert_eq!(s.handle_system_click("aw-watcher"), Some(false));
+        assert!(!s.modules_snapshot()["aw-watcher"].requested);
+    }
+
+    #[test]
+    fn failed_first_spawn_leaves_the_module_never_started() {
+        // A first spawn that fails before a child exists was never a run: the module must
+        // stay in the tray's never-started group instead of reporting "started, now stopped".
+        let mut s = state_with_module("aw-watcher", 0, None);
+        {
+            let m = s.modules.get_mut("aw-watcher").unwrap();
+            m.run_state = None;
+            m.pid = None;
+        }
+        s.start_module("aw-watcher", None);
+        s.spawn_failed("aw-watcher", s.modules["aw-watcher"].generation);
+        assert_eq!(s.modules["aw-watcher"].run_state, None);
+        let view = s.modules_snapshot()["aw-watcher"];
+        assert!(!view.started);
+        assert!(!view.requested);
     }
 
     #[test]
