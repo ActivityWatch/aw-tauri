@@ -443,25 +443,17 @@ impl ManagerState {
     /// Toggles module `name` from a tray click. Returns whether it is now meant to
     /// be running, or `None` if `name` isn't a discovered module.
     pub fn handle_system_click(&mut self, name: &str) -> Option<bool> {
-        if !self.modules.contains_key(name) {
+        let Some(module) = self.modules.get(name) else {
             warn!("Ignoring tray click for unknown module {name}");
             return None;
-        }
-        if self.is_module_running(name) {
-            if self
-                .modules
-                .get(name)
-                .is_some_and(|module| module.pending_shutdown)
-            {
-                // A stop already signalled the process but it has not exited yet. This
-                // click is a start request: queue the restart instead of issuing a
-                // second stop and persisting "disabled" for a watcher the user wants on.
-                if let Some(module) = self.modules.get_mut(name) {
-                    module.restart_count = 0;
-                }
-                self.start_module(name, None);
-                return Some(true);
-            }
+        };
+        // Toggle the requested state, not just the last reported process state: an
+        // in-flight spawn or queued restart is on, while a pending stop is off even
+        // before its process exits. This also makes repeated clicks during startup
+        // alternate instead of coalescing every click into another start request.
+        let requested = !module.pending_shutdown
+            && (module.run_state == Some(true) || module.starting || module.restart_after_exit);
+        if requested {
             self.stop_module(name);
             Some(false)
         } else {
@@ -2033,6 +2025,50 @@ mod tests {
         assert!(s.restart_after_stop_if_requested("aw-watcher"));
         assert_eq!(s.modules["aw-watcher"].run_state, Some(false));
         assert!(s.modules["aw-watcher"].starting);
+    }
+
+    #[test]
+    fn third_tray_click_stops_the_replacement_even_while_it_is_starting() {
+        for old_exited in [false, true] {
+            let mut s = state_with_module("aw-watcher", 0, None);
+            s.started_module("aw-watcher", 999_999_991, None);
+            assert_eq!(s.handle_system_click("aw-watcher"), Some(false));
+            assert_eq!(s.handle_system_click("aw-watcher"), Some(true));
+            if old_exited {
+                assert!(s.stopped_module("aw-watcher", 999_999_991));
+                assert!(s.restart_after_stop_if_requested("aw-watcher"));
+                assert!(s.modules["aw-watcher"].starting);
+            }
+            assert_eq!(s.handle_system_click("aw-watcher"), Some(false));
+            assert!(s.modules["aw-watcher"].pending_shutdown);
+            assert!(!s.modules["aw-watcher"].restart_after_exit);
+            if old_exited {
+                // The replacement reports Started after the off click. It must still stop.
+                s.started_module("aw-watcher", 999_999_992, None);
+                assert!(s.modules["aw-watcher"].pending_shutdown);
+                assert!(s.stopped_module("aw-watcher", 999_999_992));
+            } else {
+                assert!(s.stopped_module("aw-watcher", 999_999_991));
+            }
+            assert!(!s.restart_after_stop_if_requested("aw-watcher"));
+            assert_eq!(s.plan_after_crash("aw-watcher"), CrashPlan::Intentional);
+            assert!(!s.modules["aw-watcher"].starting);
+        }
+    }
+
+    #[test]
+    fn tray_clicks_toggle_an_initial_spawn_before_started_arrives() {
+        let mut s = state_with_module("aw-watcher", 0, None);
+        s.stopped_module("aw-watcher", 1234);
+        assert_eq!(s.handle_system_click("aw-watcher"), Some(true));
+        let generation = s.modules["aw-watcher"].generation;
+        assert_eq!(s.handle_system_click("aw-watcher"), Some(false));
+        assert!(s.modules["aw-watcher"].pending_shutdown);
+        assert_eq!(s.handle_system_click("aw-watcher"), Some(true));
+        assert!(!s.modules["aw-watcher"].pending_shutdown);
+        assert_eq!(s.modules["aw-watcher"].generation, generation);
+        s.started_module("aw-watcher", 999_999_991, None);
+        assert!(!s.modules["aw-watcher"].pending_shutdown);
     }
 
     #[test]
