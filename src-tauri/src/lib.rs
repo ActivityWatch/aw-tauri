@@ -584,6 +584,63 @@ fn dialog_text(text: String) -> String {
     }
 }
 
+/// Loopback spellings that count as the dashboard's own server. Navigation and
+/// the IPC capability must agree on this list (and on the click interceptor's
+/// `localHttp`): a page the window may load but the capability does not cover
+/// cannot open any external link.
+const LOOPBACK_HOSTS: [&str; 2] = ["localhost", "127.0.0.1"];
+
+/// Navigation the main window may follow: the dashboard's own origin, plus the
+/// schemes a webview renders without an origin.
+///
+/// This is the backstop behind the click interceptor. A link, form submit,
+/// `location` assignment or redirect that slips past the interceptor must not
+/// turn the address-bar-less window into a browser for an arbitrary page
+/// (aw-tauri#327 item 1).
+fn allows_navigation(url: &Url, dashboard: &Url) -> bool {
+    match url.scheme() {
+        "blob" | "about" => true,
+        scheme => {
+            // Same scheme and port, and a loopback host: whichever spelling of
+            // loopback the page links to, it is the dashboard's own server.
+            scheme == dashboard.scheme()
+                && url.port_or_known_default() == dashboard.port_or_known_default()
+                && is_loopback_host(url.host_str().unwrap_or_default())
+                && is_loopback_host(dashboard.host_str().unwrap_or_default())
+        }
+    }
+}
+
+fn is_loopback_host(host: &str) -> bool {
+    LOOPBACK_HOSTS.contains(&host)
+}
+
+/// Capability granting the dashboard page its two commands, scoped to the
+/// dashboard's port on each of [`LOOPBACK_HOSTS`].
+///
+/// Registered at runtime rather than as a static capability file: the port is
+/// configurable, and `http://localhost:*` would also grant every other local
+/// service any stray page in the main window can reach (aw-tauri#327 item 2).
+fn dashboard_capability(dashboard: &Url) -> String {
+    let urls = LOOPBACK_HOSTS
+        .map(|host| {
+            let mut url = dashboard.clone();
+            url.set_host(Some(host)).expect("valid loopback host");
+            format!(r#""{}/*""#, url.origin().ascii_serialization())
+        })
+        .join(", ");
+    format!(
+        r#"{{
+  "identifier": "remote-external-links",
+  "description": "Allow the embedded localhost dashboard to open external links and adjust its zoom",
+  "remote": {{ "urls": [{urls}] }},
+  "local": false,
+  "windows": ["main"],
+  "permissions": ["allow-open-external", "core:webview:allow-set-webview-zoom"]
+}}"#
+    )
+}
+
 fn build_dashboard_url(port: u16, api_key: Option<&str>) -> Url {
     let mut url =
         Url::parse(&format!("http://localhost:{port}/")).expect("Failed to parse localhost url");
@@ -1358,12 +1415,19 @@ pub fn run() {
                 // SPA-generated links where on_navigation (which only fires for top-level
                 // webview navigations) would miss JS-driven internal route changes.
                 let download_destinations = Mutex::new(downloads::Destinations::default());
+                // Grant the dashboard page its commands for this origin only. Done
+                // before the window exists so the capability is in the authority when
+                // the first page load checks it.
+                if let Err(error) = app.add_capability(dashboard_capability(&dashboard_url)) {
+                    error!("Cannot scope the dashboard capability: {error}");
+                }
                 // Compare effective ports: HTTP and HTTPS both omit their default
                 // port from URL.port, but those defaults are different services.
                 let dashboard_port = dashboard_url
                     .port_or_known_default()
                     .expect("Dashboard HTTP URL must have a port")
                     .to_string();
+                let navigation_dashboard = dashboard_url.clone();
                 let _main_window = WebviewWindowBuilder::new(
                     app,
                     "main",
@@ -1373,6 +1437,10 @@ pub fn run() {
                 .inner_size(800.0, 600.0)
                 .zoom_hotkeys_enabled(true)
                 .visible(false)
+                // Backstop for what the click interceptor cannot see: form submits,
+                // `location` assignments and server redirects. The dashboard's own
+                // origin stays; anything else is refused rather than loaded.
+                .on_navigation(move |url| allows_navigation(url, &navigation_dashboard))
                 .on_download(move |webview, event| {
                     match event {
                         tauri::webview::DownloadEvent::Requested { destination, .. } => {
@@ -1421,28 +1489,39 @@ pub fn run() {
                 .initialization_script(
                     r#"
                     document.addEventListener('click', function(e) {
+                        // SVG <a> reports a lowercase tag name and exposes href as an
+                        // SVGAnimatedString; <area> is an HTML anchor too. Match the tag
+                        // case-insensitively and read the attribute, not the property.
                         var el = e.target;
-                        while (el && el.tagName !== 'A') { el = el.parentElement; }
-                        if (!el || !el.href) { return; }
+                        while (el && el !== document.documentElement) {
+                            var tag = (el.tagName || '').toLowerCase();
+                            if (tag === 'a' || tag === 'area') { break; }
+                            el = el.parentElement || null;
+                        }
+                        if (!el || el === document.documentElement) { return; }
+                        var href = el.getAttribute('href') || el.getAttribute('xlink:href');
+                        if (!href) { return; }
+                        var url;
+                        try { url = new URL(href, document.baseURI); } catch (err) { return; }
                         // Blob exports belong to the webview's native download handler,
                         // not the OS URL opener (which cannot resolve webview blob URLs).
-                        if (el.href.startsWith('blob:') && el.hasAttribute('download')) { return; }
+                        if (url.protocol === 'blob:' && el.hasAttribute('download')) { return; }
                         // javascript: pseudo-links are not real navigation targets; let
                         // the page's own handlers run instead of handing them to the OS opener.
-                        if (el.protocol === 'javascript:') { return; }
+                        if (url.protocol === 'javascript:') { return; }
                         // Only exact local hosts at the dashboard's port stay here. Parsed
                         // hosts, not a URL prefix: localhost.example.com and
                         // localhost@evil.example are external. Parsed port too: no other
                         // local service is reachable from a dashboard link, so a stray
                         // http://localhost:9999/ belongs in the browser.
-                        var effectivePort = el.port || (el.protocol === 'https:' ? '443' : '80');
-                        var localHttp = (el.protocol === 'http:' || el.protocol === 'https:') &&
-                            (el.hostname === 'localhost' || el.hostname === '127.0.0.1') &&
+                        var effectivePort = url.port || (url.protocol === 'https:' ? '443' : '80');
+                        var localHttp = (url.protocol === 'http:' || url.protocol === 'https:') &&
+                            (url.hostname === 'localhost' || url.hostname === '127.0.0.1') &&
                             effectivePort === '__AW_DASHBOARD_PORT__';
-                        if (!localHttp && el.protocol !== 'tauri:' && el.protocol !== 'about:') {
+                        if (!localHttp && url.protocol !== 'tauri:' && url.protocol !== 'about:') {
                             e.preventDefault();
                             e.stopPropagation();
-                            window.__TAURI_INTERNALS__.invoke('open_external', { url: el.href });
+                            window.__TAURI_INTERNALS__.invoke('open_external', { url: url.href });
                         }
                     }, true);
                     "#
@@ -1690,9 +1769,9 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::{
-        already_running_message, build_dashboard_url, default_linux_modules, load_existing_config,
-        open_external_with, parse_config_bytes, rejected_launch_message, update_prompt_body,
-        UserConfig,
+        allows_navigation, already_running_message, build_dashboard_url, dashboard_capability,
+        default_linux_modules, load_existing_config, open_external_with, parse_config_bytes,
+        rejected_launch_message, update_prompt_body, Url, UserConfig,
     };
 
     #[test]
@@ -2067,6 +2146,57 @@ mod tests {
         assert!(!module_available("aw-test-missing-xyz", paths));
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn navigation_stays_on_the_dashboard_origin() {
+        let dashboard = build_dashboard_url(5600, Some("secret"));
+        // Route changes, relative links and in-page schemes stay in the window.
+        for allowed in [
+            "http://localhost:5600/",
+            "http://localhost:5600/#/buckets",
+            "http://localhost:5600/static/app.js",
+            "http://127.0.0.1:5600/",
+            "blob:http://localhost:5600/7f2c",
+            "about:blank",
+        ] {
+            assert!(
+                allows_navigation(&Url::parse(allowed).unwrap(), &dashboard),
+                "{allowed} should be allowed"
+            );
+        }
+        // Everything else is a navigation the address-bar-less window must refuse.
+        for blocked in [
+            "https://activitywatch.net/",
+            "http://localhost:9999/",
+            "http://127.0.0.1:9999/",
+            "http://localhost.example.com/help",
+            "http://localhost@evil.example/help",
+            "https://localhost:5600/",
+            // Not covered by the capability or the click interceptor.
+            "http://[::1]:5600/",
+        ] {
+            assert!(
+                !allows_navigation(&Url::parse(blocked).unwrap(), &dashboard),
+                "{blocked} should be refused"
+            );
+        }
+    }
+
+    #[test]
+    fn dashboard_capability_is_scoped_to_the_dashboard_port() {
+        let json = dashboard_capability(&build_dashboard_url(5600, None));
+        assert!(json.contains("\"http://localhost:5600/*\""), "{json}");
+        assert!(json.contains("\"http://127.0.0.1:5600/*\""), "{json}");
+        assert!(!json.contains(":*"), "{json}");
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid capability");
+        assert_eq!(parsed["windows"][0], "main");
+        assert_eq!(parsed["local"], false);
+
+        // A non-default port is carried through instead of widening the grant.
+        let json = dashboard_capability(&build_dashboard_url(5699, None));
+        assert!(json.contains("\"http://localhost:5699/*\""), "{json}");
+        assert!(json.contains("\"http://127.0.0.1:5699/*\""), "{json}");
     }
 
     #[test]
