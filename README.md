@@ -107,7 +107,7 @@ opt in.
 **Key settings:**
 - `port` — Server port (default: 5600)
 - `discovery_paths` — Additional directories to search for `aw-*` module binaries
-- `autostart.enabled` — Register for OS autostart on login. Also toggleable at runtime via **Start at login** in the tray menu, which updates the OS registration *and* writes the new value back here. Editing it by hand takes effect on the next launch, in both directions (setting it to `false` removes an already-registered login item)
+- `autostart.enabled` — Records whether the app starts at login. Change it through **Start at login** in the tray menu or your OS settings. The tray toggle updates both the OS registration and this value. On later launches the OS setting wins, so a manual edit to this value is overwritten
 - `autostart.minimized` — Start minimized to tray (if `false`, opens dashboard on launch)
 - `autostart.modules` — Modules to start automatically. Each entry can be a string (`"aw-watcher-afk"`) or an object with args (`{ name = "aw-sync", args = "daemon" }`). `aw-sync` is opt-in, not included by default
 - `module_args` — Default args by module name, used when a module is launched from the tray menu or restarted after a crash. Lets you set args for a module *without* adding it to `autostart.modules` (e.g. `aw-watcher-vscode` above is launched manually from the tray, but still gets its args). If a module is listed in both places, the inline args on its `autostart.modules` entry take precedence.
