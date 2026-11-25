@@ -565,12 +565,19 @@ fn update_prompt_body(version: &str, notes: Option<&str>) -> String {
 }
 
 /// Make dynamic text safe for a message dialog. rfd converts the description to a
-/// `CString` with `.unwrap()`, so drop interior NULs. On Linux, its GTK3 backend also hands
-/// the description to `gtk_message_dialog_format_secondary_text` as a printf format
-/// string, so every `%` must be doubled to display literally.
+/// `CString` with `.unwrap()`, so drop interior NULs. Its GTK3 backend (built for Linux and
+/// the BSDs, mirroring rfd's own target list) also hands the description to
+/// `gtk_message_dialog_format_secondary_text` as a printf format string, so every `%` must
+/// be doubled to display literally.
 fn dialog_text(text: String) -> String {
     let text = text.replace('\0', "");
-    if cfg!(target_os = "linux") {
+    if cfg!(any(
+        target_os = "linux",
+        target_os = "freebsd",
+        target_os = "dragonfly",
+        target_os = "netbsd",
+        target_os = "openbsd"
+    )) {
         text.replace('%', "%%")
     } else {
         text
@@ -2080,7 +2087,13 @@ mod tests {
     /// rfd's GTK3 backend passes the dialog description to
     /// `gtk_message_dialog_format_secondary_text` as the printf format string, so a `%s`
     /// in release notes reads garbage off the stack (and `%n` writes through it).
-    #[cfg(target_os = "linux")]
+    #[cfg(any(
+        target_os = "linux",
+        target_os = "freebsd",
+        target_os = "dragonfly",
+        target_os = "netbsd",
+        target_os = "openbsd"
+    ))]
     #[test]
     fn update_prompt_escapes_printf_directives_in_release_notes() {
         let body = update_prompt_body("0.15.0", Some("50% faster %s%s%n"));
