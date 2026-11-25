@@ -811,7 +811,10 @@ fn parse_config_bytes(bytes: &[u8]) -> Result<UserConfig, String> {
 fn load_existing_config(path: &Path, malformed: impl FnOnce()) -> UserConfig {
     let bytes = std::fs::read(path).expect("Failed to read config file");
     match parse_config_bytes(&bytes) {
-        Ok(config) => config,
+        Ok(mut config) => {
+            dirs::migrate_legacy_discovery_paths(&mut config.discovery_paths);
+            config
+        }
         Err(e) => {
             warn!("Failed to parse config file: {}. Using default config.", e);
             malformed();
