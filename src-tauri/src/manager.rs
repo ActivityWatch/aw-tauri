@@ -336,6 +336,13 @@ impl ManagerState {
                 false
             }
             Some(module) => {
+                // aw-notify's fallback can fail after Started was reported for its
+                // now-reaped --output-only child. No Stopped follows that path, so
+                // clear the dead pid here rather than leave the tray running and
+                // allow a later stop to signal a potentially recycled pid.
+                module.run_state = Some(false);
+                module.pid = None;
+                module.started_at = None;
                 module.starting = false;
                 let retry = module.start_coalesced && !module.pending_shutdown;
                 module.start_coalesced = false;
@@ -2199,6 +2206,24 @@ mod tests {
         );
         s.started_module("aw-watcher", 999_999_999, None);
         assert!(!s.modules["aw-watcher"].starting);
+    }
+
+    #[test]
+    fn failed_notify_fallback_clears_the_reaped_process_and_allows_a_retry() {
+        let mut s = state_with_module("aw-notify", 0, None);
+        // The --output-only child was reported Started, then reaped with exit 2.
+        // Its generic fallback fails to spawn, so there will be no Stopped message.
+        s.started_module("aw-notify", 999_999_991, None);
+        let generation = s.modules["aw-notify"].generation;
+        s.spawn_failed("aw-notify", generation);
+        let m = &s.modules["aw-notify"];
+        assert_eq!(m.run_state, Some(false));
+        assert_eq!(m.pid, None, "never signal the reaped child's recycled pid");
+        assert!(m.started_at.is_none());
+        assert!(!m.starting);
+        assert_eq!(s.handle_system_click("aw-notify"), Some(true));
+        assert_eq!(s.modules["aw-notify"].generation, generation + 1);
+        assert!(s.modules["aw-notify"].starting);
     }
 
     #[test]
