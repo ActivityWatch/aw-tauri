@@ -168,7 +168,7 @@ pub fn run() {
                 *control_flow = ControlFlow::Exit;
             }
             Event::UserEvent(MiniEvent::ServerFailed(msg)) => {
-                show_notification("ActivityWatch Error", &format!("Server failed: {msg}"));
+                show_notification("ActivityWatch could not start", &msg);
                 if let Ok(mut state) = manager_state.lock() {
                     state.stop_modules();
                 }

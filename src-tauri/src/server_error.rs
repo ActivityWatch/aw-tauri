@@ -155,14 +155,32 @@ mod tests {
     }
 
     #[test]
-    fn redirects_and_oversized_responses_stay_generic() {
-        for reply in [
-            "HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:1/\r\nContent-Length: 0\r\n\r\n"
-                .to_owned(),
-            response(&"x".repeat(4097)),
-        ] {
-            with_response(reply, |port| assert!(!probe_activitywatch(port)));
-        }
+    fn redirects_to_activitywatch_stay_generic() {
+        let mut identified = false;
+        with_response(
+            response(r#"{"hostname":"local","version":"v0.14.0","testing":false}"#),
+            |destination| {
+                with_response(
+                    format!(
+                        "HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:{destination}/api/0/info\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                    ),
+                    |port| identified = probe_activitywatch(port),
+                );
+                if !identified {
+                    // Consume the unused destination and verify that following
+                    // the redirect really would identify an ActivityWatch server.
+                    assert!(probe_activitywatch(destination));
+                }
+            },
+        );
+        assert!(!identified, "the probe must not follow redirects");
+    }
+
+    #[test]
+    fn oversized_responses_stay_generic() {
+        with_response(response(&"x".repeat(4097)), |port| {
+            assert!(!probe_activitywatch(port));
+        });
     }
 
     #[test]
