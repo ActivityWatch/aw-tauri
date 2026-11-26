@@ -34,6 +34,14 @@ enum MiniEvent {
 pub fn run() {
     let cli_args = crate::get_cli_args();
 
+    // Pick the notification sender up front. Otherwise notify-rust resolves one on the first
+    // notification by running an AppleScript lookup for an app named "use_default", on the main
+    // thread, which can spin at full CPU indefinitely and freeze the tray.
+    #[cfg(target_os = "macos")]
+    if let Err(e) = notify_rust::set_application(MACOS_BUNDLE_ID) {
+        warn!("Failed to set notification sender to {MACOS_BUNDLE_ID}: {e}");
+    }
+
     let user_config = crate::get_config();
 
     let (dashboard_url, server_state, aw_config, _) =
@@ -42,6 +50,9 @@ pub fn run() {
             Err(message) => {
                 error!("{}", message);
                 eprintln!("{}", message);
+                if message.is_port_conflict() {
+                    show_notification("ActivityWatch could not start", &message.to_string());
+                }
                 std::process::exit(1);
             }
         };
@@ -54,21 +65,15 @@ pub fn run() {
     );
     info!("{}", startup_message(&dashboard_url));
 
-    // Pick the notification sender up front. Otherwise notify-rust resolves one on the first
-    // notification by running an AppleScript lookup for an app named "use_default", on the main
-    // thread, which can spin at full CPU indefinitely and freeze the tray.
-    #[cfg(target_os = "macos")]
-    if let Err(e) = notify_rust::set_application(MACOS_BUNDLE_ID) {
-        warn!("Failed to set notification sender to {MACOS_BUNDLE_ID}: {e}");
-    }
-
     let event_loop = EventLoopBuilder::<MiniEvent>::with_user_event().build();
     let server_proxy = event_loop.create_proxy();
     tauri::async_runtime::spawn(async move {
         match rocket_handle.await {
             Ok(Err(e)) => {
                 error!("Server exited with error: {e:?}");
-                let _ = server_proxy.send_event(MiniEvent::ServerFailed(format!("{e:?}")));
+                let _ = server_proxy.send_event(MiniEvent::ServerFailed(
+                    crate::server_error::StartupError::from_launch(server_port, &e).to_string(),
+                ));
             }
             Err(join_err) => {
                 error!("Rocket task panicked: {join_err:?}");
@@ -163,7 +168,7 @@ pub fn run() {
                 *control_flow = ControlFlow::Exit;
             }
             Event::UserEvent(MiniEvent::ServerFailed(msg)) => {
-                show_notification("ActivityWatch Error", &format!("Server failed: {msg}"));
+                show_notification("ActivityWatch could not start", &msg);
                 if let Ok(mut state) = manager_state.lock() {
                     state.stop_modules();
                 }

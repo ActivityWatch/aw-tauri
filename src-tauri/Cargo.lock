@@ -480,6 +480,8 @@ dependencies = [
  "open",
  "png 0.17.16",
  "quick-xml",
+ "reqwest 0.12.28",
+ "rocket",
  "rust-embed",
  "rust-embed-impl",
  "rust-embed-utils",
