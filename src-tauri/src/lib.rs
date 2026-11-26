@@ -31,6 +31,7 @@ mod mini;
 mod module_alert_ui;
 mod profile;
 mod release_version;
+mod server_error;
 mod updater_ui;
 mod webkit_env;
 
@@ -888,7 +889,7 @@ fn run_daemon() {
         .unwrap_or(if testing { 5666 } else { config.port });
 
     if !is_port_available(port).expect("Failed to check port availability") {
-        eprintln!("Error: port {} is already in use", port);
+        eprintln!("{}", server_error::StartupError::port_conflict(port));
         std::process::exit(1);
     }
 
@@ -988,28 +989,65 @@ fn run_daemon() {
     }
 }
 
+/// Port conflicts notify instead of opening a modal, including login launches.
+fn show_server_error(app: &AppHandle, failure: server_error::StartupError) {
+    error!("{failure}");
+    if failure.is_port_conflict() {
+        // The Tauri plugin returns before sending; deliver synchronously before
+        // exiting or the process can disappear before the notification is sent.
+        let mut notification = notify_rust::Notification::new();
+        notification
+            .summary("ActivityWatch could not start")
+            .body(&failure.to_string());
+        #[cfg(target_os = "macos")]
+        if let Err(error) = notify_rust::set_application(if tauri::is_dev() {
+            "com.apple.Terminal"
+        } else {
+            &app.config().identifier
+        }) {
+            warn!("Failed to set notification sender: {error}");
+        }
+        #[cfg(windows)]
+        if !tauri::is_dev() {
+            notification.app_id(&app.config().identifier);
+        }
+        if let Err(error) = notification.show() {
+            warn!("Failed to show startup notification: {error}");
+        }
+        app.exit(1);
+    } else {
+        let app = app.clone();
+        app.clone()
+            .dialog()
+            .message(failure.to_string())
+            .kind(MessageDialogKind::Error)
+            .title("ActivityWatch could not start")
+            .show(move |_| app.exit(1));
+    }
+}
+
 /// Prepare the aw-server state, config, and dashboard URL.
 /// Shared by mini mode and the Tauri GUI mode.
 pub(crate) fn prepare_aw_server(
     user_config: &UserConfig,
     cli_args: &CliArgs,
-) -> Result<(Url, ServerState, AWConfig, String), String> {
+) -> Result<(Url, ServerState, AWConfig, String), server_error::StartupError> {
     let testing = cli_args.testing;
     let legacy_import = false;
-
-    let mut aw_config = aw_server::config::create_config(&cli_args.profile, None);
 
     // Port priority: CLI flag > testing default (5666) > config file
     let port = cli_args
         .port
         .unwrap_or(if testing { 5666 } else { user_config.port });
-    aw_config.port = port;
 
     // Check port availability before opening the datastore — opening the SQLite
     // store acquires a lock, so bail on a busy port first (matches run_daemon's order).
     if !is_port_available(port).map_err(|e| format!("Failed to check port availability: {e}"))? {
-        return Err(format!("Port {} is already in use", port));
+        return Err(server_error::StartupError::port_conflict(port));
     }
+
+    let mut aw_config = aw_server::config::create_config(&cli_args.profile, None);
+    aw_config.port = port;
 
     let db_path = aw_server::dirs::db_path(&cli_args.profile)
         .map_err(|_| "Failed to get db path".to_string())?
@@ -1027,7 +1065,9 @@ pub(crate) fn prepare_aw_server(
             info!("Using webui path: {}", path_str);
             Some(asset_path)
         } else {
-            return Err("Path set via env var AW_WEBUI_DIR does not exist".to_string());
+            return Err("Path set via env var AW_WEBUI_DIR does not exist"
+                .to_string()
+                .into());
         }
     } else {
         info!("Using bundled assets");
@@ -1328,14 +1368,9 @@ pub fn run() {
                     match prepare_aw_server(user_config, cli_args) {
                         Ok(server) => server,
                         Err(message) => {
-                            // Show the error and exit once it's dismissed. Panicking here, as
-                            // before, killed the process before the dialog ever appeared.
-                            error!("{message}");
-                            app.dialog()
-                                .message(message)
-                                .kind(MessageDialogKind::Error)
-                                .title("Error")
-                                .show(|_| std::process::exit(1));
+                            // Deliver the notification (or dismiss the error dialog)
+                            // before exiting, so startup failures remain visible.
+                            show_server_error(app.handle(), message);
                             return Ok(());
                         }
                     };
@@ -1461,25 +1496,33 @@ pub fn run() {
                 let server_app = app.handle().clone();
                 let shutdown_datastore = notify_datastore.clone();
                 tauri::async_runtime::spawn(async move {
-                    let exit_code = match rocket_handle.await {
+                    let failure = match rocket_handle.await {
                         Ok(Ok(_)) => {
                             info!("Server shut down, exiting");
-                            0
+                            None
                         }
                         Ok(Err(e)) => {
                             error!("Server exited with error: {e:?}");
-                            1
+                            Some(server_error::StartupError::from_launch(server_port, &e))
                         }
                         Err(join_err) => {
                             error!("Rocket task panicked: {join_err:?}");
-                            1
+                            Some(format!("ActivityWatch server stopped unexpectedly: {join_err}").into())
                         }
                     };
                     if let Ok(mut state) = server_manager_state.lock() {
                         state.stop_modules();
                     }
                     close_datastore(&shutdown_datastore);
-                    server_app.exit(exit_code);
+                    if let Some(failure) = failure {
+                        if failure.is_port_conflict() {
+                            show_server_error(&server_app, failure);
+                        } else {
+                            server_app.exit(1);
+                        }
+                    } else {
+                        server_app.exit(0);
+                    }
                 });
 
                 let open = MenuItem::with_id(app, "open", "Open Dashboard", true, None::<&str>)
@@ -1737,6 +1780,21 @@ mod tests {
             .collect();
         assert!(parse_config_bytes(&utf16).is_err());
         assert!(parse_config_bytes(b"port = 5600\n\xff").is_err());
+    }
+
+    #[test]
+    fn occupied_port_explains_how_to_recover() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let args = crate::CliArgs {
+            port: Some(listener.local_addr().unwrap().port()),
+            profile: format!("port-conflict-test-{}", std::process::id()),
+            ..crate::CliArgs::default()
+        };
+        let error = match crate::prepare_aw_server(&UserConfig::default(), &args) {
+            Err(error) => error.to_string(),
+            Ok(_) => panic!("occupied port was accepted"),
+        };
+        assert!(error.contains("Quit"), "no recovery advice: {error}");
     }
 
     #[test]

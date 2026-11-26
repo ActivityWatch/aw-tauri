@@ -265,13 +265,19 @@ The repo uses [pre-commit](https://pre-commit.com/) with these hooks:
 cd src-tauri && cargo test
 ```
 
-Currently tests cover directory resolution (`dirs.rs`). More test coverage is welcome.
+The Linux port-conflict smoke test runs a built binary against a local test server and verifies notification delivery before exit. It requires `python3-dbus`, `python3-gi`, `dbus-run-session` and Xvfb; the script starts an isolated bus and home directory:
+
+```sh
+/usr/bin/python3 tests/port-conflict-linux.py /absolute/path/to/aw-tauri
+```
 
 ## Troubleshooting
 
 ### Port already in use
 
-If aw-tauri fails to start with "Port 5600 is already in use", another ActivityWatch server (or aw-tauri instance) is running. Stop it first, or change the `port` in your config.
+If another application owns the server port, aw-tauri shows a notification and exits. When the local `/api/0/info` endpoint identifies an ActivityWatch server, the notification suggests quitting the other instance (such as aw-qt). Otherwise, it suggests stopping the application or choosing a different `--port`. The same notification handles a server that takes the port while aw-tauri is starting.
+
+If this happens at login, disable one of the two ActivityWatch startup entries. aw-tauri does not change aw-qt's startup settings. Port conflicts use notifications for both manual and login launches, so they do not open a modal during login.
 
 ### Modules not discovered
 
