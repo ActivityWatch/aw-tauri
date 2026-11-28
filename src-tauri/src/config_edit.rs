@@ -358,10 +358,13 @@ pub(crate) fn set_module_autostart_from(
                     }
                     array_push(modules, name);
                 } else {
-                    // A stopped watcher missing from a seeded list (e.g. after
-                    // discovery_paths changed) is still saved as stopped: left
-                    // unset, the defaults could bring it back on a later launch.
-                    if matches.is_empty() && !seeded {
+                    // A stopped default watcher missing from a seeded list (e.g.
+                    // after discovery_paths changed) is still saved as stopped:
+                    // left unset, the defaults could bring it back on a later
+                    // launch. A watcher the defaults never pick (e.g. a
+                    // hand-started aw-watcher-input) is not saved: pinning the
+                    // list would freeze today's platform defaults instead.
+                    if matches.is_empty() && (!seeded || !crate::is_possible_default_module(name)) {
                         return Ok(None);
                     }
                     for &i in matches.iter().rev() {
@@ -903,13 +906,14 @@ aw-watcher-input = "--poll-time 60"
 
             // Already running: nothing to write.
             assert_eq!(set_module_autostart(source, &first, true), Ok(None));
-            // Stopping a watcher the defaults leave out pins the defaults, so it
-            // can't come back if a later launch's defaults include it.
-            let pinned = set_module_autostart(source, "aw-watcher-input", false)
-                .expect("edit should succeed")
-                .expect("the stop must be saved");
-            assert_eq!(modules_of(&pinned), defaults);
-            assert!(pinned.contains("modules"), "{pinned}");
+            // Stopping a watcher the defaults never pick writes nothing: the
+            // defaults can't bring it back, so pinning the list would only
+            // freeze today's platform defaults (e.g. across an X11→Wayland
+            // switch).
+            assert_eq!(
+                set_module_autostart(source, "aw-watcher-input", false),
+                Ok(None)
+            );
         }
     }
 
@@ -959,15 +963,16 @@ aw-watcher-input = "--poll-time 60"
             let mut more = defaults.clone();
             more.push("aw-watcher-input".into());
             assert_eq!(modules_of(&started), more, "{started}");
-            let stopped =
-                set_module_autostart_from(source, "aw-test-deleted", false, Some(startup))
-                    .expect("edit should succeed")
-                    .expect("the stop pins the file's defaults");
-            assert_eq!(modules_of(&stopped), defaults, "{stopped}");
-            assert!(
-                stopped.contains("--new") && !stopped.contains("--old"),
-                "the deleted list's args must not come back: {stopped}"
+            // `aw-test-deleted` is not a watcher the defaults can pick, so the
+            // stop writes nothing: no list is pinned and the deleted entry's
+            // args stay out of the file's live config.
+            assert_eq!(
+                set_module_autostart_from(source, "aw-test-deleted", false, Some(startup)),
+                Ok(None),
+                "a watcher the defaults never pick must not pin the defaults"
             );
+            assert_eq!(parse(source).module_args["aw-test-deleted"], "--new");
+            assert!(!source.contains("--old"));
         }
     }
 }

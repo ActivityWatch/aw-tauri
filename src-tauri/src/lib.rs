@@ -793,6 +793,15 @@ thread_local! {
     static DEFAULT_MODULE_LOOKUPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
+/// Watchers the platform defaults can select on some platform or session.
+///
+/// A tray stop pins the file's `modules` list only when the stopped watcher is
+/// one of these: any other name can never come back through the defaults, so
+/// pinning for it would only freeze today's platform defaults.
+pub(crate) fn is_possible_default_module(name: &str) -> bool {
+    matches!(name, "aw-watcher-afk" | "aw-watcher-window" | "aw-awatcher")
+}
+
 /// The platform's first-run autostart watchers.
 fn default_autostart_modules(discovery_paths: &[PathBuf]) -> Vec<ModuleEntry> {
     #[cfg(test)]
@@ -910,6 +919,23 @@ mod config_default_tests {
         let config: UserConfig = toml::from_str(&source).expect("config should parse");
         let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(module_names(&config.autostart), vec!["aw-awatcher"]);
+    }
+
+    /// `is_possible_default_module` gates whether a tray stop pins the file's
+    /// defaults, so it must cover every watcher the defaults can pick.
+    #[test]
+    fn every_platform_default_is_a_possible_default_module() {
+        for awatcher_available in [false, true] {
+            for is_wayland in [false, true] {
+                for name in super::default_linux_modules(awatcher_available, is_wayland) {
+                    assert!(super::is_possible_default_module(name), "{name}");
+                }
+            }
+        }
+        for name in ["aw-watcher-afk", "aw-watcher-window"] {
+            assert!(super::is_possible_default_module(name), "{name}");
+        }
+        assert!(!super::is_possible_default_module("aw-watcher-input"));
     }
 }
 
