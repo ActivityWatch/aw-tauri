@@ -963,18 +963,49 @@ aw-watcher-input = "--poll-time 60"
             let mut more = defaults.clone();
             more.push("aw-watcher-input".into());
             assert_eq!(modules_of(&started), more, "{started}");
-            // `aw-test-deleted` is not a watcher the defaults can pick, so the
-            // stop writes nothing: no list is pinned and the deleted entry's
-            // args stay out of the file's live config. Stop from `started`
-            // (what the app has on disk after the start edit), and assert on
-            // that written result rather than the untouched input.
+            // Stopping the deleted entry writes nothing, and its `--old` args
+            // stay out of the written config. `started` already lists its
+            // modules, so this is the "list already present" path
+            // (`seeded == false`), not the possible-default gate — see
+            // `stopping_a_missing_module_pins_only_a_possible_default`.
             assert_eq!(
                 set_module_autostart_from(&started, "aw-test-deleted", false, Some(startup)),
                 Ok(None),
-                "a watcher the defaults never pick must not pin the defaults"
+                "stopping an absent module on a pinned list writes nothing"
             );
             assert_eq!(parse(&started).module_args["aw-test-deleted"], "--new");
             assert!(!started.contains("--old"));
         }
+    }
+
+    /// On a file with no modules list the stop seeds one, so the
+    /// `is_possible_default_module` gate is what decides whether anything is
+    /// written. Same shape, same missing entry, opposite outcomes for a name
+    /// the defaults could pick vs one they never pick.
+    #[test]
+    fn stopping_a_missing_module_pins_only_a_possible_default() {
+        let bare = "port = 5600\ndiscovery_paths = []\n";
+        let mut startup = parse(bare);
+        startup.autostart.modules = vec![ModuleEntry::Simple("aw-test-startup-only".into())];
+        assert!(startup.autostart.modules_defaulted);
+
+        // A watcher the defaults can select is saved as stopped: pin the seeded
+        // list so a later launch cannot bring it back.
+        let pinned = set_module_autostart_from(bare, "aw-watcher-window", false, Some(&startup))
+            .expect("edit should succeed")
+            .expect("a possible default must pin the seeded list");
+        assert_eq!(
+            modules_of(&pinned),
+            vec!["aw-test-startup-only".to_string()],
+            "{pinned}"
+        );
+
+        // A watcher the defaults never pick writes nothing: pinning for it
+        // would only freeze today's platform defaults.
+        assert_eq!(
+            set_module_autostart_from(bare, "aw-test-deleted", false, Some(&startup)),
+            Ok(None),
+            "a watcher the defaults never pick must not pin the defaults"
+        );
     }
 }

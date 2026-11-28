@@ -331,28 +331,34 @@ fn write_formatted_config(config: &UserConfig, path: &Path) -> Result<(), std::i
     output.push_str(&format!("enabled = {}\n", config.autostart.enabled));
     output.push_str(&format!("minimized = {}\n", config.autostart.minimized));
 
-    // Format modules with one per line
-    output.push_str("modules = [\n");
-    for module in &config.autostart.modules {
-        match module {
-            ModuleEntry::Simple(name) => {
-                output.push_str(&format!("  \"{}\",\n", toml_escape(name)));
-            }
-            ModuleEntry::Full { name, args } => {
-                output.push_str(&format!(
-                    "  {{ name = \"{}\", args = \"{}\" }},\n",
-                    toml_escape(name),
-                    toml_escape(args)
-                ));
+    // Only write `modules` when the config carries an explicit list. A file
+    // with no list parses to today's platform defaults (`modules_defaulted`),
+    // and a full rewrite must not materialise those: it would freeze the
+    // defaults (e.g. keep the X11 watchers after an X11→Wayland switch) and
+    // discard the user's comments. Leaving the key out keeps the lookup lazy.
+    if !config.autostart.modules_defaulted {
+        output.push_str("modules = [\n");
+        for module in &config.autostart.modules {
+            match module {
+                ModuleEntry::Simple(name) => {
+                    output.push_str(&format!("  \"{}\",\n", toml_escape(name)));
+                }
+                ModuleEntry::Full { name, args } => {
+                    output.push_str(&format!(
+                        "  {{ name = \"{}\", args = \"{}\" }},\n",
+                        toml_escape(name),
+                        toml_escape(args)
+                    ));
+                }
             }
         }
-    }
 
-    if !config.autostart.modules.is_empty() {
-        output.truncate(output.len() - 2); // Remove last comma and newline
-        output.push('\n'); // Add back just the newline
+        if !config.autostart.modules.is_empty() {
+            output.truncate(output.len() - 2); // Remove last comma and newline
+            output.push('\n'); // Add back just the newline
+        }
+        output.push_str("]\n\n");
     }
-    output.push_str("]\n\n");
 
     // Add updates section
     output.push_str("[updates]\n");
@@ -1025,7 +1031,11 @@ pub(crate) fn get_config() -> &'static UserConfig {
         } else {
             FIRST_RUN.set(true).expect("failed to set FIRST_RUN");
 
-            let config = UserConfig::default();
+            // First run records the resolved watchers explicitly so the new
+            // file documents what will start. A later full rewrite preserves an
+            // absent list instead (see `write_formatted_config`).
+            let mut config = UserConfig::default();
+            config.autostart.modules_defaulted = false;
             create_dir_all(config_path.parent().unwrap()).expect("Failed to create config dir");
             write_formatted_config(&config, &config_path).expect("Failed to write config file");
             config

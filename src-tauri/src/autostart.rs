@@ -770,6 +770,35 @@ auto_download = false
     }
 
     #[test]
+    fn full_rewrite_keeps_a_defaulted_modules_list_out_of_the_file() {
+        // A quoted header defeats both patchers, forcing the full rewrite. The
+        // file has no `modules` key, so the rewrite must not materialise the
+        // platform defaults: that would freeze them (e.g. keep the X11 watchers
+        // after an X11→Wayland switch) and drop the user's comments.
+        let source =
+            "port = 5600\ndiscovery_paths = []\n\n[\"autostart\"]\nenabled = true\nminimized = false\n";
+        let path = write_temp_entry("config-defaulted-modules", source);
+        assert!(
+            read_and_patch(&path, false).is_none(),
+            "must exercise fallback"
+        );
+
+        persist_enabled_at(&path, false).expect("persist through full rewrite");
+        let rewritten = fs::read_to_string(&path).unwrap();
+        fs::remove_file(&path).unwrap();
+        let actual: toml::Value = toml::from_str(&rewritten).expect("rewritten config must parse");
+        assert_eq!(
+            actual["autostart"]["enabled"],
+            toml::Value::Boolean(false),
+            "the toggle must land: {rewritten}"
+        );
+        assert!(
+            !rewritten.contains("modules"),
+            "a defaulted list must stay implicit: {rewritten}"
+        );
+    }
+
+    #[test]
     fn missing_enabled_key_is_inserted_in_place() {
         let in_table = "port = 5600\ndiscovery_paths = []\n# top comment\nunknown_key = 1\n\n[autostart]\n# keep\nminimized = false\nmodules = []\n";
         let no_table = "port = 5600\ndiscovery_paths = []\n# top comment\nunknown_key = 1\n";
