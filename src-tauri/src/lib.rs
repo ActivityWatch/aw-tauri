@@ -331,28 +331,34 @@ fn write_formatted_config(config: &UserConfig, path: &Path) -> Result<(), std::i
     output.push_str(&format!("enabled = {}\n", config.autostart.enabled));
     output.push_str(&format!("minimized = {}\n", config.autostart.minimized));
 
-    // Format modules with one per line
-    output.push_str("modules = [\n");
-    for module in &config.autostart.modules {
-        match module {
-            ModuleEntry::Simple(name) => {
-                output.push_str(&format!("  \"{}\",\n", toml_escape(name)));
-            }
-            ModuleEntry::Full { name, args } => {
-                output.push_str(&format!(
-                    "  {{ name = \"{}\", args = \"{}\" }},\n",
-                    toml_escape(name),
-                    toml_escape(args)
-                ));
+    // Only write `modules` when the config carries an explicit list. A file
+    // with no list parses to today's platform defaults (`modules_defaulted`),
+    // and a full rewrite must not materialise those: it would freeze the
+    // defaults (e.g. keep the X11 watchers after an X11→Wayland switch) and
+    // discard the user's comments. Leaving the key out keeps the lookup lazy.
+    if !config.autostart.modules_defaulted {
+        output.push_str("modules = [\n");
+        for module in &config.autostart.modules {
+            match module {
+                ModuleEntry::Simple(name) => {
+                    output.push_str(&format!("  \"{}\",\n", toml_escape(name)));
+                }
+                ModuleEntry::Full { name, args } => {
+                    output.push_str(&format!(
+                        "  {{ name = \"{}\", args = \"{}\" }},\n",
+                        toml_escape(name),
+                        toml_escape(args)
+                    ));
+                }
             }
         }
-    }
 
-    if !config.autostart.modules.is_empty() {
-        output.truncate(output.len() - 2); // Remove last comma and newline
-        output.push('\n'); // Add back just the newline
+        if !config.autostart.modules.is_empty() {
+            output.truncate(output.len() - 2); // Remove last comma and newline
+            output.push('\n'); // Add back just the newline
+        }
+        output.push_str("]\n\n");
     }
-    output.push_str("]\n\n");
 
     // Add updates section
     output.push_str("[updates]\n");
@@ -712,11 +718,16 @@ impl ModuleEntry {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Read from the file through [`AutostartConfigFile`], so a missing
+/// `[autostart]` table or key takes its default instead of failing the parse.
+#[derive(Debug, Clone, Serialize)]
 pub struct AutostartConfig {
     pub enabled: bool,
     pub minimized: bool,
     pub modules: Vec<ModuleEntry>,
+    /// `modules` are the defaults looked up because the file listed none.
+    #[serde(skip)]
+    pub modules_defaulted: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -740,6 +751,7 @@ impl Default for UpdatesConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(from = "UserConfigFile")]
 pub struct UserConfig {
     pub port: u16,
     pub discovery_paths: Vec<PathBuf>,
@@ -751,33 +763,222 @@ pub struct UserConfig {
     pub updates: UpdatesConfig,
 }
 
+/// `UserConfig` as written in the file. A missing `[autostart]` table or key
+/// takes its default; without this, deleting the `modules = [...]` line made
+/// the whole file fail to parse and every setting, port included, fell back to
+/// the defaults.
+#[derive(Deserialize)]
+struct UserConfigFile {
+    port: u16,
+    discovery_paths: Vec<PathBuf>,
+    #[serde(default)]
+    autostart: AutostartConfigFile,
+    #[serde(default)]
+    module_args: BTreeMap<String, String>,
+    #[serde(default)]
+    updates: UpdatesConfig,
+}
+
+/// `[autostart]` as written in the file. `modules` stays `None` when missing so
+/// the default watchers are looked up only then, and in the file's own
+/// `discovery_paths` (where the manager will look for them).
+#[derive(Deserialize)]
+#[serde(default)]
+struct AutostartConfigFile {
+    enabled: bool,
+    minimized: bool,
+    modules: Option<Vec<ModuleEntry>>,
+}
+
+impl Default for AutostartConfigFile {
+    fn default() -> Self {
+        AutostartConfigFile {
+            enabled: true,
+            minimized: true,
+            modules: None,
+        }
+    }
+}
+
+impl From<UserConfigFile> for UserConfig {
+    fn from(file: UserConfigFile) -> Self {
+        let modules_defaulted = file.autostart.modules.is_none();
+        let modules = file
+            .autostart
+            .modules
+            .unwrap_or_else(|| default_autostart_modules(&file.discovery_paths));
+        UserConfig {
+            port: file.port,
+            discovery_paths: file.discovery_paths,
+            autostart: AutostartConfig {
+                enabled: file.autostart.enabled,
+                minimized: file.autostart.minimized,
+                modules,
+                modules_defaulted,
+            },
+            module_args: file.module_args,
+            updates: file.updates,
+        }
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// How many times this thread computed the default watchers (each one
+    /// scans directories and `$PATH` on Linux).
+    static DEFAULT_MODULE_LOOKUPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Watchers the platform defaults can select on some platform or session.
+///
+/// A tray stop pins the file's `modules` list only when the stopped watcher is
+/// one of these: any other name can never come back through the defaults, so
+/// pinning for it would only freeze today's platform defaults.
+pub(crate) fn is_possible_default_module(name: &str) -> bool {
+    matches!(name, "aw-watcher-afk" | "aw-watcher-window" | "aw-awatcher")
+}
+
+/// The platform's first-run autostart watchers.
+fn default_autostart_modules(discovery_paths: &[PathBuf]) -> Vec<ModuleEntry> {
+    #[cfg(test)]
+    DEFAULT_MODULE_LOOKUPS.with(|n| n.set(n.get() + 1));
+    // Build default modules list based on platform
+    #[cfg(target_os = "linux")]
+    let modules = {
+        let is_wayland = env::var("XDG_SESSION_TYPE")
+            .map(|s| s == "wayland")
+            .unwrap_or(false)
+            || env::var("WAYLAND_DISPLAY").is_ok();
+        // Check install-relative paths too: they're searched at runtime
+        // even though they aren't persisted (see dirs::get_discovery_paths).
+        let search: Vec<PathBuf> = discovery_paths
+            .iter()
+            .cloned()
+            .chain(dirs::get_install_discovery_paths())
+            .collect();
+        default_linux_modules(module_available("aw-awatcher", &search), is_wayland)
+    };
+    // On non-Linux platforms, use traditional watchers
+    #[cfg(not(target_os = "linux"))]
+    let modules = {
+        let _ = discovery_paths;
+        vec!["aw-watcher-afk", "aw-watcher-window"]
+    };
+    modules
+        .into_iter()
+        .map(|name| ModuleEntry::Simple(name.to_string()))
+        .collect()
+}
+
+#[cfg(test)]
+mod config_default_tests {
+    use super::{AutostartConfig, ModuleEntry, UserConfig};
+
+    fn names(modules: &[ModuleEntry]) -> Vec<String> {
+        modules.iter().map(|m| m.name().to_string()).collect()
+    }
+
+    fn module_names(config: &AutostartConfig) -> Vec<String> {
+        names(&config.modules)
+    }
+
+    #[test]
+    fn missing_autostart_modules_keeps_the_rest_of_the_config() {
+        let config: UserConfig = toml::from_str(
+            "port = 5666\ndiscovery_paths = []\n[autostart]\nenabled = false\nminimized = false\n",
+        )
+        .expect("a config without autostart.modules should parse");
+        assert_eq!(config.port, 5666);
+        assert!(!config.autostart.enabled);
+        assert!(!config.autostart.minimized);
+        assert_eq!(
+            module_names(&config.autostart),
+            names(&super::default_autostart_modules(&[]))
+        );
+    }
+
+    #[test]
+    fn missing_autostart_table_uses_default_autostart() {
+        let config: UserConfig = toml::from_str("port = 5666\ndiscovery_paths = []\n")
+            .expect("a config without [autostart] should parse");
+        assert_eq!(config.port, 5666);
+        assert!(config.autostart.enabled);
+        assert!(config.autostart.minimized);
+        assert_eq!(
+            module_names(&config.autostart),
+            names(&super::default_autostart_modules(&[]))
+        );
+    }
+
+    #[test]
+    fn listed_modules_skip_the_default_watcher_lookup() {
+        let before = super::DEFAULT_MODULE_LOOKUPS.with(|n| n.get());
+        let config: UserConfig = toml::from_str(
+            "port = 5666\ndiscovery_paths = []\n[autostart]\nmodules = [\"aw-watcher-afk\"]\n",
+        )
+        .expect("config should parse");
+        assert_eq!(module_names(&config.autostart), vec!["aw-watcher-afk"]);
+        assert_eq!(
+            super::DEFAULT_MODULE_LOOKUPS.with(|n| n.get()),
+            before,
+            "reading a config that lists its modules must not scan for default watchers"
+        );
+    }
+
+    /// The fallback must search the file's own `discovery_paths`, which is
+    /// where the manager looks, not the built-in default paths.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn missing_modules_fallback_searches_the_configured_discovery_paths() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let without = super::default_autostart_modules(&[]);
+        if without.iter().any(|m| m.name() == "aw-awatcher") {
+            // Wayland session or aw-awatcher on $PATH: nothing to tell apart.
+            eprintln!("skipping: aw-awatcher is already the default here");
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!(
+            "aw-tauri-test-fallback-discovery-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let module = dir.join("aw-awatcher");
+        std::fs::write(&module, "").unwrap();
+        std::fs::set_permissions(&module, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let source = format!(
+            "port = 5666\ndiscovery_paths = [{}]\n",
+            toml::Value::String(dir.display().to_string())
+        );
+        let config: UserConfig = toml::from_str(&source).expect("config should parse");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(module_names(&config.autostart), vec!["aw-awatcher"]);
+    }
+
+    /// `is_possible_default_module` gates whether a tray stop pins the file's
+    /// defaults, so it must cover every watcher the defaults can pick.
+    #[test]
+    fn every_platform_default_is_a_possible_default_module() {
+        for awatcher_available in [false, true] {
+            for is_wayland in [false, true] {
+                for name in super::default_linux_modules(awatcher_available, is_wayland) {
+                    assert!(super::is_possible_default_module(name), "{name}");
+                }
+            }
+        }
+        for name in ["aw-watcher-afk", "aw-watcher-window"] {
+            assert!(super::is_possible_default_module(name), "{name}");
+        }
+        assert!(!super::is_possible_default_module("aw-watcher-input"));
+    }
+}
+
 impl Default for UserConfig {
     fn default() -> Self {
         let discovery_paths = dirs::get_discovery_paths();
-
-        // Build default modules list based on platform
-        #[cfg(target_os = "linux")]
-        let modules = {
-            let is_wayland = env::var("XDG_SESSION_TYPE")
-                .map(|s| s == "wayland")
-                .unwrap_or(false)
-                || env::var("WAYLAND_DISPLAY").is_ok();
-            // Check install-relative paths too: they're searched at runtime
-            // even though they aren't persisted (see dirs::get_discovery_paths).
-            let search: Vec<PathBuf> = discovery_paths
-                .iter()
-                .cloned()
-                .chain(dirs::get_install_discovery_paths())
-                .collect();
-            default_linux_modules(module_available("aw-awatcher", &search), is_wayland)
-        };
-        // On non-Linux platforms, use traditional watchers
-        #[cfg(not(target_os = "linux"))]
-        let modules = vec!["aw-watcher-afk", "aw-watcher-window"];
-        let modules = modules
-            .into_iter()
-            .map(|name| ModuleEntry::Simple(name.to_string()))
-            .collect();
+        let modules = default_autostart_modules(&discovery_paths);
 
         UserConfig {
             port: 5600,
@@ -786,6 +987,7 @@ impl Default for UserConfig {
                 enabled: true,
                 minimized: true,
                 modules,
+                modules_defaulted: true,
             },
             module_args: BTreeMap::new(),
             updates: UpdatesConfig {
@@ -868,7 +1070,11 @@ pub(crate) fn get_config() -> &'static UserConfig {
         } else {
             FIRST_RUN.set(true).expect("failed to set FIRST_RUN");
 
-            let config = UserConfig::default();
+            // First run records the resolved watchers explicitly so the new
+            // file documents what will start. A later full rewrite preserves an
+            // absent list instead (see `write_formatted_config`).
+            let mut config = UserConfig::default();
+            config.autostart.modules_defaulted = false;
             create_dir_all(config_path.parent().unwrap()).expect("Failed to create config dir");
             write_formatted_config(&config, &config_path).expect("Failed to write config file");
             config

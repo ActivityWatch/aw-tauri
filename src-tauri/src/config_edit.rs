@@ -11,7 +11,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use toml_edit::{Array, ArrayOfTables, DocumentMut, Item, Table, Value};
 
-use crate::{autostart, get_config_path, UserConfig};
+use crate::{autostart, get_config_path, ModuleEntry, UserConfig};
 
 /// Replaces `path` with `contents` atomically: writes a temporary file next to
 /// it, flushes it to disk and renames it over the original (which replaces the
@@ -76,7 +76,7 @@ pub(crate) fn persist_module_autostart(name: &str, enabled: bool) -> Result<(), 
     let path = get_config_path();
     let source = fs::read_to_string(&path)
         .map_err(|e| format!("Failed to read config file {}: {e}", path.display()))?;
-    match set_module_autostart(&source, name, enabled)? {
+    match set_module_autostart_from(&source, name, enabled, Some(crate::get_config()))? {
         Some(updated) => write_atomic(&path, updated)
             .map_err(|e| format!("Failed to write config file {}: {e}", path.display())),
         None => Ok(()),
@@ -265,6 +265,48 @@ fn tables_push(modules: &mut ArrayOfTables, name: &str) {
     modules.push(table);
 }
 
+/// Writes `modules = [...]` with the watchers in effect (the defaults the
+/// config parsed to) when the file doesn't list any, creating `[autostart]` if
+/// needed, so a tray edit starts from what is actually running. Returns
+/// whether it wrote the list.
+fn seed_missing_modules(doc: &mut DocumentMut, modules: &[ModuleEntry]) -> Result<bool, String> {
+    let autostart = doc
+        .entry("autostart")
+        .or_insert(toml_edit::table())
+        .as_table_like_mut()
+        .ok_or("Config file's [autostart] is not a table")?;
+    if autostart.contains_key("modules") {
+        return Ok(false);
+    }
+    let mut array = Array::new();
+    for module in modules {
+        match module {
+            ModuleEntry::Simple(name) => array.push(name.as_str()),
+            ModuleEntry::Full { name, args } => {
+                let mut entry = toml_edit::InlineTable::new();
+                entry.insert("name", name.as_str().into());
+                if !args.is_empty() {
+                    entry.insert("args", args.as_str().into());
+                }
+                array.push(entry);
+            }
+        }
+    }
+    autostart.insert("modules", toml_edit::value(array));
+    Ok(true)
+}
+
+/// [`set_module_autostart_from`], seeding a missing modules list from the
+/// parsed defaults.
+#[cfg(test)]
+pub(crate) fn set_module_autostart(
+    source: &str,
+    name: &str,
+    enabled: bool,
+) -> Result<Option<String>, String> {
+    set_module_autostart_from(source, name, enabled, None)
+}
+
 /// Returns `source` with module `name` added to (`enabled`) or removed from
 /// `[autostart] modules`, or `None` if it is already in that state.
 ///
@@ -275,16 +317,29 @@ fn tables_push(modules: &mut ArrayOfTables, name: &str) {
 /// replacing any value there: the entry's args are what was in effect (they win
 /// over `[module_args]` when both are set), so a later start from the tray keeps
 /// using them.
-pub(crate) fn set_module_autostart(
+///
+/// A file without a modules list is seeded first with the parsed defaults, or
+/// with the watchers started at launch (`startup`, the config read then) if
+/// those were defaults too, looked up in the same `discovery_paths`. A list
+/// the user deleted since launch must not come back.
+pub(crate) fn set_module_autostart_from(
     source: &str,
     name: &str,
     enabled: bool,
+    startup: Option<&UserConfig>,
 ) -> Result<Option<String>, String> {
-    toml::from_str::<UserConfig>(source)
+    let config = toml::from_str::<UserConfig>(source)
         .map_err(|e| format!("Config file is malformed, not updating it: {e}"))?;
     let mut doc: DocumentMut = source
         .parse()
         .map_err(|e| format!("Config file is malformed, not updating it: {e}"))?;
+    let seed = match startup {
+        Some(s) if s.autostart.modules_defaulted && s.discovery_paths == config.discovery_paths => {
+            &s.autostart.modules
+        }
+        _ => &config.autostart.modules,
+    };
+    let seeded = seed_missing_modules(&mut doc, seed)?;
 
     let mut moved_args = None;
     {
@@ -303,7 +358,13 @@ pub(crate) fn set_module_autostart(
                     }
                     array_push(modules, name);
                 } else {
-                    if matches.is_empty() {
+                    // A stopped default watcher missing from a seeded list (e.g.
+                    // after discovery_paths changed) is still saved as stopped:
+                    // left unset, the defaults could bring it back on a later
+                    // launch. A watcher the defaults never pick (e.g. a
+                    // hand-started aw-watcher-input) is not saved: pinning the
+                    // list would freeze today's platform defaults instead.
+                    if matches.is_empty() && (!seeded || !crate::is_possible_default_module(name)) {
                         return Ok(None);
                     }
                     for &i in matches.iter().rev() {
@@ -392,7 +453,7 @@ pub(crate) fn set_module_autostart(
 
 #[cfg(test)]
 mod tests {
-    use super::{set_module_autostart, write_atomic};
+    use super::{set_module_autostart, set_module_autostart_from, write_atomic};
     use crate::{write_formatted_config, AutostartConfig, ModuleEntry, UpdatesConfig, UserConfig};
 
     /// A unique scratch dir under the system temp dir; never the real config dir.
@@ -420,6 +481,7 @@ mod tests {
                     ModuleEntry::Simple("aw-watcher-afk".into()),
                     ModuleEntry::Simple("aw-watcher-window".into()),
                 ],
+                modules_defaulted: false,
             },
             module_args: Default::default(),
             updates: UpdatesConfig::default(),
@@ -808,5 +870,142 @@ aw-watcher-input = "--poll-time 60"
             );
         }
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn missing_modules_list_is_seeded_from_the_defaults() {
+        let with_table =
+            "port = 5600\ndiscovery_paths = []\n\n[autostart]\n# keep me\nenabled = false\n";
+        let no_table = "port = 5600\ndiscovery_paths = []\n# keep me too\n";
+        for source in [with_table, no_table] {
+            let defaults = modules_of(source);
+            let first = defaults[0].clone();
+
+            // Stopping a default watcher from the tray must survive a restart.
+            let stopped = set_module_autostart(source, &first, false)
+                .expect("edit should succeed")
+                .expect("stopping a default watcher must be saved");
+            let rest: Vec<String> = defaults.iter().filter(|m| **m != first).cloned().collect();
+            assert_eq!(modules_of(&stopped), rest);
+            assert!(
+                stopped.contains("# keep me"),
+                "comments must be kept: {stopped}"
+            );
+            assert_eq!(
+                parse(&stopped).autostart.enabled,
+                parse(source).autostart.enabled
+            );
+
+            // Starting another module keeps the defaults running too.
+            let started = set_module_autostart(source, "aw-watcher-input", true)
+                .expect("edit should succeed")
+                .expect("starting a module must be saved");
+            let mut more = defaults.clone();
+            more.push("aw-watcher-input".into());
+            assert_eq!(modules_of(&started), more);
+
+            // Already running: nothing to write.
+            assert_eq!(set_module_autostart(source, &first, true), Ok(None));
+            // Stopping a watcher the defaults never pick writes nothing: the
+            // defaults can't bring it back, so pinning the list would only
+            // freeze today's platform defaults (e.g. across an X11→Wayland
+            // switch).
+            assert_eq!(
+                set_module_autostart(source, "aw-watcher-input", false),
+                Ok(None)
+            );
+        }
+    }
+
+    /// Without a modules list, a tray edit starts from the watchers started at
+    /// launch, not from a fresh lookup that may disagree (e.g. a discovery
+    /// path that went offline since).
+    #[test]
+    fn missing_modules_list_is_seeded_from_the_startup_watchers() {
+        let source = "port = 5600\ndiscovery_paths = []\n";
+        let mut startup = parse(source);
+        startup.autostart.modules = vec![ModuleEntry::Simple("aw-test-startup-only".into())];
+        assert!(startup.autostart.modules_defaulted);
+        let stopped =
+            set_module_autostart_from(source, "aw-test-startup-only", false, Some(&startup))
+                .expect("edit should succeed")
+                .expect("stopping a startup watcher must be saved");
+        assert!(modules_of(&stopped).is_empty(), "{stopped}");
+    }
+
+    /// The startup watchers are reused only if they were defaults looked up in
+    /// the same `discovery_paths`. A list deleted from the file since launch
+    /// (with its inline args) must not come back.
+    #[test]
+    fn startup_watchers_are_not_reused_unless_defaulted_in_the_same_paths() {
+        let source =
+            "port = 5600\ndiscovery_paths = []\n\n[module_args]\naw-test-deleted = \"--new\"\n";
+        let defaults = modules_of(source);
+        let deleted = ModuleEntry::Full {
+            name: "aw-test-deleted".into(),
+            args: "--old".into(),
+        };
+
+        let mut explicit = parse(source);
+        explicit.autostart.modules = vec![deleted.clone()];
+        explicit.autostart.modules_defaulted = false;
+
+        let mut other_paths = parse(source);
+        other_paths.autostart.modules = vec![deleted];
+        other_paths.discovery_paths = vec!["/elsewhere".into()];
+        assert!(other_paths.autostart.modules_defaulted);
+
+        for startup in [&explicit, &other_paths] {
+            let started =
+                set_module_autostart_from(source, "aw-watcher-input", true, Some(startup))
+                    .expect("edit should succeed")
+                    .expect("starting a module must be saved");
+            let mut more = defaults.clone();
+            more.push("aw-watcher-input".into());
+            assert_eq!(modules_of(&started), more, "{started}");
+            // Stopping the deleted entry writes nothing, and its `--old` args
+            // stay out of the written config. `started` already lists its
+            // modules, so this is the "list already present" path
+            // (`seeded == false`), not the possible-default gate — see
+            // `stopping_a_missing_module_pins_only_a_possible_default`.
+            assert_eq!(
+                set_module_autostart_from(&started, "aw-test-deleted", false, Some(startup)),
+                Ok(None),
+                "stopping an absent module on a pinned list writes nothing"
+            );
+            assert_eq!(parse(&started).module_args["aw-test-deleted"], "--new");
+            assert!(!started.contains("--old"));
+        }
+    }
+
+    /// On a file with no modules list the stop seeds one, so the
+    /// `is_possible_default_module` gate is what decides whether anything is
+    /// written. Same shape, same missing entry, opposite outcomes for a name
+    /// the defaults could pick vs one they never pick.
+    #[test]
+    fn stopping_a_missing_module_pins_only_a_possible_default() {
+        let bare = "port = 5600\ndiscovery_paths = []\n";
+        let mut startup = parse(bare);
+        startup.autostart.modules = vec![ModuleEntry::Simple("aw-test-startup-only".into())];
+        assert!(startup.autostart.modules_defaulted);
+
+        // A watcher the defaults can select is saved as stopped: pin the seeded
+        // list so a later launch cannot bring it back.
+        let pinned = set_module_autostart_from(bare, "aw-watcher-window", false, Some(&startup))
+            .expect("edit should succeed")
+            .expect("a possible default must pin the seeded list");
+        assert_eq!(
+            modules_of(&pinned),
+            vec!["aw-test-startup-only".to_string()],
+            "{pinned}"
+        );
+
+        // A watcher the defaults never pick writes nothing: pinning for it
+        // would only freeze today's platform defaults.
+        assert_eq!(
+            set_module_autostart_from(bare, "aw-test-deleted", false, Some(&startup)),
+            Ok(None),
+            "a watcher the defaults never pick must not pin the defaults"
+        );
     }
 }
