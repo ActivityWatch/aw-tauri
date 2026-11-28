@@ -965,14 +965,16 @@ aw-watcher-input = "--poll-time 60"
             assert_eq!(modules_of(&started), more, "{started}");
             // `aw-test-deleted` is not a watcher the defaults can pick, so the
             // stop writes nothing: no list is pinned and the deleted entry's
-            // args stay out of the file's live config.
+            // args stay out of the file's live config. Stop from `started`
+            // (what the app has on disk after the start edit), and assert on
+            // that written result rather than the untouched input.
             assert_eq!(
-                set_module_autostart_from(source, "aw-test-deleted", false, Some(startup)),
+                set_module_autostart_from(&started, "aw-test-deleted", false, Some(startup)),
                 Ok(None),
                 "a watcher the defaults never pick must not pin the defaults"
             );
-            assert_eq!(parse(source).module_args["aw-test-deleted"], "--new");
-            assert!(!source.contains("--old"));
+            assert_eq!(parse(&started).module_args["aw-test-deleted"], "--new");
+            assert!(!started.contains("--old"));
         }
     }
 }
